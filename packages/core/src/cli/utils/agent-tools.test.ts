@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
+  callListedAgentTool,
   formatMissingToolMessage,
   formatToolSchemaIssue,
   getToolNameSuggestions,
@@ -9,6 +11,39 @@ import {
 } from "./agent-tools.ts";
 
 describe("cli/utils/agent-tools", () => {
+  it("preserves a bounded MCP deadline for direct CLI calls and leaves other tools at SDK default", async () => {
+    const calls: Array<{ name: string; timeout: unknown }> = [];
+    const client = {
+      callTool: async (
+        request: { name: string },
+        _schema: unknown,
+        options: { timeout?: number } | undefined,
+      ) => {
+        calls.push({ name: request.name, timeout: options?.timeout });
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    } as unknown as Client;
+    const tools = normalizeListedTools([
+      {
+        name: "browser_operate",
+        inputSchema: { type: "object" },
+        _meta: { "roll/executionTimeoutMs": 1_205_000 },
+      },
+      {
+        name: "other",
+        inputSchema: { type: "object" },
+        _meta: { "roll/executionTimeoutMs": "120000" },
+      },
+    ]);
+    assert.equal(tools[0]?.executionTimeoutMs, 1_205_000);
+    assert.equal(tools[1]?.executionTimeoutMs, undefined);
+    for (const tool of tools) await callListedAgentTool(client, tool, {});
+    assert.deepEqual(calls, [
+      { name: "browser_operate", timeout: 1_205_000 },
+      { name: "other", timeout: undefined },
+    ]);
+  });
+
   it("inlines local $ref before exposing tools and reports unresolved refs", () => {
     const issues: ToolSchemaIssue[] = [];
     const [tool] = normalizeListedTools(

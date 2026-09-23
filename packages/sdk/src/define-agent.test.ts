@@ -4,8 +4,15 @@ import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { CreateMessageResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentContext } from "./context.ts";
-import { executeToolForMcp, registerTool, resolveAgentLogLevel } from "./define-agent.ts";
+import {
+  createContext,
+  executeToolForMcp,
+  registerTool,
+  resolveAgentLogLevel,
+} from "./define-agent.ts";
 import { defineTool } from "./define-tool.ts";
 import { StructuredToolError } from "./tool-error.ts";
 
@@ -20,6 +27,105 @@ const TEST_CONTEXT = {
     error: () => {},
   },
 } satisfies AgentContext;
+
+describe("AgentLLM sampling output limits", () => {
+  async function withSampling(
+    respond: (maxTokens: number, text: unknown) => CreateMessageResult,
+    check: (ctx: AgentContext) => Promise<void>,
+  ): Promise<void> {
+    const server = new McpServer({ name: "sampling-test", version: "1" });
+    const client = new Client(
+      { name: "sampling-test-client", version: "1" },
+      { capabilities: { sampling: {} } },
+    );
+    client.setRequestHandler(CreateMessageRequestSchema, async (request) =>
+      respond(request.params.maxTokens, request.params.messages[0]?.content),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await check(createContext("sampling-test", "error", server));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  it("retains the 1024-token default and string result for one-argument callers", async () => {
+    await withSampling(
+      (maxTokens, content) => {
+        assert.equal(maxTokens, 1024);
+        assert.deepEqual(content, { type: "text", text: "old caller" });
+        return { role: "assistant", content: { type: "text", text: "complete" }, model: "test" };
+      },
+      async (ctx) => assert.equal(await ctx.llm.generateText("old caller"), "complete"),
+    );
+  });
+
+  it("sends explicit token limits through MCP, including both allowed boundaries", async () => {
+    const requested: number[] = [];
+    await withSampling(
+      (maxTokens) => {
+        requested.push(maxTokens);
+        return {
+          role: "assistant",
+          content: { type: "text", text: "complete" },
+          model: "test",
+          stopReason: "endTurn",
+        };
+      },
+      async (ctx) => {
+        for (const maxOutputTokens of [1, 4096, 8192]) {
+          assert.equal(await ctx.llm.generateText("batch", { maxOutputTokens }), "complete");
+        }
+        assert.equal(await ctx.llm.generateText("default", {}), "complete");
+      },
+    );
+    assert.deepEqual(requested, [1, 4096, 8192, 1024]);
+  });
+
+  it("rejects invalid limits before sending a sampling request", async () => {
+    let requests = 0;
+    await withSampling(
+      () => {
+        requests += 1;
+        return { role: "assistant", content: { type: "text", text: "unexpected" }, model: "test" };
+      },
+      async (ctx) => {
+        for (const maxOutputTokens of [0, -1, 1.5, 8193, Number.NaN, Number.POSITIVE_INFINITY]) {
+          await assert.rejects(
+            ctx.llm.generateText("invalid", { maxOutputTokens }),
+            /maxOutputTokens/,
+          );
+        }
+      },
+    );
+    assert.equal(requests, 0);
+  });
+
+  it("rejects an explicitly truncated response even when its text is valid JSON", async () => {
+    await withSampling(
+      () => ({
+        role: "assistant",
+        content: { type: "text", text: '{"action":"click"}' },
+        model: "test",
+        stopReason: "maxTokens",
+      }),
+      async (ctx) => {
+        await assert.rejects(
+          ctx.llm.generateText("decision", { maxOutputTokens: 8192 }),
+          (error) => {
+            assert.ok(error instanceof Error);
+            assert.match(error.message, /truncated/i);
+            assert.match(error.message, /8192/);
+            assert.ok(!error.message.includes("click"));
+            return true;
+          },
+        );
+      },
+    );
+  });
+});
 
 describe("defineAgent tool execution", () => {
   it("returns explicit structured tool errors as MCP isError results", async () => {

@@ -11,6 +11,7 @@ import { browserSnapshot } from "./tools/browser-snapshot.ts";
 import { clickRef } from "./tools/click-ref.ts";
 import { typeRef } from "./tools/type-ref.ts";
 import { browserExecute } from "./tools/browser-execute.ts";
+import { browserOperate } from "./tools/browser-operate.ts";
 import {
   browserWorkflowList,
   browserWorkflowSaveDraft,
@@ -98,7 +99,12 @@ function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDe
     // eagerly attach Playwright merely to run a native script.
     startRuntime:
       tool.name !== "browser_status" &&
-      !["browser_execute", "browser_workflow_validate", "browser_workflow_run"].includes(tool.name),
+      ![
+        "browser_execute",
+        "browser_operate",
+        "browser_workflow_validate",
+        "browser_workflow_run",
+      ].includes(tool.name),
     serializePageOps: !PAGE_FREE_TOOL_NAMES.has(tool.name),
   });
 }
@@ -118,6 +124,7 @@ const agent = defineAgent(
       clickRef,
       typeRef,
       browserExecute,
+      browserOperate,
       browserWorkflowList,
       browserWorkflowSaveDraft,
       browserWorkflowValidate,

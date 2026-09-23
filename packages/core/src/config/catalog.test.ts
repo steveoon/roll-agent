@@ -40,6 +40,7 @@ function makeAgent(): RegisteredAgent {
           { name: "BROWSER_INSTANCES_JSON", purpose: "Derived browser declarations" },
         ],
         optional: [
+          { name: "TYPESAFE_API_KEY", purpose: "Jev decisions", secret: true },
           {
             name: "REPLY_AUTHORITY_URL",
             example: "https://example.test",
@@ -337,6 +338,11 @@ describe("buildRollConfigCatalog", () => {
     assert.ok(url);
     assert.equal(url.type, "url");
     assert.equal(url.widget, "url");
+
+    const typesafeKey = agent.fields.find((field) => field.name === "TYPESAFE_API_KEY");
+    assert.ok(typesafeKey);
+    assert.equal(typesafeKey.configurable, true);
+    assert.equal(typesafeKey.widget, "password");
 
     const derived = agent.fields.find((field) => field.name === "BROWSER_INSTANCES_JSON");
     assert.ok(derived);

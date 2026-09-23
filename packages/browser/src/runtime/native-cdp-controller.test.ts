@@ -200,6 +200,31 @@ test("evaluateJson sends Runtime.evaluate without Runtime.enable and disables pr
   controller.close();
 });
 
+test("key events preserve Chromium editing commands on the wire", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+  try {
+    const pending = controller.dispatchKeyEvent({
+      type: "rawKeyDown",
+      key: "a",
+      modifiers: 4,
+      commands: ["selectAll"],
+    });
+    const command = socket.takeSentCommand();
+    assert.equal(command.method, "Input.dispatchKeyEvent");
+    assert.deepEqual(command.params, {
+      type: "rawKeyDown",
+      key: "a",
+      modifiers: 4,
+      commands: ["selectAll"],
+    });
+    socket.respond(command.id, {});
+    await pending;
+  } finally {
+    controller.close();
+  }
+});
+
 test("evaluateJson can target a frame execution context without enabling Runtime", async () => {
   const socket = new FakeNativeCdpWebSocket();
   const controller = await createController(socket);

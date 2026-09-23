@@ -12,7 +12,7 @@ import type {
   AnyToolDefinition,
   ListenOptions,
 } from "./types/index.ts";
-import { createAgentLogger } from "./context.ts";
+import { AgentGenerateTextOptionsSchema, createAgentLogger } from "./context.ts";
 import type { AgentContext, LogLevel } from "./context.ts";
 import { getMcpCompatibleInputSchema, parseToolInput } from "./mcp-schema.ts";
 import { isStructuredToolError } from "./tool-error.ts";
@@ -45,12 +45,18 @@ function readLogLevelFromEnv(): LogLevel | undefined {
  * - logger: 使用结构化日志，输出到 stderr（避免干扰 stdio 协议）
  * - llm: 通过 MCP Sampling 请求指挥官 LLM（server.createMessage）
  */
-function createContext(agentName: string, logLevel: LogLevel, server: McpServer): AgentContext {
+export function createContext(
+  agentName: string,
+  logLevel: LogLevel,
+  server: McpServer,
+): AgentContext {
   return {
     llm: {
-      generateText: async (prompt: string) => {
-        try {
-          const response = await server.server.createMessage({
+      generateText: async (prompt, options) => {
+        const maxTokens =
+          AgentGenerateTextOptionsSchema.parse(options ?? {}).maxOutputTokens ?? 1024;
+        const response = await server.server
+          .createMessage({
             messages: [
               {
                 role: "user",
@@ -60,20 +66,25 @@ function createContext(agentName: string, logLevel: LogLevel, server: McpServer)
                 },
               },
             ],
-            maxTokens: 1024,
+            maxTokens,
+          })
+          .catch((error: unknown) => {
+            throw new Error(
+              "LLM sampling unavailable. Ensure roll-core client enables sampling capability.",
+              { cause: error },
+            );
           });
 
-          const text = extractSamplingText(response.content);
-          if (text === undefined) {
-            throw new Error("Sampling response did not include text content");
-          }
-          return text;
-        } catch (error) {
+        if (response.stopReason === "maxTokens") {
           throw new Error(
-            "LLM sampling unavailable. Ensure roll-core client enables sampling capability.",
-            { cause: error },
+            `LLM sampling output truncated at maxOutputTokens=${maxTokens} (MCP stopReason=maxTokens).`,
           );
         }
+        const text = extractSamplingText(response.content);
+        if (text === undefined) {
+          throw new Error("Sampling response did not include text content");
+        }
+        return text;
       },
     },
     logger: createAgentLogger(agentName, logLevel),

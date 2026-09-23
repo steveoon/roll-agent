@@ -42,6 +42,22 @@ const helperNames = new Set([
   "screenshot",
 ]);
 
+// Fixed API guidance only: interpreter/page exception text remains private.
+const helperRecovery = new Map([
+  [
+    "snapshot",
+    "page.snapshot accepts only {scope?}. For iframe controls use browser_snapshot, then page.ref(ref,snapshotId).",
+  ],
+  [
+    "press",
+    "Use page.press(key,{target,expect?}), for example page.press('Escape',{target:field}).",
+  ],
+  [
+    "choose",
+    "Use page.inspectControl(field) first, then page.choose(field,{label}) or {value}; use an observed panel when association is ambiguous.",
+  ],
+]);
+
 const defaults = {
   timeoutMs: 30_000,
   maxCalls: 100,
@@ -212,7 +228,9 @@ async function runWorker(
           code,
           code === "COMPILE_ERROR"
             ? "Script is not a valid async function body."
-            : "Script failed; no further browser actions were run.",
+            : code === "SCRIPT_ERROR"
+              ? "Script failed; no further browser actions were run. page is not Playwright: use page.read(target), page.count(target), page.click(target) or page.fill(target,text); locator/ref builders return data, not objects with methods. Read actions before retrying."
+              : "Script failed; no further browser actions were run.",
         );
         return;
       }
@@ -288,7 +306,14 @@ async function runWorker(
             /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.code)
               ? error.code
               : "HELPER_FAILED";
-          fail(code, "Browser helper failed; execution stopped.");
+          const recovery =
+            code === "ambiguous_target" || code === "target_not_found" || code === "stale_target"
+              ? "Use a fresh browser_snapshot ref/snapshotId instead of guessing a selector or an iframe index."
+              : helperRecovery.get(method);
+          fail(
+            code,
+            `Browser helper ${method} failed; execution stopped. Read actions before retrying.${recovery ? ` ${recovery}` : ""}`,
+          );
         }
       });
     });

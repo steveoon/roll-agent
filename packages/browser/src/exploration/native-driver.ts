@@ -86,6 +86,7 @@ const inspectSchema = z.object({
   value: z.string().max(8000).optional(),
   href: z.string().max(8000),
   navigationUrl: z.string().max(8000),
+  enterNavigationUrl: z.string().max(8000).optional(),
   documentUrl: z.string().max(8000),
   inScope: z.boolean(),
   scopeMatches: z.number(),
@@ -124,8 +125,9 @@ const INSPECT_NODE = `function(scope, attribute, dispatchedPoint) {
   const href = anchor ? anchor.href : '';
   const form = el.form;
   const submit = (tag === 'button' && (!type || type === 'submit')) || (tag === 'input' && (type === 'submit' || type === 'image'));
-  const navigationUrl = href || (form && (submit || tag === 'input') ? (el.formAction || form.action) : '');
-  const result = {attached,visible,enabled,checked:Boolean(el.checked || el.selected || el.getAttribute('aria-checked') === 'true'),hit,editable,focused:doc.activeElement === el || el.contains(doc.activeElement),text:String(password ? '' : (el.innerText || '')).slice(0,8000),href:String(href).slice(0,8000),navigationUrl:String(navigationUrl).slice(0,8000),documentUrl:String(doc.URL).slice(0,8000),inScope,scopeMatches:scopes.length};
+  const navigationUrl = href || (form && submit ? (el.formAction || form.action) : '');
+  const enterNavigationUrl = navigationUrl || (form && tag === 'input' ? (el.formAction || form.action) : '');
+  const result = {attached,visible,enabled,checked:Boolean(el.checked || el.selected || el.getAttribute('aria-checked') === 'true'),hit,editable,focused:doc.activeElement === el || el.contains(doc.activeElement),text:String(password ? '' : (el.innerText || '')).slice(0,8000),href:String(href).slice(0,8000),navigationUrl:String(navigationUrl).slice(0,8000),enterNavigationUrl:String(enterNavigationUrl).slice(0,8000),documentUrl:String(doc.URL).slice(0,8000),inScope,scopeMatches:scopes.length};
   if (!password && typeof el.value === 'string') result.value = el.value.slice(0,8000);
   if (attribute) result.attribute = attribute === 'href' ? String(href).slice(0,8000) : (el.getAttribute(attribute) === null ? null : String(el.getAttribute(attribute)).slice(0,8000));
   return result;
@@ -423,6 +425,7 @@ export class BrowserScriptPageDriver {
       editable?: boolean;
       focus?: boolean;
       navigation?: boolean;
+      implicitSubmit?: boolean;
       point?: { x: number; y: number };
     } = {},
   ): Promise<Inspection> {
@@ -481,8 +484,11 @@ export class BrowserScriptPageDriver {
     if (input.focus && !value.focused) {
       fail("focus_changed", "Input focus no longer belongs to the selected target");
     }
-    if (input.navigation && value.navigationUrl) {
-      this.allowed(value.navigationUrl);
+    const navigationUrl = input.implicitSubmit
+      ? (value.enterNavigationUrl ?? value.navigationUrl)
+      : value.navigationUrl;
+    if (input.navigation && navigationUrl) {
+      this.allowed(navigationUrl);
       await this.before("navigate", target);
     }
     return value;
@@ -1030,6 +1036,29 @@ export class BrowserScriptPageDriver {
         const options = optionsSchema
           .extend({ target: BrowserScriptLocatorSchema.optional() })
           .parse(params[1] ?? {});
+        // Escape is page-scoped: a new call may need to dismiss a panel opened by
+        // an earlier call. Never click an arbitrary control just to establish focus.
+        if (key === "Escape" && !options.target) {
+          for (const type of ["rawKeyDown", "keyUp"] as const) {
+            await this.before("interact");
+            const allowedFocus = await this.options.controller.evaluateJson(
+              `(() => { /* page-escape-focus */ const origins=${JSON.stringify(this.options.allowedOrigins)}; let doc=document; for(let depth=0;depth<32;depth++){ try { if(!origins.includes(doc.location.origin))return false; const el=doc.activeElement; if(el && /^(IFRAME|FRAME)$/.test(el.tagName)){if(!el.contentDocument)return false;doc=el.contentDocument;continue}return true }catch{return false}}return false })()`,
+            );
+            if (allowedFocus !== true) {
+              fail("origin_blocked", "Focused frame is outside approved or observable origins");
+            }
+            await this.before("interact");
+            this.lastActionExecuted = true;
+            await this.options.controller.dispatchKeyEvent({
+              type,
+              key,
+              code: key,
+              windowsVirtualKeyCode: 27,
+            });
+          }
+          await this.afterExpectation(options.expect);
+          return { executed: true, verification: this.lastVerification };
+        }
         const target = options.target ? await this.one(options.target, "interact") : this.focused;
         if (!target) {
           fail(
@@ -1059,7 +1088,11 @@ export class BrowserScriptPageDriver {
           Space: 32,
         };
         for (const type of ["rawKeyDown", "keyUp"] as const) {
-          await this.ready(target, { focus: type === "rawKeyDown", navigation: key === "Enter" });
+          await this.ready(target, {
+            focus: type === "rawKeyDown",
+            navigation: key === "Enter",
+            implicitSubmit: key === "Enter",
+          });
           this.lastActionExecuted = true;
           await this.options.controller.dispatchKeyEvent({
             type,

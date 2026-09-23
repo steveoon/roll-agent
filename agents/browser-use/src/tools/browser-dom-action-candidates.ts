@@ -260,11 +260,32 @@ function buildDomActionCandidateExpression(
     const visibleTextOf = (element) => normalize(
       element instanceof HTMLElement ? element.innerText : element.textContent
     );
+    const isCustomToggle = (element) => {
+      if (!/check[-_]?box|radio[-_]?box|checkmark/i.test(classTextOf(element))) return false;
+      if (element.matches('input,[role],label') || element.querySelector('input,[role="checkbox"],[role="radio"]')) return false;
+      const rect = element.getBoundingClientRect();
+      return element.childElementCount === 0 && !visibleTextOf(element) && rect.width > 0 && rect.height > 0 && rect.width <= 64 && rect.height <= 64;
+    };
+    // Describe weak icon evidence explicitly; do not turn class names into asserted labels.
+    const ownActionClass = element => /(?:^|[\\s_-])(close|dismiss|more|ellipsis|menu|title|button|btn|action)(?:[\\s_-]|$)/i.test(classTextOf(element));
+    const independentAction = element => element.hasAttribute('onclick') || element.onclick !== null ||
+      element.hasAttribute('tabindex') || element.hasAttribute('aria-label') || element.hasAttribute('title') ||
+      (window.getComputedStyle(element).cursor === 'pointer' && ownActionClass(element));
     const domActionNameOf = (element) => {
+      const explicit = normalize(element.getAttribute('aria-label') || element.getAttribute('title'));
+      if (explicit) return explicit;
+      if (isCustomToggle(element)) {
+        const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || visibleTextOf(element.parentElement));
+        return label ? 'Toggle: ' + label.slice(0, 90) : '';
+      }
       if (choiceRows.has(element)) return choices.text(element);
       const direct = directTextOf(element);
       if (direct) return direct;
-      if (element.childElementCount === 0) return visibleTextOf(element);
+      const visible = visibleTextOf(element);
+      if (!visible && ownActionClass(element) && window.getComputedStyle(element).cursor === 'pointer') {
+        return 'Unlabelled icon (DOM class: ' + classTextOf(element).slice(0,65) + ')';
+      }
+      if (element.childElementCount === 0) return visible;
       if (element.hasAttribute("onclick") || element.onclick !== null || window.getComputedStyle(element).cursor === "pointer") return visibleTextOf(element);
       return "";
     };
@@ -286,7 +307,7 @@ function buildDomActionCandidateExpression(
       );
     };
     const hasNearbyClassHint = (element) => {
-      const pattern = /btn|button|click|dropdown|tab|tabs|filter|menu|nav|option|select|switch|toggle/i;
+      const pattern = /btn|button|click|dropdown|tab|tabs|filter|menu|nav|option|select|switch|toggle|check[-_]?box|radio[-_]?box|checkmark/i;
       let current = element;
       for (let depth = 0; current && depth < 4; depth += 1) {
         if (pattern.test(classTextOf(current))) return true;
@@ -316,7 +337,7 @@ function buildDomActionCandidateExpression(
 
       if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable && !hasClassHint) {
         const parent = element.parentElement;
-        if (parent && window.getComputedStyle(parent).cursor === "pointer") return false;
+        if (parent && window.getComputedStyle(parent).cursor === "pointer" && !independentAction(element)) return false;
       }
       return true;
     };
@@ -346,9 +367,15 @@ function buildDomActionCandidateExpression(
         }
       }
     }
-    for (const element of elements) {
+    // A decorative row is not necessarily the input target. Prefer small,
+    // unlabeled custom toggles and derive their label from the adjacent text.
+    const toggles = Array.from(elements).filter(isCustomToggle);
+    const toggleSet = new Set(toggles);
+    for (const element of [...toggles, ...Array.from(elements).filter(element => !toggleSet.has(element))]) {
       if (!isCandidate(element)) continue;
-      if (element.closest("[" + markerAttribute + "]")) continue;
+      if (element.querySelector('[' + markerAttribute + ']')) continue;
+      const markedAncestor = element.closest("[" + markerAttribute + "]");
+      if (markedAncestor && (!independentAction(element) || !visibleTextOf(element) && !visibleTextOf(markedAncestor))) continue;
       const marker = String(output.length);
       const style = window.getComputedStyle(element);
       const contentEditable = element.getAttribute("contenteditable");

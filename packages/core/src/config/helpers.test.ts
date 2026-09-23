@@ -151,6 +151,14 @@ agents:
     });
   });
 
+  it("passes the configured TypeSafe key into browser-use Agent runtime", () => {
+    const config = validateConfigText(
+      `agents:\n  data-dir: /tmp/test\n  env:\n    browser-use-agent:\n      TYPESAFE_API_KEY: configured-test-key\n`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(getAgentEnv(config, "browser-use-agent")?.TYPESAFE_API_KEY, "configured-test-key");
+  });
+
   it("should convert missing required env items into runtime issues", () => {
     const report = inspectAgentEnvRequirements(
       "placeholder-agent",

@@ -473,12 +473,14 @@ async function dispatchKeyPress(
   controller: ElementRefController,
   input: Omit<NativeCdpKeyEventInput, "type">,
 ): Promise<void> {
+  const { commands, ...keyInput } = input;
   await controller.dispatchKeyEvent({
-    ...input,
+    ...keyInput,
+    ...(commands === undefined ? {} : { commands }),
     type: "rawKeyDown",
   });
   await controller.dispatchKeyEvent({
-    ...input,
+    ...keyInput,
     type: "keyUp",
   });
 }
@@ -490,6 +492,8 @@ async function clearFocusedText(controller: ElementRefController): Promise<void>
     code: "KeyA",
     windowsVirtualKeyCode: 65,
     modifiers,
+    // Chromium on macOS needs the editing command as well as Meta+A.
+    ...(process.platform === "darwin" ? { commands: ["selectAll"] } : {}),
   });
   await dispatchKeyPress(controller, {
     key: "Backspace",

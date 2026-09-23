@@ -2146,6 +2146,74 @@ for (const scenario of ["duplicates", "evidence-overflow"] as const) {
   });
 }
 
+test("ConversationEngine passes advertised tool timeout through discovery and execution", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-timeout-test" },
+  });
+  const agent: RegisteredAgent = {
+    skill: { name: "deadline-agent", description: "test", metadata: {} },
+    transport: { type: "stdio", command: "node" },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/deadline-agent",
+    registeredAt: "2026-09-20T00:00:00Z",
+    status: "idle",
+  };
+  let timeout: unknown;
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => ({
+        tools: [
+          {
+            name: "run",
+            inputSchema: { type: "object", properties: {} },
+            _meta: { "roll/executionTimeoutMs": 120000 },
+          },
+        ],
+      }),
+      callTool: async (_request: unknown, _schema: unknown, options: { timeout?: number }) => {
+        timeout = options.timeout;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    }),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const model = sequencedEngineModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "deadline-call",
+        toolName: "deadline-agent__run",
+        input: "{}",
+      },
+      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+    ],
+    engineTextStep("done"),
+  ]);
+  const engine = new ConversationEngine({
+    config,
+    model,
+    agents: [agent],
+    skillLibrary: null,
+    workspaceInstructions: null,
+    clientManager,
+    ensureAgentReady: async () => {},
+  });
+  try {
+    const session = await engine.createSession();
+    await drain(session.send("run"));
+    assert.equal(timeout, 120000);
+  } finally {
+    await engine.dispose();
+  }
+});
+
 test("ConversationEngine resourceHints 对 partial-invalid 整体回退，并规范化 field", async () => {
   const config = rollConfigSchema.parse({
     llm: {

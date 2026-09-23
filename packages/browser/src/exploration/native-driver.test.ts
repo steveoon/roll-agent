@@ -283,6 +283,58 @@ test("read does not accept secret attributes; fixed inspector omits password val
   assert.doesNotMatch(JSON.stringify(result), /never-return-this|"value"/);
 });
 
+test("form text and checkbox clicks are not submissions but Enter remains guarded", async () => {
+  const f = fixture({ capabilities: ["read", "interact"] });
+  await f.driver.invoke("read", [{ css: "input" }]);
+  const inspect = runInNewContext(`(${f.declaration()})`) as (
+    this: unknown,
+    scope: unknown,
+    attribute: unknown,
+  ) => { navigationUrl: string; enterNavigationUrl: string };
+  for (const type of ["text", "checkbox", "submit", "image"]) {
+    const element = {
+      nodeType: 1,
+      isConnected: true,
+      tagName: "INPUT",
+      value: "",
+      innerText: "",
+      readOnly: false,
+      form: { action: "https://example.com/send" },
+      formAction: "",
+      getAttribute: (name: string) => (name === "type" ? type : null),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 40 }),
+      matches: () => false,
+      closest: () => null,
+      contains: () => true,
+      ownerDocument: {
+        URL: "https://example.com/form",
+        defaultView: {
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+        },
+        contains: () => true,
+        elementFromPoint: () => element,
+        activeElement: null,
+      },
+    };
+    const result = inspect.call(element, null, null);
+    assert.equal(
+      result.navigationUrl,
+      ["submit", "image"].includes(type) ? "https://example.com/send" : "",
+    );
+    assert.equal(result.enterNavigationUrl, "https://example.com/send");
+  }
+  const original = f.controller.callFunctionOnObject;
+  f.controller.callFunctionOnObject = async (request) => {
+    const value = await original(request);
+    assert.ok(value && typeof value === "object");
+    return { ...value, navigationUrl: "", enterNavigationUrl: "https://example.com/send" };
+  };
+  await f.driver.invoke("click", [{ css: "input" }]);
+  f.events.length = 0;
+  await assert.rejects(f.driver.invoke("press", ["Enter"]), code("capability_blocked"));
+  assert.deepEqual(f.events, []);
+});
+
 test("observe uses compact native metadata and snapshot remains explicit", async () => {
   let snapshots = 0;
   const f = fixture({
@@ -421,4 +473,37 @@ test("scroll checks its outgoing wheel point again after mousemove moves target"
     code("target_moved"),
   );
   assert.deepEqual(f.events, ["scrollIntoView", "mouseMoved"]);
+});
+
+test("page Escape works without script-owned focus and never clicks to acquire it", async () => {
+  const f = fixture();
+  f.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return true as T;
+  };
+  await f.driver.invoke("press", ["Escape"]);
+  assert.deepEqual(f.events, ["rawKeyDown", "keyUp"]);
+  assert.equal(f.driver.lastActionExecuted, true);
+  await assert.rejects(f.driver.invoke("press", ["Enter"]), code("focus_required"));
+});
+
+test("page Escape respects policy and refuses unreadable or foreign focused frames", async () => {
+  const f = fixture();
+  f.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return false as T;
+  };
+  await assert.rejects(f.driver.invoke("press", ["Escape"]), code("origin_blocked"));
+  assert.deepEqual(f.events, []);
+  const denied = fixture({
+    guard: async () => {
+      throw new Error("policy denied");
+    },
+  });
+  denied.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return true as T;
+  };
+  await assert.rejects(denied.driver.invoke("press", ["Escape"]), /policy denied/);
+  assert.deepEqual(denied.events, []);
 });

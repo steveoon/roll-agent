@@ -124,6 +124,11 @@ test("typeElementRef falls back to role/name/nth and can clear existing text", a
     ["rawKeyDown:a", "keyUp:a", "rawKeyDown:Backspace", "keyUp:Backspace"],
   );
   assert.equal(controller.insertedText, "hello@example.com");
+  assert.deepEqual(
+    controller.keyEvents[0]?.commands,
+    process.platform === "darwin" ? ["selectAll"] : undefined,
+  );
+  assert.equal(controller.keyEvents[1]?.commands, undefined);
 });
 
 test("clickElementRef falls back for DOM action refs without backendNodeId", async () => {

@@ -5,9 +5,50 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   buildAgentToolset,
   gateToolCall,
+  readExecutionTimeoutMs,
   type ApprovalRequest,
   type ToolBridgeContext,
 } from "./build-tools.ts";
+
+test("execution timeout metadata is bounded and propagated with cancellation", async () => {
+  for (const value of [undefined, -1, 0, 999, 1.5, Infinity, 1_800_001, "120000"]) {
+    assert.equal(readExecutionTimeoutMs({ "roll/executionTimeoutMs": value }), undefined);
+  }
+  assert.equal(readExecutionTimeoutMs({ "roll/executionTimeoutMs": 120000 }), 120000);
+  const abort = new AbortController();
+  let requestOptions: unknown;
+  const built = buildAgentToolset(
+    [
+      {
+        agentName: "slow-agent",
+        client: {
+          callTool: async (_request: unknown, _schema: unknown, options: unknown) => {
+            requestOptions = options;
+            return { content: [{ type: "text", text: "ok" }] };
+          },
+        } as unknown as Client,
+        tools: [
+          {
+            tool: {
+              name: "slow",
+              inputSchema: { type: "object", properties: {} },
+              executionTimeoutMs: 120000,
+            },
+            annotations: undefined,
+          },
+        ],
+      },
+    ],
+    { requestApproval: async () => ({ approved: true }) },
+  );
+  const callable = Object.values(built.tools)[0];
+  assert.ok(callable?.execute);
+  await callable.execute(
+    {},
+    { toolCallId: "slow-1", messages: [], abortSignal: abort.signal, context: undefined },
+  );
+  assert.deepEqual(requestOptions, { signal: abort.signal, timeout: 120000 });
+});
 
 function confirmPolicyCtx(
   memory: SessionApprovalMemory | undefined,

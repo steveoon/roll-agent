@@ -2,6 +2,38 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compileBrowserScript, runBrowserScript } from "./script-runner.ts";
 
+test("unsupported Playwright methods stop before later input and return safe recovery guidance", async () => {
+  const calls: string[] = [];
+  const result = await runBrowserScript({
+    source: 'await page.url(); await page.click(page.locator("button"));',
+    invoke: async (method) => {
+      calls.push(method);
+    },
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.code, "SCRIPT_ERROR");
+  assert.deepEqual(calls, []);
+  assert.match(result.error?.message ?? "", /page\.read/);
+  assert.match(result.error?.message ?? "", /Playwright/);
+});
+
+test("invalid snapshot and press arguments report fixed signatures without leaking helper errors", async () => {
+  for (const [source, guidance] of [
+    ["await page.snapshot({frameId:'frame'});", /browser_snapshot/],
+    ["await page.press(page.locator('input'),'Escape');", /page\.press\(key/],
+  ] as const) {
+    const result = await runBrowserScript({
+      source,
+      invoke: async () => {
+        throw new Error("PRIVATE PAGE VALUE");
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.error?.message ?? "", guidance);
+    assert.ok(!JSON.stringify(result).includes("PRIVATE PAGE VALUE"));
+  }
+});
+
 test("runs awaited helpers, loops, JSON arguments and local locator builders", async () => {
   const calls: { method: string; params: unknown[] }[] = [];
   const result = await runBrowserScript({

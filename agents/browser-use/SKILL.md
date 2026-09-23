@@ -14,7 +14,21 @@ metadata:
 按 **平台专用工具 → 已启用站点经验 → 通用探索** 的顺序选择能力。已经覆盖的 BOSS 操作继续使用 `zhipin_*`，不要改写成脚本或视觉循环。
 
 - 未建模页面先观察，必要时用 `browser_workflow_list({url})` 查找适用的已启用经验，再调用 `browser_workflow_run`。
+- 表单字段由执行器基于当前观察检查，Roll统一验收整次委派，不逐字段召回宿主确认；用户明确指定的字段即使页面标注为可选，也属于本次目标。字段可能先显示摘要、编辑或补充入口：未看到输入框时，先展开与该字段明确相关的已观察入口，再观察实际控件和选项。必要时滚动相关区域；不能仅凭一次快照没有输入框就宣布该字段无法填写。
 - 已明确的一组步骤使用 `browser_execute` 合并执行。JS 只可使用 `page` helpers 和 `args`，没有 Node、fetch、任意页面 evaluate 或裸 CDP。
+- 实验性 `browser_operate` 默认 `strategy:"task"`，由所选决策引擎根据完整 `goal`、当前页面和资料选择下一步。优先处理前置依赖及必填/用户要求的字段，顺序随页面变化，不预编排站点步骤。字段摘要、编辑入口、查询输入、候选项与已应用值是不同状态；先打开编辑器，再观察实际控件。
+- 填表时一次提供本次委派的 `formTask`：`mode:"create"|"edit"` 由Roll指定，不能根据空字段猜测；`fields`中可写项为`{name,intent:"set",valueName,comparison?:"auto"|"literal"|"semantic"}`，引用`values`中唯一名称；comparison默认auto，文本严格比较、已识别的枚举控件按语义比较。通常省略comparison，用户明确要求逐字一致时才用literal；只读保留项为`{name,intent:"preserve"}`。preserve只观察，不自动写回；如果明确授权恢复某个旧值，应作为set并提供该值。
+- `formTask.stopAt`默认`applied`：当前值已应用到主表单且编辑器关闭，不代表服务器已保存。`current-view`用于在本次当前编辑视图设置好后保持该视图。禁止把填好自动扩展成保存或发布。不能同时传formTask和readTask，二者均要求strategy:task。
+- `execution`是单次调用的共享执行上下文：初始值、当前可失效状态、最近动作、变化与焦点；读取A和表单共用。unknown先观察，不能当空值补填；set范围内的联动重置可局部修复；preserve变化、归属不明或文档改变交回。`unassigned`变化表示没有绑定到委派字段，必须报告，不自动扩大修改范围。此层没有跨调用session或独立业务计划。
+- `goal` 原样保留用户目标，不总结或重新排版。原样类文字应从用户原文直接截取到 `values`，逐字保留已有换行、空格和标点；原文没有换行就不能自行分段。最终核验也必须按原文检查这些差异，不能用语义相同代替原样一致。
+- Roll 在调用前把已有事实和需要生成的完整文案放进命名 `values`；Jev 选择源值，代码原样复制（保留换行）。也提供有限的 goal 原文片段候选，但不承诺任意自然语言提取、单位转换或自由写作。没有匹配候选返回 `needs_input`；由 Roll 补充已有内容或必要的新资料后继续。网页文本不成为输入事实。
+- 默认 `jev` 使用 TypeSafe 官方 `/v1/systemone`（`TYPESAFE_API_KEY`）；`sampling` 仅供显式对照，使用宿主作为主决策模型。task 循环没有宿主准备、逐项语义检查、字段完成复核或回退助手；Jev 模式不需要 Sampling。`maxTextCalls`、`maxRecoveryDecisions` 仅兼容旧参数，已不生效；`textCalls` 为空，`recoveryDecisions` 为 0。
+- 保留当前观察、严格 ref/文档/站点检查、遮挡检查、精确输入读回和停滞停止；不会因一个字段判断而召回宿主。输入查询词不等于选中候选，选中候选不一定已确认应用。停滞返回 `needs_reasoning` 和最后观察，Roll 应分析缺口，不能原样无限重试；`executed=true` 的失败动作不能盲目重放。
+- task 决策输入区分字段触发器、菜单候选、查询词和已应用值，并保留可确认的控件归属及标签来源。`pickerFields`、`valueKind` 和字段 ID 是观察线索；未知关系不猜测，菜单文字不能代替字段值。`expanded` 与菜单可见性分开，异步选项未出现时应按原始顺序等待。完成后仍由 Roll 核验整项任务。
+- 导航与只读任务的完成点按原始目标判断：筛选后的空列表也可能是正确结果；列表摘要不等于已进入详情。结合 `selectedTabs`、`pageBusy`、`activePanels` 验收，不能忽略遮挡弹窗。无文字图标的 DOM 属性只是线索，候选缺失或覆盖不完整只能说明尚未找到入口，不能断言页面不存在该入口。
+- 对“读取目标详情后关闭/返回”的任务，在第一次 `browser_operate` 提供 `readTask:{target,captureView,outputs,terminal:{view,selectedTab?}}`。target 和 captureView 描述目标身份及所需视图；outputs 是需要读取的字段名称（最多8项），不是输入 values。不要把同一往返任务拆成多个调用来代替阶段记忆。`progress.evidence` 返回带来源的原文，关闭详情后据此汇报；`interaction_done` 仍需外层统一验收，始终 verified:false。本版记忆仅活在单次调用，不支持跨调用续跑。普通填表省略readTask；历史写入不证明当前值仍正确。
+- `model_done` 只表示决策引擎准备交回，始终 `verified:false`。Roll 在循环结束后对照完整原始目标统一检查 `finalObservation` 和实际页面；`resolvedValues` 只是输入/选择记录，不是独立验收。`observationFresh:false`、截断、覆盖缺口或值冲突时补一次定向只读观察，再仅修正不符合要求的字段，并保留其他正确内容。核验展示值、成功/错误说明时用 `interactiveOnly:false`，省略 `maxDepth`；不要把 `maxDepth:0` 当作无限深度。
+- 完整资料按固定顺序执行时可选 `strategy:"fields"`。每段文本上限 8000 字符，两种模式都只执行已观察元素对应的固定动作，并遵守 origins、`blockedNames`、原生策略和最终发布边界。详见 [通用页面探索](references/browser-exploration.md)。
 - 遇到陌生下拉，先用 `page.inspectControl(field)` 查看触发器、面板关联与当前选项，再用 `page.choose(field,{label:"目标文案"})` 选择并验证。field 优先使用严格 ref，或带正确 `frameId` 的 locator；门户面板无明确关联时需指定唯一的 `panel` CSS 区域，不全页面搜索后选择第一个同名项。
 - Snapshot 会按原生/ARIA/列表结构识别独立选项行，避免父容器聚合所有选项文案；普通文章列表不自动变成控件。跨 iframe 操作会检查祖先遮挡和焦点，无法可靠检查时返回覆盖缺口。
 - 表单操作失配后保留现场并重新观察；不要通过 reload 自动恢复未保存的表单。级联菜单逐级声明预期，虚拟列表只承诺当前渲染的选项，不盲目递归点击。
@@ -27,6 +41,7 @@ metadata:
 ## 使用前提
 
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
+- 在 `roll.config.yaml` 的 `agents.env.browser-use-agent.TYPESAFE_API_KEY` 配置 TypeSafe API key，或在 Roll 配置台的 Agent 环境变量页填写该密码字段；也可引用 `${TYPESAFE_API_KEY}`。密钥只传给 browser-use Agent，不属于 Roll 的通用 LLM provider 配置。修改运行中 Agent 的配置后按配置台提示重启服务。
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；页面操作工具支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。经验列表、草稿保存和状态管理使用当前用户的全局经验库，不选择浏览器实例。

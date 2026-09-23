@@ -23,6 +23,7 @@ import {
   formatToolSchemaIssue,
   formatAppOutputDiscoveryIssue,
   normalizeListedTools,
+  callListedAgentTool,
 } from "../utils/agent-tools.ts";
 import {
   extractTextContent,
@@ -654,10 +655,7 @@ async function runToolCall(options: RunToolCallOptions): Promise<RunToolResult> 
 
     log.info(`调用 ${connectedAgent.agent.skill.name}.${options.item.tool}`);
     log.debug(`调用参数: ${JSON.stringify(redactToolArgsForLog(options.item.input))}`);
-    const result = await connectedAgent.client.callTool({
-      name: options.item.tool,
-      arguments: options.item.input,
-    });
+    const result = await callListedAgentTool(connectedAgent.client, targetTool, options.item.input);
     if (isToolErrorResult(result, targetTool.appOutput)) {
       return { ...base, ok: false, error: "tool 返回 isError=true", result };
     }

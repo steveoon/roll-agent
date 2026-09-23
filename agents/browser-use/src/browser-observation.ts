@@ -124,6 +124,7 @@ async function inlineIframeSnapshots(input: {
   readonly controller: IframeSnapshotController;
   readonly snapshot: BrowserAxSnapshot;
   readonly maxDepth?: number;
+  readonly allowedFrameIds?: ReadonlySet<string>;
 }): Promise<BrowserAxSnapshot> {
   let refCount = nextRefCount(input.snapshot);
   let remainingNodes = Math.max(0, input.snapshot.maxNodes - input.snapshot.nodeCount);
@@ -137,6 +138,9 @@ async function inlineIframeSnapshots(input: {
   for (let index = 0; index < pendingTargets.length; index += 1) {
     const target = pendingTargets[index];
     if (target === undefined) {
+      continue;
+    }
+    if (input.allowedFrameIds !== undefined && !input.allowedFrameIds.has(target.frameId)) {
       continue;
     }
     if (remainingNodes <= 0) {
@@ -214,22 +218,25 @@ export async function observeBrowserPage(input: {
   readonly browserInstance: string;
   readonly scope?: string;
   readonly allowedOrigins?: readonly string[];
+  readonly allowedFrameIds?: ReadonlySet<string>;
   readonly maxDepth?: number;
   readonly maxNodes?: number;
   readonly interactiveOnly?: boolean;
 }): Promise<BrowserAxSnapshot> {
+  // Optional scopes emitted as empty strings mean the whole page, not an invalid CSS query.
+  const scopeSelector = input.scope?.trim() ? input.scope : undefined;
   const documentId = await readBrowserDocumentIdentity(input.controller);
   const scope =
-    input.scope === undefined
+    scopeSelector === undefined
       ? undefined
       : await resolveBrowserSnapshotScope({
           controller: input.controller,
-          scope: input.scope,
+          scope: scopeSelector,
           includeFrameDocuments: input.allowedOrigins === undefined,
         });
   const domActionHints = await collectDomActionHints(input.controller, {
     maxCandidates: input.maxNodes ?? 500,
-    ...(input.scope === undefined ? {} : { scope: input.scope }),
+    ...(scopeSelector === undefined ? {} : { scope: scopeSelector }),
   });
   const rootSnapshot = await createBrowserAxSnapshot(input.controller, {
     domActionHints,
@@ -239,14 +246,20 @@ export async function observeBrowserPage(input: {
     ...(input.maxDepth !== undefined ? { maxDepth: input.maxDepth } : {}),
   });
   const snapshot =
-    input.allowedOrigins !== undefined
+    input.allowedOrigins !== undefined && input.allowedFrameIds === undefined
       ? {
           ...rootSnapshot,
-          coverageWarnings: ["iframe_expansion_disabled_for_origin_bounded_execution"],
+          coverageWarnings: [
+            "iframe_expansion_disabled_for_origin_bounded_execution",
+            "For iframe controls, call browser_snapshot on this page, then pass its ref and snapshotId to page.ref(ref, snapshotId); do not infer that the form is absent from this bounded snapshot.",
+          ],
         }
       : await inlineIframeSnapshots({
           controller: input.controller,
           snapshot: rootSnapshot,
+          ...(input.allowedFrameIds === undefined
+            ? {}
+            : { allowedFrameIds: input.allowedFrameIds }),
           ...(input.maxDepth !== undefined ? { maxDepth: input.maxDepth } : {}),
         });
   const enriched = await enrichBrowserSnapshot({
@@ -255,8 +268,14 @@ export async function observeBrowserPage(input: {
     browserInstance: input.browserInstance,
     pageId: input.page.targetId,
     includeFrameDocuments: input.allowedOrigins === undefined,
-    ...(input.scope !== undefined ? { scope: input.scope } : {}),
+    ...(scopeSelector !== undefined ? { scope: scopeSelector } : {}),
   });
+  if (input.maxDepth !== undefined) {
+    enriched.coverageWarnings = [
+      ...(enriched.coverageWarnings ?? []),
+      `Observation is depth-limited (maxDepth=${input.maxDepth}). If form fields are missing, repeat browser_snapshot with interactiveOnly=true and omit maxDepth (or increase it); do not guess selectors from missing controls.`,
+    ];
+  }
   if (
     enriched.documentId !== documentId ||
     (await readBrowserDocumentIdentity(input.controller)) !== documentId

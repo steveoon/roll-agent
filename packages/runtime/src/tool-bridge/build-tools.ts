@@ -9,6 +9,10 @@ import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
+import {
+  readExecutionTimeoutMs,
+  ROLL_EXECUTION_TIMEOUT_META_KEY,
+} from "@roll-agent/core/tool-runtime/execution-timeout";
 import type { AgentTool } from "@roll-agent/core/types/agent";
 import type { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import type { ApprovalDecision } from "../approval/approval-gate.ts";
@@ -31,6 +35,11 @@ import {
   type ToolResourceHint,
 } from "./tool-execution-coordinator.ts";
 import { executeWithToolApproval } from "./tool-approval-continuation.ts";
+
+export {
+  readExecutionTimeoutMs,
+  ROLL_EXECUTION_TIMEOUT_META_KEY,
+} from "@roll-agent/core/tool-runtime/execution-timeout";
 
 export const ROLL_RESOURCE_HINTS_META_KEY = "roll/resourceHints";
 
@@ -510,9 +519,16 @@ export function buildAgentToolset(
             args,
             options.abortSignal,
             async () => {
-              const requestOptions = options.abortSignal
-                ? { signal: options.abortSignal }
-                : undefined;
+              const timeout = readExecutionTimeoutMs({
+                [ROLL_EXECUTION_TIMEOUT_META_KEY]: agentTool.executionTimeoutMs,
+              });
+              const requestOptions =
+                options.abortSignal || timeout !== undefined
+                  ? {
+                      ...(options.abortSignal ? { signal: options.abortSignal } : {}),
+                      ...(timeout === undefined ? {} : { timeout }),
+                    }
+                  : undefined;
               return executeWithToolApproval({
                 input: args,
                 agentName,
