@@ -1,3 +1,4 @@
+import { FormHandoffSchema } from "./form-handoff.ts";
 import { z } from "zod";
 import { FormTaskSchema } from "./form-context.ts";
 import { ExecutionSummarySchema } from "./execution-context.ts";
@@ -118,6 +119,7 @@ export const BrowserOperateOutputSchema = z.object({
     "cancelled",
   ]),
   verified: z.literal(false),
+  handoff: FormHandoffSchema.optional(),
   progress: TaskProgressSchema.optional(),
   execution: ExecutionSummarySchema.optional(),
   elapsedMs: z.number(),

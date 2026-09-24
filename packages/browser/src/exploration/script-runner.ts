@@ -1,3 +1,4 @@
+import { BrowserHelperArgumentError } from "./helper-arguments.ts";
 import { Worker } from "node:worker_threads";
 
 export const BROWSER_SCRIPT_STATUSES = ["completed", "failed", "cancelled", "timed_out"] as const;
@@ -307,9 +308,13 @@ async function runWorker(
               ? error.code
               : "HELPER_FAILED";
           const recovery =
-            code === "ambiguous_target" || code === "target_not_found" || code === "stale_target"
-              ? "Use a fresh browser_snapshot ref/snapshotId instead of guessing a selector or an iframe index."
-              : helperRecovery.get(method);
+            error instanceof BrowserHelperArgumentError
+              ? error.message
+              : code === "ambiguous_target" ||
+                  code === "target_not_found" ||
+                  code === "stale_target"
+                ? "Use a fresh browser_snapshot ref/snapshotId instead of guessing a selector or an iframe index."
+                : helperRecovery.get(method);
           fail(
             code,
             `Browser helper ${method} failed; execution stopped. Read actions before retrying.${recovery ? ` ${recovery}` : ""}`,

@@ -135,7 +135,8 @@ function boundedValue(
   }
   if (record(value)) {
     const result: Record<string, JSONValue> = {};
-    const entries = Object.entries(value);
+    // JSON omits undefined object properties; absence is not lost evidence.
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined);
     for (const [key, item] of entries.slice(0, 24)) {
       const safeKey = key.slice(0, 128);
       if (safeKey !== key) budget.truncated = true;

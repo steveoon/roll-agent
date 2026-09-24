@@ -1,3 +1,4 @@
+import { createFormLoopProgress, observeFormLoopProgress } from "./form-loop-progress.ts";
 import {
   createInteractionFeedback,
   observeInteractionFeedback,
@@ -51,6 +52,7 @@ export async function runBrowserTask(
   const resolvedValues: NonNullable<BrowserOperateOutput["resolvedValues"]> = [];
   const sources = taskSources(input);
   const pickerMemory = createPickerMemory();
+  const formLoopProgress = createFormLoopProgress();
   const visits = new Map<string, number>();
   const clicks = new Map<string, number>();
   let finalSnapshot: GoalSnapshot | undefined;
@@ -178,6 +180,15 @@ export async function runBrowserTask(
             "Repeated evidence changes; returning recorded progress.",
           );
         }
+      }
+      if (
+        execution.form &&
+        observeFormLoopProgress(formLoopProgress, snapshot, execution.form, steps.at(-1))
+      ) {
+        return finish(
+          "needs_reasoning",
+          "Repeated form/option state without field progress. Inspect the unresolved field or editor once; do not repeat the same open/close or scrolling cycle.",
+        );
       }
       const observationMs = performance.now() - observedAt;
       // Ignore regenerated refs, layout and page clocks when detecting ineffective loops.

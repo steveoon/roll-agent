@@ -384,3 +384,57 @@ test("native selects and search inputs expose distinct complete actions", () => 
   assert.equal(request.questions.operation?.criteria["TYPE_TEXT:@e1"], undefined);
   assert.ok(request.questions.operation?.criteria["SELECT:@e1:0"]);
 });
+
+test("form loop returns repeated scrolling to the host before another decision, despite new DOM IDs", async () => {
+  let actions = 0;
+  let decisions = 0;
+  const result = await runBrowserTask(
+    BrowserOperateInputSchema.parse({
+      ...input,
+      maxSteps: 30,
+      formTask: {
+        mode: "create",
+        stopAt: "current-view",
+        fields: [{ name: "城市", intent: "set", valueName: "城市" }],
+      },
+    }),
+    {
+      observe: async () => {
+        const s = page("", actions + 1);
+        s.nodes[1]!.name = `option ${actions % 2}`;
+        s.refs[1]!.name = s.nodes[1]!.name;
+        return s;
+      },
+      checkTarget: async () => true,
+      invoke: async (method) => {
+        assert.equal(method, "scroll");
+        actions++;
+      },
+      actionExecuted: () => true,
+    },
+    async (request) => {
+      decisions++;
+      const op = Object.keys(request.questions.operation!.criteria).find((k) =>
+        k.startsWith("SCROLL_DOWN:"),
+      );
+      assert.ok(op);
+      return answer({
+        ...Object.fromEntries(
+          Object.entries(request.questions)
+            .filter(([key]) => key !== "operation")
+            .map(([key, q]) => [
+              key,
+              Object.hasOwn(q.criteria, "NONE") ? "NONE" : Object.keys(q.criteria)[0]!,
+            ]),
+        ),
+        operation: op,
+      });
+    },
+    new AbortController().signal,
+  );
+  assert.equal(result.status, "needs_reasoning", JSON.stringify(result));
+  assert.equal(result.verified, false);
+  assert.match(result.error ?? "", /Repeated form\/option state/);
+  assert.equal(actions, 4);
+  assert.equal(decisions, 4);
+});

@@ -354,3 +354,31 @@ test("最近一批并行回查的全部结果共同保留，后续批次和用�
   );
   assert.doesNotMatch(nextTurn, /ONLY_A|ONLY_B|FAILED_LOOKUP/u);
 });
+
+test("absent optional metadata does not claim projection loss; real clipping still does", () => {
+  const original = {
+    page: { url: "https://example.test/form" },
+    snapshot: {
+      snapshotId: "short",
+      browserInstance: "b",
+      pageId: "p",
+      documentId: "d",
+      nodes: [{ ref: "@e1", role: "button", name: "Open salary details" }],
+      refs: [],
+      truncated: false,
+    },
+  };
+  const before = structuredClone(original);
+  const output = currentObservationModelOutput({ structuredContent: original }, declaration);
+  assert.equal(output?.type, "json");
+  const text = JSON.stringify(output);
+  assert.ok(!text.includes("modelProjectionTruncated"));
+  assert.ok(text.includes("Open salary details"));
+  assert.deepEqual(original, before);
+  const long = structuredClone(original);
+  long.snapshot.nodes[0]!.name = "x".repeat(2000);
+  assert.match(
+    JSON.stringify(currentObservationModelOutput({ structuredContent: long }, declaration)),
+    /modelProjectionTruncated/,
+  );
+});

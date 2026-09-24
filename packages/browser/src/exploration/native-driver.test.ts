@@ -534,3 +534,43 @@ test("page Escape respects policy and refuses unreadable or foreign focused fram
   await assert.rejects(denied.driver.invoke("press", ["Escape"]), /policy denied/);
   assert.deepEqual(denied.events, []);
 });
+
+test("helper argument errors identify panel and current-value reads without dispatch", async () => {
+  const f = fixture();
+  f.setInspection({ value: "current text" });
+  for (const [method, params, guidance] of [
+    ["choose", [{ css: "select" }, { label: "One", panel: { css: "ul" } }], /panel.*CSS/],
+    ["read", [{ css: "textarea" }, { attribute: "value" }], /page.read\(target\).*value/],
+    ["read", [{ unexpectedSecret: "PRIVATE INPUT" }], /target/],
+  ] as const) {
+    await assert.rejects(f.driver.invoke(method, [...params]), (error: unknown) => {
+      assert.ok(error instanceof BrowserScriptError);
+      assert.equal(error.code, "invalid_argument");
+      assert.match(error.message, guidance);
+      assert.ok(!error.message.includes("PRIVATE INPUT"));
+      return true;
+    });
+    assert.equal(f.driver.lastActionExecuted, false);
+  }
+  assert.deepEqual(f.events, []);
+  assert.equal(
+    ((await f.driver.invoke("read", [{ css: "textarea" }])) as { value: string }).value,
+    "current text",
+  );
+});
+
+test("argument guidance survives the real worker boundary and never replays completed input", async () => {
+  const { runBrowserScript } = await import("./script-runner.ts");
+  const f = fixture();
+  const result = await runBrowserScript({
+    source:
+      "const t=page.locator('textarea'); await page.fill(t,args.text); await page.read(t,{attribute:'value'}); await page.fill(t,'repeat');",
+    args: { text: "PRIVATE INPUT" },
+    invoke: (method, params) => f.driver.invoke(method, params),
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.code, "invalid_argument");
+  assert.match(result.error?.message ?? "", /options.attribute.*page.read\(target\)/);
+  assert.ok(!JSON.stringify(result).includes("PRIVATE INPUT"));
+  assert.equal(f.events.filter((event) => event === "insertText").length, 1);
+});

@@ -1,3 +1,4 @@
+import { parseHelperArgument } from "./helper-arguments.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { clickElementRef, typeElementRef } from "../runtime/element-ref.ts";
@@ -788,8 +789,8 @@ export class BrowserScriptPageDriver {
   }
 
   private async choose(params: unknown[]): Promise<unknown> {
-    const locator = BrowserScriptLocatorSchema.parse(params[0]);
-    const options = BrowserChooseOptionsSchema.parse(params[1]);
+    const locator = parseHelperArgument(BrowserScriptLocatorSchema, params[0], "choose", "target");
+    const options = parseHelperArgument(BrowserChooseOptionsSchema, params[1], "choose", "options");
     const target = await this.one(locator, "interact");
     this.visualTarget(target);
     const deadline = Date.now() + options.timeoutMs;
@@ -990,12 +991,17 @@ export class BrowserScriptPageDriver {
     if (params.length > 3) fail("invalid_arguments", "Too many browser helper arguments");
     const handlers: Record<string, () => Promise<unknown>> = {
       inspectControl: async () => {
-        const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
+        const target = await this.one(
+          parseHelperArgument(BrowserScriptLocatorSchema, params[0], "inspectControl", "target"),
+          "read",
+        );
         this.visualTarget(target);
-        const options = z
-          .object({ panel: z.string().min(1).max(2000).optional() })
-          .strict()
-          .parse(params[1] ?? {});
+        const options = parseHelperArgument(
+          z.object({ panel: z.string().min(1).max(2000).optional() }).strict(),
+          params[1] ?? {},
+          "inspectControl",
+          "options",
+        );
         return {
           ...(await this.control(target, options.panel)),
           frameId: target.frameId,
@@ -1023,12 +1029,17 @@ export class BrowserScriptPageDriver {
         return await this.observeMetadata(options.scope);
       },
       read: async () => {
-        const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
+        const target = await this.one(
+          parseHelperArgument(BrowserScriptLocatorSchema, params[0], "read", "target"),
+          "read",
+        );
         this.visualTarget(target);
-        const options = z
-          .object({ attribute: attributeSchema.optional() })
-          .strict()
-          .parse(params[1] ?? {});
+        const options = parseHelperArgument(
+          z.object({ attribute: attributeSchema.optional() }).strict(),
+          params[1] ?? {},
+          "read",
+          "options",
+        );
         const value = await this.inspect(target, options.attribute);
         if (!value.attached || !value.inScope) {
           fail("stale_target", "Read target changed during inspection");
