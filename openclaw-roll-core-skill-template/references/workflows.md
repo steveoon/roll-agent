@@ -9,6 +9,7 @@
 - [Prepared Reply And Variant Selection](#prepared-reply-and-variant-selection)
 - [Batch Tool Calls](#batch-tool-calls)
 - [Known Intent, Unknown Tool](#known-intent-unknown-tool)
+- [Browser Tool Choice](#browser-tool-choice)
 - [Browser Runtime Lifecycle](#browser-runtime-lifecycle)
 - [Persistent Agent Recovery](#persistent-agent-recovery)
 - [Local-Path Agent Refresh](#local-path-agent-refresh)
@@ -188,6 +189,8 @@ Rules:
 - For dependent workflows, split the workflow into multiple batches:
   read batch -> parse/filter results -> generate/preview batch -> parse/filter results ->
   optional judge/decision batch -> parse/filter results -> side-effect batch.
+- CLI batch mode only sequences explicit tool calls. It is not a substitute for a browser agent's
+  bounded combined-execution or task tool, which may observe and check within one authorized call.
 
 Example with an account/profile routing key:
 
@@ -241,6 +244,20 @@ For `needs_input`, the stdout JSON contains:
 | `runtimeIssues` | Runtime prerequisites such as missing env | Prefer `roll config setup agent <agent-name>`; use `roll config explain agents.env.<agent-name>` to inspect required keys. Temporary shell exports are acceptable only for one-off retries |
 
 Both arrays are returned at once, not layer-by-layer. Resolve the full set before retrying.
+
+## Browser Tool Choice
+
+Start with the live target skill and `roll agent tools <agent-name> --json`; the shared template does
+not define browser tool schemas. Prefer a platform tool or enabled applicable workflow. For unknown
+targets, observe and use a single fresh ref action when the next step needs host interpretation.
+When a sequence and its checks are already clear, use controlled combined execution if the target
+agent offers it and no intermediate host decision is needed. Delegate a complete goal to a task
+executor only when the caller can supply its facts, permitted actions, and stopping point.
+
+After any path, inspect partial actions and verify the original goal through an appropriate read.
+Approval, fresh refs/snapshot IDs, and uncertain-outcome recovery still apply. `roll run --json`
+does not provide Roll chat's internal observation history projection or `roll__observation` recall.
+See [cross-agent orchestration](cross-agent-orchestration.md) for the full decision rules.
 
 ## Browser Runtime Lifecycle
 

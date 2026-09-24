@@ -18,6 +18,9 @@ Prefer deterministic execution.
 - `roll chat` is the interactive multi-turn session entry (Ink TUI with file tools, skills, and approval flows). It is a human-facing surface, not a deterministic command API: do not default to it from orchestrator code; use `roll run` / `roll ask` there.
 - For non-interactive hosts, prefer `roll runtime serve --stdio` (versioned Runtime Protocol). `roll chat --server` remains only as a legacy compatibility alias.
 - Do not embed subagent-specific tool contracts into this shared Roll skill. Read the target subagent's own `SKILL.md` / manifest / reference docs when you need tool-level semantics.
+- For browser work, prefer the target's platform tools or enabled workflows. Observe unknown targets;
+  combine known steps when no host decision is needed between them; delegate a complete bounded goal
+  only when the target executor supports it. Verify the result through the target's read path.
 
 ## Orchestrator Quick Path
 
@@ -292,42 +295,51 @@ Practical rule:
 - Read the target subagent's own `SKILL.md` first for these higher-level navigation affordances.
 - In this repo, `browser-use-agent` documents platform-specific section openers in its own `SKILL.md`; treat those as the source of truth instead of hardcoding site routes into the shared Roll skill.
 
-## UI Observation And Ref Actions
+## Browser Tool Choice And Verification
 
-When a browser-like target agent exposes page snapshots and element refs, treat them as an
-observe/action/verify loop rather than as a one-shot command.
+Read the live target skill and tool schema, then choose the level of delegation the task supports:
 
-Priority:
+1. Prefer a platform-specific tool or an enabled, applicable workflow that already expresses the
+   requested action and its checks.
+2. For an unknown page or target, observe first. Use a fresh snapshot and one ref action when the
+   orchestrator must inspect the result before choosing the next step.
+3. When a bounded sequence and its checks are clear, and no intermediate result requires a new
+   orchestrator decision, prefer the target agent's controlled combined-execution tool if offered.
+   It may observe and branch within its documented limits; do not skip needed checks or approvals.
+4. When the target agent supports full-goal delegation and the original goal, exact supplied text,
+   permitted actions, and stopping point are explicit, use its task executor where appropriate.
+   Preserve that goal and text verbatim; inspect its final observation and verify the goal outside
+   the executor.
 
-1. Prefer domain-specific tools that express the user intent directly, such as `send`, `open`,
-   `filter`, `select`, or `exchange` tools documented by the target subagent.
-2. Use generic snapshot/ref tools for unmodeled accessible controls when the target subagent
-   documents them.
-3. Use raw navigation, attach, evaluate, diagnostics, or selector-like tools only when the target
-   subagent explicitly recommends them for that workflow.
-
-Generic flow:
+For generic browser work, the orchestration shape is:
 
 ```text
 roll skills get <agent-name> --include-references --json
   -> roll agent tools <agent-name> --json
-  -> observe current page through the target agent's snapshot tool
-  -> choose only a ref emitted by that snapshot
-  -> run the target agent's ref action tool
-  -> verify with a fresh snapshot or a domain-specific read tool
+  -> choose platform tool / enabled workflow, or observe an unknown page
+  -> choose single ref action, controlled combined execution, or full-goal delegation
+  -> inspect execution status and partial actions
+  -> verify the requested page or business state through a fresh read
 ```
 
 Rules:
 
-- Do not invent element refs or reuse refs across page navigations, reloads, filtering, or modal changes.
-- If multiple browser pages are open, pass the explicit page identity returned by the target agent's page-listing tool.
-- If a browser agent returns `frameId` on an element ref, treat it as internal ref metadata owned by
-  that browser agent. Continue passing the emitted ref handle; do not synthesize or edit frame IDs in
-  the orchestrator.
-- Treat element refs as current-snapshot handles, not durable business IDs.
-- If the target agent also exposes business refs, keep each ref family scoped to the tools that emitted it.
-- Keep exact tool names, schemas, ref formats, and action-policy confirmation details in the target subagent's own
-  `SKILL.md` / references. This shared Roll skill only defines the orchestration pattern.
+- Do not invent element refs or reuse them across navigation, reload, filtering, modal changes, or
+  a newer snapshot. Pass a snapshot ID when the target tool supports strict ref binding.
+- If multiple pages are open, pass the explicit page identity returned by the target agent. Keep
+  browser-internal metadata such as `frameId` inside its emitted ref; do not synthesize it.
+- Treat element refs as current-snapshot handles, not durable business IDs. Keep each ref family
+  scoped to the tools and routing key that emitted it.
+- A combined call or task executor can perform several steps, but a success or done marker is not
+  proof that the website accepted the whole goal. Check the returned evidence and read back state;
+  stop before save, publish, send, or submit unless the user authorized that action.
+- After a partial failure or uncertain execution, inspect what already happened before resuming.
+  Never replay the whole side-effecting sequence blindly.
+- `roll run --json` is an external tool call. It does not automatically give its caller Roll chat's
+  compacted observation history or the chat-only `roll__observation` recall tool; use the actual
+  response and the target agent's documented read tools.
+- Keep exact tool names, schemas, ref formats, and approval details in the target agent's live
+  `SKILL.md` / references. This shared skill defines only the orchestration pattern.
 
 ## Diagnostics & Maintenance
 
