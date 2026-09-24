@@ -8,6 +8,31 @@ afterEach(() => {
 });
 
 describe("NativeVisualActivitySession", () => {
+  it("bounds execution-card evaluation without changing single-step render deadlines", async () => {
+    setVisualActivityEnabledForTests(true);
+    const timeouts: Array<number | undefined> = [];
+    const session = new NativeVisualActivitySession({
+      async evaluateJson<T = unknown>(
+        _expression: string,
+        options?: { timeoutMs?: number },
+      ): Promise<T> {
+        timeouts.push(options?.timeoutMs);
+        return true as T;
+      },
+    });
+    await session.begin("单步观察");
+    await session.showExecutionCard({
+      ownerId: "run-one",
+      epoch: 1,
+      revision: 1,
+      actionRevision: 0,
+      title: "浏览器任务",
+      stage: "正在查看页面",
+      recent: [],
+    });
+    assert.deepEqual(timeouts, [undefined, 300]);
+  });
+
   it("normalizes stale full-page viewport styles before showing the safe viewport frame", async () => {
     let renderedExpression = "";
     setVisualActivityEnabledForTests(true);
@@ -27,7 +52,10 @@ describe("NativeVisualActivitySession", () => {
     assert.match(renderedExpression, /viewport\.style\.border = "0"/);
     assert.match(renderedExpression, /viewport\.style\.boxShadow = "none"/);
     assert.match(renderedExpression, /viewport\.style\.transform = "none"/);
-    assert.match(renderedExpression, /const showActivityViewportFrame = \(viewport, theme, mode\) =>/);
+    assert.match(
+      renderedExpression,
+      /const showActivityViewportFrame = \(viewport, theme, mode\) =>/,
+    );
     assert.match(renderedExpression, /viewport\.style\.display = "block"/);
     assert.match(renderedExpression, /viewport\.style\.background =/);
     assert.match(renderedExpression, /linear-gradient\(180deg,/);

@@ -55,6 +55,19 @@ export type BrowserScriptPageDriverOptions = {
   observe: (options?: { scope?: string }) => Promise<unknown>;
   resolveRef: (ref: string, snapshotId: string) => Promise<BrowserElementRef | undefined>;
   capture: (base64: string) => Promise<{ id: string; path: string; mimeType: "image/png" }>;
+  /** Best-effort feedback after a real native mouse dispatch; never controls the action. */
+  onPointer?: (event: {
+    type: "mouseMoved" | "mousePressed";
+    x: number;
+    y: number;
+  }) => Promise<void>;
+  /** Best-effort semantic/geometry hook for a uniquely resolved target. */
+  onTarget?: (event: {
+    backendNodeId: number;
+    frameId: string;
+    role: string;
+    name: string;
+  }) => void;
 };
 
 const attributeSchema = z.enum([
@@ -218,6 +231,27 @@ export class BrowserScriptPageDriver {
 
   close(): void {
     this.closed = true;
+  }
+
+  private pointer(event: { type: "mouseMoved" | "mousePressed"; x: number; y: number }): void {
+    try {
+      this.options.onPointer?.(event).catch(() => {});
+    } catch {
+      // Visual feedback must not change a browser action's outcome.
+    }
+  }
+
+  private visualTarget(target: ResolvedTarget): void {
+    try {
+      this.options.onTarget?.({
+        backendNodeId: target.backendNodeId,
+        frameId: target.frameId,
+        role: target.role,
+        name: target.name,
+      });
+    } catch {
+      // Visual feedback must not change target resolution or dispatch.
+    }
   }
 
   private allowed(url: string): void {
@@ -522,6 +556,9 @@ export class BrowserScriptPageDriver {
         });
         this.lastActionExecuted = true;
         await controller.dispatchMouseEvent(input);
+        if (input.type === "mouseMoved" || input.type === "mousePressed") {
+          this.pointer({ type: input.type, x: input.x, y: input.y });
+        }
       },
       dispatchKeyEvent: async (input: Parameters<DriverController["dispatchKeyEvent"]>[0]) => {
         await validate?.();
@@ -556,6 +593,7 @@ export class BrowserScriptPageDriver {
     const text = method === "fill" ? z.string().max(16_000).parse(params[1]) : undefined;
     const options = optionsSchema.parse(params[method === "fill" ? 2 : 1] ?? {});
     const target = await this.one(locator, "interact");
+    this.visualTarget(target);
     if (method === "hover") {
       await this.ready(target);
       this.lastActionExecuted = true;
@@ -570,6 +608,7 @@ export class BrowserScriptPageDriver {
       );
       await this.ready(target, { hit: true, point });
       await this.options.controller.dispatchMouseEvent({ type: "mouseMoved", ...point });
+      this.pointer({ type: "mouseMoved", ...point });
     } else {
       const controller = this.guardedController(target, method);
       if (method === "fill") {
@@ -752,6 +791,7 @@ export class BrowserScriptPageDriver {
     const locator = BrowserScriptLocatorSchema.parse(params[0]);
     const options = BrowserChooseOptionsSchema.parse(params[1]);
     const target = await this.one(locator, "interact");
+    this.visualTarget(target);
     const deadline = Date.now() + options.timeoutMs;
     const began = performance.now();
     let info = await this.control(target, options.panel);
@@ -846,6 +886,7 @@ export class BrowserScriptPageDriver {
             { css: option.css, frameId: target.frameId },
             "interact",
           );
+          this.visualTarget(optionTarget);
           const current = await this.control(target, options.panel);
           if (
             !current.options.some(
@@ -950,6 +991,7 @@ export class BrowserScriptPageDriver {
     const handlers: Record<string, () => Promise<unknown>> = {
       inspectControl: async () => {
         const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
+        this.visualTarget(target);
         const options = z
           .object({ panel: z.string().min(1).max(2000).optional() })
           .strict()
@@ -982,6 +1024,7 @@ export class BrowserScriptPageDriver {
       },
       read: async () => {
         const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
+        this.visualTarget(target);
         const options = z
           .object({ attribute: attributeSchema.optional() })
           .strict()
@@ -1066,6 +1109,7 @@ export class BrowserScriptPageDriver {
             "Press requires an explicit target or a target focused by this script",
           );
         }
+        this.visualTarget(target);
         if (options.target) {
           await clickElementRef({
             controller: this.guardedController(target, "click"),
@@ -1106,6 +1150,7 @@ export class BrowserScriptPageDriver {
       },
       scroll: async () => {
         const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "interact");
+        this.visualTarget(target);
         const options = optionsSchema
           .extend({
             dx: z.number().finite().min(-2000).max(2000).default(0),
@@ -1125,6 +1170,7 @@ export class BrowserScriptPageDriver {
         );
         await this.ready(target, { hit: true, point });
         await this.options.controller.dispatchMouseEvent({ type: "mouseMoved", ...point });
+        this.pointer({ type: "mouseMoved", ...point });
         await this.ready(target, { hit: true, point });
         await this.options.controller.dispatchMouseEvent({
           type: "mouseWheel",

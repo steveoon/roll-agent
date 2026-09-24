@@ -16,6 +16,7 @@ import {
 import type {
   BrowserExecuteInput,
   BrowserExecuteResult,
+  BrowserProgramDriver,
   BrowserRuntime,
 } from "@roll-agent/browser";
 import { getRuntime, getBrowserInstancePoolOrUndefined } from "./runtime-holder.ts";
@@ -23,6 +24,7 @@ import { observeBrowserPage } from "./browser-observation.ts";
 import { browserElementRefStore } from "./element-ref-store.ts";
 import { canonicalJson } from "./workflows/parameters.ts";
 import { assertScriptDomains, authorizeBrowserScript } from "./browser-script-approval.ts";
+import { ExecutionVisualFeedback } from "./execution-visual-feedback.ts";
 
 export type BrowserExecutionDependencies = {
   runtime: Pick<BrowserRuntime, "getConfig" | "listNativePages" | "connectNativePage">;
@@ -113,6 +115,11 @@ export async function executeBrowserTool(
       },
       deps.runtime.getConfig().security,
     );
+    const visual = new ExecutionVisualFeedback(
+      controller,
+      options.workflowKey === undefined ? "script" : "workflow",
+    );
+    await visual.begin();
     let artifactDirectory: string | undefined;
     const driver = new BrowserScriptPageDriver({
       controller,
@@ -187,16 +194,51 @@ export async function executeBrowserTool(
         artifacts.push(artifact);
         return artifact;
       },
+      onPointer: async (event) => await visual.pointer(event),
+      onTarget: (event) => visual.focusTarget(event),
     });
-    const result = await deps.execute(input, {
-      driver,
-      artifacts,
-      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-    });
-    ctx.logger.info(
-      `browser_execute ${result.executionId}: ${result.status}, ${result.metrics.helperCalls} helpers, ${Math.round(result.metrics.elapsedMs)}ms`,
-    );
-    return { result, executionDigest: approved.executionDigest };
+    const feedbackDriver: BrowserProgramDriver = {
+      get checks() {
+        return driver.checks;
+      },
+      get lastActionExecuted() {
+        return driver.lastActionExecuted;
+      },
+      get lastVerification() {
+        return driver.lastVerification;
+      },
+      invoke: async (method, params) => await visual.invoke(driver, method, params),
+      close: () => driver.close(),
+    };
+    try {
+      const result = await deps.execute(input, {
+        driver: feedbackDriver,
+        artifacts,
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+      });
+      await visual.finish(
+        result.status === "completed"
+          ? result.verification === "passed"
+            ? "动作校验通过 · 任务待验收"
+            : "脚本已结束 · 结果待验收"
+          : result.status === "cancelled"
+            ? "执行已取消 · 已发出动作未回滚"
+            : result.status === "timed_out"
+              ? "执行超时 · 已发出动作未回滚"
+              : "执行中断 · 检查动作结果",
+        result.status === "completed" ? "info" : "error",
+      );
+      ctx.logger.info(
+        `browser_execute ${result.executionId}: ${result.status}, ${result.metrics.helperCalls} helpers, ${Math.round(result.metrics.elapsedMs)}ms`,
+      );
+      return { result, executionDigest: approved.executionDigest };
+    } catch (error) {
+      await visual.finish(
+        ctx.signal?.aborted ? "执行已取消 · 已发出动作未回滚" : "执行中断 · 检查页面结果",
+        "error",
+      );
+      throw error;
+    }
   } finally {
     controller.close();
   }

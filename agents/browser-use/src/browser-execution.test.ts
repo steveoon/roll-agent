@@ -64,6 +64,7 @@ function fixture(execute?: BrowserExecutionDependencies["execute"]) {
     loaderId: "document-one",
     closed: 0,
     executions: 0,
+    visualExpressions: [] as string[],
     navigations: [] as string[],
     onNavigate: () => {},
   };
@@ -76,6 +77,10 @@ function fixture(execute?: BrowserExecutionDependencies["execute"]) {
       state.url = url;
       state.onNavigate();
       return { frameId: "main" };
+    },
+    evaluateJson: async (expression: string) => {
+      state.visualExpressions.push(expression);
+      return true;
     },
     close: () => {
       state.closed++;
@@ -138,6 +143,8 @@ test("service requests confirmation before effects and consumes an exact retry o
   assert.equal(result.result.status, "completed");
   assert.equal(target.state.executions, 1);
   assert.deepEqual(target.state.navigations, ["https://example.com/next"]);
+  assert.match(target.state.visualExpressions.join("\n"), /浏览器脚本|打开页面/u);
+  assert.match(target.state.visualExpressions.join("\n"), /脚本已结束 · 结果待验收/u);
   await request(input(retry));
   assert.equal(target.state.executions, 1);
 });

@@ -26,6 +26,7 @@ import { createDependencyObserver } from "./dependency-observation.ts";
 import { attachTaskText } from "./task-observation.ts";
 import { semanticGoalControl } from "./task-freshness.ts";
 import { createRetryingGoalObserver } from "./observation-retry.ts";
+import { ExecutionVisualFeedback } from "../execution-visual-feedback.ts";
 
 export function permittedFrames(tree: NativeCdpFrameTree, origins: readonly string[]): Set<string> {
   const ids = new Set<string>();
@@ -130,6 +131,7 @@ export async function operateBrowser(
   }
   const controller = await runtime.connectNativePage(page);
   let driver: BrowserScriptPageDriver | undefined;
+  let visual: ExecutionVisualFeedback | undefined;
   try {
     const documentId = await readBrowserDocumentIdentity(controller);
     const { browserActionApproval, ...task } = input;
@@ -142,6 +144,12 @@ export async function operateBrowser(
       url: page.url,
       ...(browserActionApproval === undefined ? {} : { approval: browserActionApproval }),
     });
+    visual = new ExecutionVisualFeedback(
+      controller,
+      input.readTask ? "read" : input.formTask ? "form" : "task",
+    );
+    await visual.begin();
+    const feedback = visual;
     // Native driver supplies its own per-dispatch guards, just as browser_execute does.
     // Preflight here also enforces the existing whole-task confirmation policy.
     const observeDependencies = createDependencyObserver(controller, input.allowedOrigins, signal);
@@ -183,9 +191,15 @@ export async function operateBrowser(
     };
     // Retry only the loop's next complete observation. The native driver's
     // in-action snapshot/expect path keeps its original no-replay behavior.
-    const observeGoal = createRetryingGoalObserver(observe, signal, () =>
+    const retryingObserve = createRetryingGoalObserver(observe, signal, () =>
       browserElementRefStore.clear(page.targetId),
     );
+    const observeGoal: GoalDriver["observe"] = async (dependencyIdentities) => {
+      await feedback.setStage("viewing");
+      const snapshot = await retryingObserve(dependencyIdentities);
+      feedback.observe(snapshot, input.formTask?.fields.map((field) => field.name) ?? []);
+      return snapshot;
+    };
     driver = new BrowserScriptPageDriver({
       controller,
       pageId: page.targetId,
@@ -218,14 +232,17 @@ export async function operateBrowser(
       capture: async () => {
         throw new BrowserScriptError("capability_denied", "Goal loop does not capture screenshots");
       },
+      onPointer: async (event) => await feedback.pointer(event),
+      onTarget: (event) => feedback.focusTarget(event),
     });
     const boundDriver = driver;
     let decisionCount = 0;
     const goalDriver: GoalDriver = {
       observe: observeGoal,
-      invoke: (method, params) => boundDriver.invoke(method, params),
+      invoke: (method, params) => feedback.invoke(boundDriver, method, params),
       actionExecuted: () => boundDriver.lastActionExecuted,
       checkTarget: async (snapshot, ref) => {
+        await feedback.setStage("checking");
         assertDomains();
         if ((await readBrowserDocumentIdentity(controller)) !== snapshot.documentId) return false;
         const inspected = await inspectGoalControls(
@@ -245,15 +262,40 @@ export async function operateBrowser(
       },
     };
     const choose: DecisionProvider = async (request, requestSignal) => {
+      await feedback.setStage("deciding");
       const result = await provider(request, requestSignal);
       ctx.logger.info(
         `browser_operate decision ${++decisionCount}: ${result.choices.operation ?? result.choices.status} ${result.choices.next ?? ""} (${Math.round(result.elapsedMs)}ms)`,
       );
       return result;
     };
-    return input.strategy === "task"
-      ? await runBrowserTask(input, goalDriver, choose, signal)
-      : await runBrowserGoal(input, goalDriver, choose, signal);
+    const result =
+      input.strategy === "task"
+        ? await runBrowserTask(input, goalDriver, choose, signal)
+        : await runBrowserGoal(input, goalDriver, choose, signal);
+    await feedback.finish(
+      result.status === "model_done" || result.status === "interaction_done"
+        ? "交互已结束 · 待上层验收"
+        : result.status === "needs_input"
+          ? "需要补充信息"
+          : result.status === "needs_reasoning"
+            ? "需要上层继续判断"
+            : result.status === "cancelled"
+              ? "执行已取消 · 已发出动作未回滚"
+              : result.status === "blocked"
+                ? "操作已受阻"
+                : result.status === "step_limit"
+                  ? "步骤上限已到 · 待上层验收"
+                  : "执行中断 · 检查页面结果",
+      result.status === "model_done" || result.status === "interaction_done" ? "info" : "error",
+    );
+    return result;
+  } catch (error) {
+    await visual?.finish(
+      signal.aborted ? "执行已取消 · 已发出动作未回滚" : "执行中断 · 检查页面结果",
+      "error",
+    );
+    throw error;
   } finally {
     driver?.close();
     controller.close();

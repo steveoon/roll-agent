@@ -8,7 +8,7 @@ import type {
 } from "./native-mouse-motion.ts";
 
 type NativeVisualTarget = {
-  evaluateJson<T = unknown>(expression: string): Promise<T>;
+  evaluateJson<T = unknown>(expression: string, options?: { timeoutMs?: number }): Promise<T>;
 };
 
 type NativeVisualHighlightOptions = {
@@ -17,8 +17,42 @@ type NativeVisualHighlightOptions = {
   readonly tone?: VisualActivityTone;
 };
 
+export type NativeExecutionCard = {
+  readonly ownerId: string;
+  readonly epoch: number;
+  readonly revision: number;
+  readonly actionRevision: number;
+  readonly title: string;
+  readonly stage: string;
+  readonly action?: string;
+  readonly target?: string;
+  readonly recent: readonly string[];
+  readonly tone?: VisualActivityTone;
+  readonly lingerMs?: number;
+};
+
+export type NativeExecutionRect = {
+  readonly ownerId: string;
+  readonly epoch: number;
+  readonly actionRevision: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
+export type NativeExecutionPointer = {
+  readonly ownerId: string;
+  readonly epoch: number;
+  readonly actionRevision: number;
+  readonly type: "mouseMoved" | "mousePressed";
+  readonly x: number;
+  readonly y: number;
+};
+
 const DEFAULT_REGION_PADDING = 14;
 const DEFAULT_COMPLETION_LINGER_MS = 720;
+const EXECUTION_VISUAL_TIMEOUT_MS = 300;
 
 function buildNativeVisualScript(args: unknown): string {
   return `(() => {
@@ -29,6 +63,8 @@ function buildNativeVisualScript(args: unknown): string {
     const activityCapsuleId = "roll-agent-visual-activity-capsule";
     const activityDotId = "roll-agent-visual-activity-dot";
     const activityLabelId = "roll-agent-visual-activity-label";
+    const executionCardId = "roll-agent-visual-execution-card";
+    const executionStateKey = "__rollVisualExecutionState";
     const cursorRootId = "roll-agent-visual-cursor-root";
     const cursorPointerId = "roll-agent-visual-cursor-pointer";
     const cursorStateKey = "__rollVisualCursorState";
@@ -119,12 +155,17 @@ function buildNativeVisualScript(args: unknown): string {
     const ensureActivityRoot = () => {
       let root = document.getElementById(activityRootId);
       if (root) {
+        root.setAttribute("aria-hidden", "true");
+        root.setAttribute("inert", "");
+        root.style.pointerEvents = "none";
         const viewport = document.getElementById(activityViewportId);
         if (viewport) normalizeActivityViewport(viewport);
         return root;
       }
       root = document.createElement("div");
       root.id = activityRootId;
+      root.setAttribute("aria-hidden", "true");
+      root.setAttribute("inert", "");
       root.style.position = "fixed";
       root.style.inset = "0";
       root.style.pointerEvents = "none";
@@ -180,6 +221,191 @@ function buildNativeVisualScript(args: unknown): string {
       root.append(viewport, region, capsule);
       document.documentElement.append(root);
       return root;
+    };
+
+    const executionState = () => window[executionStateKey];
+
+    const hideExecutionRegion = () => {
+      const region = document.getElementById(activityRegionId);
+      if (!region) return;
+      region.style.opacity = "0";
+      region.style.transform = "translate(-9999px, -9999px)";
+    };
+
+    const placeCardAwayFrom = (target) => {
+      const card = document.getElementById(executionCardId);
+      if (!card) return;
+      const margin = 16;
+      const cardWidth = card.getBoundingClientRect().width;
+      const cardHeight = card.getBoundingClientRect().height;
+      const positions = [
+        { left: window.innerWidth - cardWidth - margin, top: margin },
+        { left: window.innerWidth - cardWidth - margin, top: window.innerHeight - cardHeight - margin },
+        { left: margin, top: margin },
+        { left: margin, top: window.innerHeight - cardHeight - margin }
+      ];
+      const overlap = (position) => {
+        const width = Math.max(0, Math.min(position.left + cardWidth, target.x + target.width) - Math.max(position.left, target.x));
+        const height = Math.max(0, Math.min(position.top + cardHeight, target.y + target.height) - Math.max(position.top, target.y));
+        return width * height;
+      };
+      const best = positions.find((position) => overlap(position) === 0) ??
+        positions.reduce((a, b) => overlap(a) <= overlap(b) ? a : b);
+      card.style.left = Math.max(margin, best.left) + "px";
+      card.style.top = Math.max(margin, best.top) + "px";
+      card.style.right = "auto";
+      card.style.bottom = "auto";
+    };
+
+    const renderExecution = () => {
+      const update = args.executionLifecycle;
+      if (!update || !update.ownerId || !Number.isSafeInteger(update.epoch) ||
+          !Number.isSafeInteger(update.revision) || !Number.isSafeInteger(update.actionRevision)) return;
+      const previous = executionState();
+      if (previous && update.epoch < previous.epoch) return;
+      if (previous && update.epoch === previous.epoch && previous.ownerId !== update.ownerId) return;
+      if (previous && update.epoch === previous.epoch && previous.terminal) return;
+      const state = previous && update.epoch === previous.epoch
+        ? previous
+        : { ownerId: update.ownerId, epoch: update.epoch, revision: -1, actionRevision: -1, terminal: false };
+      if (update.revision <= state.revision || update.actionRevision < state.actionRevision) return;
+      if (!previous || update.epoch > previous.epoch) {
+        document.getElementById(cursorRootId)?.remove();
+      }
+      if (update.actionRevision !== state.actionRevision) hideExecutionRegion();
+      state.revision = update.revision;
+      state.actionRevision = update.actionRevision;
+      window[executionStateKey] = state;
+      let card = document.getElementById(executionCardId);
+      if (update.mode === "clear") {
+        state.terminal = true;
+        card?.remove();
+        document.getElementById(cursorRootId)?.remove();
+        hideExecutionRegion();
+        return;
+      }
+      if (update.mode === "complete") {
+        state.terminal = true;
+        hideExecutionRegion();
+        const owner = update.ownerId;
+        const epoch = update.epoch;
+        const cursor = document.getElementById(cursorRootId);
+        window.setTimeout(() => {
+          const current = executionState();
+          if (current?.ownerId === owner && current.epoch === epoch && current.terminal) {
+            cursor?.remove();
+          }
+        }, 700);
+      }
+      const visibleCard = args.executionCard;
+      if (!visibleCard) {
+        card?.remove();
+        return;
+      }
+      const root = ensureActivityRoot();
+      if (!card) {
+        card = document.createElement("div");
+        card.id = executionCardId;
+        card.setAttribute("aria-hidden", "true");
+        card.setAttribute("inert", "");
+        card.style.position = "fixed";
+        card.style.top = "16px";
+        card.style.right = "16px";
+        card.style.boxSizing = "border-box";
+        card.style.width = "min(340px, calc(100vw - 32px))";
+        card.style.maxHeight = "min(240px, calc(100vh - 32px))";
+        card.style.overflow = "hidden";
+        card.style.padding = "13px 15px";
+        card.style.borderRadius = "14px";
+        card.style.font = "12px/1.45 system-ui, -apple-system, sans-serif";
+        card.style.boxShadow = "0 16px 42px rgba(15,23,42,.26)";
+        card.style.backdropFilter = "blur(12px)";
+        card.style.pointerEvents = "none";
+        root.append(card);
+      }
+      card.dataset.ownerId = update.ownerId;
+      card.dataset.epoch = String(update.epoch);
+      card.dataset.revision = String(update.revision);
+      card.dataset.actionRevision = String(update.actionRevision);
+      const theme = themes[visibleCard.tone] ?? themes.info;
+      card.style.background = theme.capsuleBg;
+      card.style.border = "1px solid " + theme.capsuleBorder;
+      card.style.color = theme.text;
+      card.replaceChildren();
+      const line = (value, size, weight, opacity) => {
+        const item = document.createElement("div");
+        item.textContent = String(value ?? "").slice(0, 160);
+        item.style.fontSize = size + "px";
+        item.style.fontWeight = weight;
+        item.style.opacity = opacity;
+        item.style.overflow = "hidden";
+        item.style.textOverflow = "ellipsis";
+        item.style.whiteSpace = "nowrap";
+        item.style.marginBottom = "3px";
+        card.append(item);
+      };
+      line(visibleCard.title, 13, "700", "1");
+      line(visibleCard.stage, 12, "600", "1");
+      if (visibleCard.action) line(visibleCard.action, 12, "500", ".9");
+      if (visibleCard.target) line(visibleCard.target, 12, "500", ".82");
+      const recent = Array.isArray(visibleCard.recent) ? visibleCard.recent.slice(-3) : [];
+      if (recent.length) {
+        const divider = document.createElement("div");
+        divider.style.borderTop = "1px solid " + theme.capsuleBorder;
+        divider.style.margin = "7px 0 5px";
+        card.append(divider);
+        for (const item of recent) line(item, 11, "400", ".76");
+      }
+      const region = document.getElementById(activityRegionId);
+      if (region?.style.opacity === "1" && region.dataset.ownerId === update.ownerId &&
+          Number(region.dataset.actionRevision) === update.actionRevision) {
+        placeCardAwayFrom({
+          x: Number(region.dataset.x), y: Number(region.dataset.y),
+          width: Number(region.dataset.width), height: Number(region.dataset.height)
+        });
+      }
+      if (update.mode === "complete") {
+        const owner = update.ownerId;
+        const epoch = update.epoch;
+        const revision = String(update.revision);
+        window.setTimeout(() => {
+          const current = executionState();
+          if (current?.ownerId === owner && current.epoch === epoch && current.terminal &&
+              card?.dataset.revision === revision) card.remove();
+        }, Math.max(0, Math.min(update.lingerMs ?? 1800, 10000)));
+      }
+    };
+
+    const renderExecutionTarget = () => {
+      const target = args.executionTarget;
+      const state = executionState();
+      if (!target || !state || state.terminal || state.ownerId !== target.ownerId ||
+          state.epoch !== target.epoch || target.actionRevision < state.actionRevision) return;
+      const values = [target.x, target.y, target.width, target.height];
+      if (!values.every(Number.isFinite) || target.width <= 0 || target.height <= 0) return;
+      const left = Math.max(0, Math.min(window.innerWidth, target.x));
+      const top = Math.max(0, Math.min(window.innerHeight, target.y));
+      const right = Math.max(left, Math.min(window.innerWidth, target.x + target.width));
+      const bottom = Math.max(top, Math.min(window.innerHeight, target.y + target.height));
+      if (right <= left || bottom <= top) return;
+      state.actionRevision = target.actionRevision;
+      const root = ensureActivityRoot();
+      const region = document.getElementById(activityRegionId);
+      if (!root || !region) return;
+      region.dataset.ownerId = target.ownerId;
+      region.dataset.actionRevision = String(target.actionRevision);
+      region.dataset.x = String(left);
+      region.dataset.y = String(top);
+      region.dataset.width = String(right - left);
+      region.dataset.height = String(bottom - top);
+      region.style.width = right - left + "px";
+      region.style.height = bottom - top + "px";
+      region.style.transform = "translate(" + left + "px, " + top + "px)";
+      region.style.border = "2px solid rgba(45, 212, 191, .95)";
+      region.style.background = "rgba(20, 184, 166, .12)";
+      region.style.boxShadow = "0 0 0 4px rgba(20, 184, 166, .18)";
+      region.style.opacity = "1";
+      placeCardAwayFrom({ x: left, y: top, width: right - left, height: bottom - top });
     };
 
     const applyTheme = (themeName, mode) => {
@@ -258,6 +484,8 @@ function buildNativeVisualScript(args: unknown): string {
       if (root) return root;
       root = document.createElement("div");
       root.id = cursorRootId;
+      root.setAttribute("aria-hidden", "true");
+      root.setAttribute("inert", "");
       root.style.position = "fixed";
       root.style.left = "0";
       root.style.top = "0";
@@ -370,6 +598,12 @@ function buildNativeVisualScript(args: unknown): string {
     };
 
     const renderCursor = () => {
+      const execution = args.cursor?.execution;
+      if (execution) {
+        const state = executionState();
+        if (!state || state.terminal || state.ownerId !== execution.ownerId ||
+            state.epoch !== execution.epoch || execution.actionRevision < state.actionRevision) return;
+      }
       const path = readCursorPath();
       const click = readCursorClick();
       const point = path ? path[path.length - 1] : click?.point ?? null;
@@ -412,6 +646,8 @@ function buildNativeVisualScript(args: unknown): string {
     };
 
     renderActivity();
+    renderExecution();
+    renderExecutionTarget();
     renderCursor();
     return true;
   })()`;
@@ -419,9 +655,65 @@ function buildNativeVisualScript(args: unknown): string {
 
 export class NativeVisualActivitySession implements NativeMouseMotionObserver {
   private readonly target: NativeVisualTarget;
+  private executionLifecycleStarted = false;
 
   constructor(target: NativeVisualTarget) {
     this.target = target;
+  }
+
+  async showExecutionCard(
+    card: NativeExecutionCard,
+    mode: "begin" | "update" | "complete" = "update",
+  ): Promise<boolean> {
+    const showCard = isVisualActivityEnabled();
+    if (!showCard && !isVisualCursorEnabled() && !this.executionLifecycleStarted) return false;
+    this.executionLifecycleStarted = true;
+    return await this.render(
+      {
+        executionLifecycle: {
+          ownerId: card.ownerId,
+          epoch: card.epoch,
+          revision: card.revision,
+          actionRevision: card.actionRevision,
+          mode,
+          ...(card.lingerMs === undefined ? {} : { lingerMs: card.lingerMs }),
+        },
+        ...(showCard ? { executionCard: card } : {}),
+      },
+      { timeoutMs: EXECUTION_VISUAL_TIMEOUT_MS },
+    );
+  }
+
+  async clearExecutionCard(
+    card: Pick<NativeExecutionCard, "ownerId" | "epoch" | "revision" | "actionRevision">,
+  ): Promise<boolean> {
+    if (!isVisualActivityEnabled() && !isVisualCursorEnabled() && !this.executionLifecycleStarted) {
+      return false;
+    }
+    return await this.render(
+      { executionLifecycle: { mode: "clear", ...card } },
+      { timeoutMs: EXECUTION_VISUAL_TIMEOUT_MS },
+    );
+  }
+
+  async highlightExecutionRect(rect: NativeExecutionRect): Promise<boolean> {
+    if (!isVisualActivityEnabled()) return false;
+    return await this.render({ executionTarget: rect }, { timeoutMs: EXECUTION_VISUAL_TIMEOUT_MS });
+  }
+
+  async previewExecutionPointer(pointer: NativeExecutionPointer): Promise<boolean> {
+    if (!isVisualCursorEnabled()) return false;
+    const cursor = {
+      execution: {
+        ownerId: pointer.ownerId,
+        epoch: pointer.epoch,
+        actionRevision: pointer.actionRevision,
+      },
+      ...(pointer.type === "mouseMoved"
+        ? { path: { points: [{ x: pointer.x, y: pointer.y }], durationMs: 0 } }
+        : { click: { point: { x: pointer.x, y: pointer.y }, durationMs: 620 } }),
+    };
+    return await this.render({ cursor }, { timeoutMs: EXECUTION_VISUAL_TIMEOUT_MS });
   }
 
   async begin(label: string, tone: VisualActivityTone = "info"): Promise<boolean> {
@@ -535,9 +827,9 @@ export class NativeVisualActivitySession implements NativeMouseMotionObserver {
     });
   }
 
-  private async render(args: unknown): Promise<boolean> {
+  private async render(args: unknown, options?: { timeoutMs?: number }): Promise<boolean> {
     try {
-      return await this.target.evaluateJson<boolean>(buildNativeVisualScript(args));
+      return await this.target.evaluateJson<boolean>(buildNativeVisualScript(args), options);
     } catch {
       return false;
     }
