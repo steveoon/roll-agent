@@ -26,7 +26,10 @@ import { getFileChangeDisplay } from "@roll-agent/protocol";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
-import type { ToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+import {
+  prepareToolExecutionRecordForPersistence,
+  type ToolExecutionRecord,
+} from "../tool-bridge/tool-execution-record.ts";
 import { readCancelledTurnRecoveryCheckpoint } from "./cancelled-turn-recovery.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
@@ -140,6 +143,745 @@ test("AgentSession exposes a stable user input Tool only while the host capabili
     assert.match(systemPrompt, /用户取消属于正常结果/u);
   } finally {
     await session.close();
+  }
+});
+
+test("真实 AI SDK 跨文档多步只保留当前引用，落盘保留完整 browser snapshot", async () => {
+  const prompts: LanguageModelV4CallOptions[] = [];
+  let modelCall = 0;
+  let observationCall = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      prompts.push(options);
+      const index = modelCall++;
+      return streamChunks(
+        index < 2
+          ? multiToolCallStep([
+              {
+                toolCallId: `snapshot-call-${index}`,
+                toolName: "browser__snapshot",
+                input: {},
+              },
+            ])
+          : textStep("done"),
+      );
+    },
+  });
+  const source: AgentToolSource = {
+    agentName: "browser",
+    client: {
+      callTool: async () => {
+        const index = observationCall++;
+        const value = {
+          page: { url: "https://example.test" },
+          snapshot: {
+            browserInstance: "instance-a",
+            pageId: "page-a",
+            documentId: `document-${index}`,
+            snapshotId: `snapshot-${index}`,
+            nodes: [
+              {
+                role: "textbox",
+                name: `field-${index}-${"x".repeat(5_000)}`,
+                ref: "@e1",
+                depth: 0,
+                ignored: false,
+              },
+            ],
+            refs: [
+              {
+                ref: "@e1",
+                role: "textbox",
+                name: `field-${index}-${"x".repeat(5_000)}`,
+                nth: 0,
+                disabled: false,
+              },
+            ],
+            nodeCount: 1,
+            truncated: false,
+            maxNodes: 100,
+            interactiveOnly: true,
+          },
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(value) }],
+          structuredContent: value,
+        };
+      },
+    } as unknown as Client,
+    tools: [
+      {
+        tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+        annotations: { readOnlyHint: true },
+        observationRetention: { kind: "browser-ax-snapshot" },
+      },
+    ],
+  };
+  const persisted: ModelMessage[][] = [];
+  const records: ToolExecutionRecord[] = [];
+  let restoredHistory: readonly ModelMessage[] = [];
+  const session = new AgentSession({
+    id: "observation-multi-step",
+    model,
+    sources: [source],
+    maxSteps: 4,
+    policy: allowToolPolicy,
+    onPersist: (messages) => persisted.push([...messages]),
+    onToolExecution: (record) => records.push(record),
+  });
+  try {
+    await collect(session.send("inspect"));
+    assert.equal(prompts.length, 3);
+    assert.equal(observationCall, 2);
+    assert.doesNotMatch(JSON.stringify(prompts[1]?.prompt), /\[structuredContent\]/u);
+    assert.doesNotMatch(JSON.stringify(prompts[1]?.prompt), /"refs":\[/u);
+    assert.match(JSON.stringify(prompts[1]?.prompt), /modelProjectionTruncated/u);
+    assert.match(JSON.stringify(prompts[1]?.prompt), new RegExp(records[0]?.id ?? "missing", "u"));
+    const third = JSON.stringify(prompts[2]?.prompt);
+    assert.match(third, /historicalObservation/u);
+    assert.match(third, /"documentStale":true/u);
+    assert.equal(third.match(/"ref":"@e1"/gu)?.length, 1);
+    assert.match(third, new RegExp(records[0]?.id ?? "missing", "u"));
+    assert.doesNotMatch(third, /field-0-x{100}/u);
+    const canonical = JSON.stringify(session.getMessages());
+    assert.match(canonical, /field-0-x{100}/u);
+    assert.match(canonical, /field-1-x{100}/u);
+    assert.match(canonical, /\\"refs\\"/u);
+    assert.equal(persisted.length, 1);
+    assert.equal(records.length, 2);
+    restoredHistory = session.getMessages();
+  } finally {
+    await session.close();
+  }
+  const persistedRecords = records.map((record, sequence) => ({ ...record, sequence }));
+  const resumedPrompts: LanguageModelV4CallOptions[] = [];
+  const resumed = new AgentSession({
+    id: "observation-restored",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        resumedPrompts.push(options);
+        return streamChunks(textStep("restored"));
+      },
+    }),
+    sources: [source],
+    maxSteps: 2,
+    initialMessages: restoredHistory,
+    getToolExecution: (id) => persistedRecords.find((record) => record.id === id),
+    listToolExecutions: (options) =>
+      persistedRecords.filter(
+        (record) => options?.toolCallId === undefined || record.toolCallId === options.toolCallId,
+      ),
+  });
+  try {
+    await collect(resumed.send("again"));
+    assert.match(JSON.stringify(resumedPrompts[0]?.prompt), /historicalObservation/u);
+    assert.match(
+      JSON.stringify(resumedPrompts[0]?.prompt),
+      new RegExp(records[0]?.id ?? "missing", "u"),
+    );
+    assert.match(JSON.stringify(resumed.getMessages()), /field-0-x{100}/u);
+  } finally {
+    await resumed.close();
+  }
+
+  const readModel = (resultId: string) =>
+    sequencedModel([
+      multiToolCallStep([
+        { toolCallId: "read-call", toolName: "roll__observation", input: { resultId } },
+      ]),
+      textStep("read done"),
+    ]);
+  const readback = new AgentSession({
+    id: "observation-readback",
+    model: readModel(records[0]!.id),
+    sources: [source],
+    maxSteps: 3,
+    initialMessages: restoredHistory,
+    getToolExecution: (id) => persistedRecords.find((record) => record.id === id),
+  });
+  try {
+    const events = await collect(readback.send("read old result"));
+    assert.ok(
+      events.some((event) => event.type === "tool-result" && event.outcome?.kind === "success"),
+    );
+  } finally {
+    await readback.close();
+  }
+  const otherThread = new AgentSession({
+    id: "observation-other-thread",
+    model: readModel(records[0]!.id),
+    sources: [source],
+    maxSteps: 3,
+  });
+  try {
+    const events = await collect(otherThread.send("read foreign result"));
+    assert.ok(
+      events.some(
+        (event) => event.type === "tool-result" && event.outcome?.kind === "invalid_input",
+      ),
+    );
+  } finally {
+    await otherThread.close();
+  }
+});
+
+for (const mode of ["recall", "pressure"] as const) {
+  test(`同轮快照替换后的 ${mode} 不丢失证据或重复计算旧快照压力`, async () => {
+    let modelCalls = 0;
+    let snapshotCalls = 0;
+    const records: ReturnType<typeof prepareToolExecutionRecordForPersistence>[] = [];
+    const session = new AgentSession({
+      id: `observation-${mode}-regression`,
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          const index = modelCalls++;
+          if (index < 2) {
+            return streamChunks([
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                toolCallId: `snapshot-${index}`,
+                toolName: "browser__snapshot",
+                input: "{}",
+              },
+              {
+                type: "finish",
+                usage: usage(index === 1 ? 3_500 : 100),
+                finishReason: TOOL_CALLS,
+              },
+            ]);
+          }
+          if (mode === "recall" && index === 2) {
+            return streamChunks([
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                toolCallId: "recall-old",
+                toolName: "roll__observation",
+                input: JSON.stringify({ resultId: records[0]?.id }),
+              },
+              { type: "finish", usage: usage(100), finishReason: TOOL_CALLS },
+            ]);
+          }
+          return streamChunks(textStep("done"));
+        },
+      }),
+      sources: [
+        {
+          agentName: "browser",
+          client: {
+            callTool: async () => {
+              const index = snapshotCalls++;
+              const size = mode === "recall" ? 100_000 : 10_000;
+              const value = {
+                page: { url: "https://example.test" },
+                snapshot: {
+                  snapshotId: `snapshot-${index}`,
+                  browserInstance: "browser-a",
+                  pageId: "page-a",
+                  documentId: "document-a",
+                  nodes: [
+                    {
+                      role: "textbox",
+                      name: `field-${index}-${"x".repeat(size)}`,
+                      ref: "@e1",
+                    },
+                  ],
+                  refs: [{ ref: "@e1", role: "textbox", name: `field-${index}` }],
+                  nodeCount: 1,
+                  truncated: false,
+                  maxNodes: 100,
+                  interactiveOnly: true,
+                },
+              };
+              return { content: [{ type: "text", text: JSON.stringify(value) }] };
+            },
+          } as unknown as Client,
+          tools: [
+            {
+              tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+              annotations: { readOnlyHint: true },
+              observationRetention: { kind: "browser-ax-snapshot" },
+            },
+          ],
+        },
+      ],
+      policy: allowToolPolicy,
+      maxSteps: 8,
+      onToolExecution: (record) => records.push(prepareToolExecutionRecordForPersistence(record)),
+      getToolExecution: (id) => {
+        const sequence = records.findIndex((record) => record.id === id);
+        const record = records[sequence];
+        return record ? { ...record, sequence } : undefined;
+      },
+      listToolExecutions: (options) =>
+        records
+          .map((record, sequence) => ({ ...record, sequence }))
+          .filter(
+            (record) =>
+              options?.toolCallId === undefined || record.toolCallId === options.toolCallId,
+          ),
+      ...(mode === "pressure"
+        ? {
+            contextWindow: 8_000,
+            compaction: {
+              enabled: true,
+              strategy: "truncate" as const,
+              threshold: 0.75,
+              keepRecentTurns: 1,
+              keepRecentTokens: 32_000,
+            },
+          }
+        : {}),
+    });
+    try {
+      const events = await collect(session.send("inspect two snapshots and continue"));
+      assert.equal(snapshotCalls, 2);
+      assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+      assert.equal(events.filter((event) => event.type === "error").length, 0);
+      if (mode === "recall") {
+        assert.equal(records[0]?.persistence.fields.raw.truncated, true);
+        const recall = session
+          .getMessages()
+          .flatMap((message) => (message.role === "tool" ? message.content : []))
+          .find((part) => part.type === "tool-result" && part.toolName === "roll__observation");
+        assert.equal(recall?.type, "tool-result");
+        if (recall?.type === "tool-result") {
+          assert.match(JSON.stringify(recall.output), /"complete":true/u);
+          assert.match(JSON.stringify(recall.output), /active_history/u);
+        }
+      }
+    } finally {
+      await session.close();
+    }
+  });
+}
+
+test("真实 AI SDK 同批多次观察回查全部进入下一次推理，下一用户轮次再淘汰", async () => {
+  let modelCalls = 0;
+  let snapshotCalls = 0;
+  const prompts: LanguageModelV4CallOptions[] = [];
+  const records: ToolExecutionRecord[] = [];
+  const session = new AgentSession({
+    id: "observation-batched-recall",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        prompts.push(options);
+        const index = modelCalls++;
+        if (index === 0) {
+          return streamChunks(
+            multiToolCallStep([
+              { toolCallId: "snapshot-a", toolName: "browser__snapshot", input: {} },
+              { toolCallId: "snapshot-b", toolName: "browser__snapshot", input: {} },
+            ]),
+          );
+        }
+        if (index === 2) {
+          return streamChunks(
+            multiToolCallStep([
+              {
+                toolCallId: "recall-a",
+                toolName: "roll__observation",
+                input: { resultId: records[0]?.id },
+              },
+              {
+                toolCallId: "recall-failed",
+                toolName: "roll__observation",
+                input: { resultId: "00000000-0000-4000-8000-000000000000" },
+              },
+              {
+                toolCallId: "recall-b",
+                toolName: "roll__observation",
+                input: { resultId: records[1]?.id },
+              },
+            ]),
+          );
+        }
+        return streamChunks(textStep("done"));
+      },
+    }),
+    sources: [
+      {
+        agentName: "browser",
+        client: {
+          callTool: async () => {
+            const index = snapshotCalls++;
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    page: { url: "https://example.test" },
+                    snapshot: {
+                      snapshotId: `snapshot-${index}`,
+                      browserInstance: "browser-a",
+                      pageId: "page-a",
+                      documentId: "document-a",
+                      nodes: [{ role: "text", name: index === 0 ? "ONLY_A" : "ONLY_B" }],
+                      refs: [],
+                      nodeCount: 1,
+                      truncated: false,
+                      maxNodes: 100,
+                      interactiveOnly: true,
+                    },
+                  }),
+                },
+              ],
+            };
+          },
+        } as unknown as Client,
+        tools: [
+          {
+            tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+            annotations: { readOnlyHint: true },
+            observationRetention: { kind: "browser-ax-snapshot" },
+          },
+        ],
+      },
+    ],
+    maxSteps: 5,
+    policy: allowToolPolicy,
+    onToolExecution: (record) => records.push(record),
+    getToolExecution: (id) => {
+      const sequence = records.findIndex((record) => record.id === id);
+      const record = records[sequence];
+      return record ? { ...record, sequence } : undefined;
+    },
+    listToolExecutions: (options) =>
+      records
+        .map((record, sequence) => ({ ...record, sequence }))
+        .filter(
+          (record) => options?.toolCallId === undefined || record.toolCallId === options.toolCallId,
+        ),
+  });
+  try {
+    await collect(session.send("observe two states"));
+    assert.equal(snapshotCalls, 2);
+    const recallEvents = await collect(session.send("compare both historical states"));
+    assert.equal(
+      recallEvents.filter(
+        (event) =>
+          event.type === "tool-result" &&
+          event.toolName === "observation" &&
+          event.outcome?.kind === "success",
+      ).length,
+      2,
+    );
+    const comparePrompt = JSON.stringify(prompts[3]?.prompt);
+    assert.match(comparePrompt, /ONLY_A/u);
+    assert.match(comparePrompt, /ONLY_B/u);
+    assert.doesNotMatch(comparePrompt, /历史观察回查/u);
+    await collect(session.send("new task"));
+    const nextPrompt = JSON.stringify(prompts[4]?.prompt);
+    assert.doesNotMatch(nextPrompt, /ONLY_A/u);
+    assert.equal(nextPrompt.match(/历史观察回查/gu)?.length, 3);
+  } finally {
+    await session.close();
+  }
+});
+
+test("同轮复用 toolCallId 时每一步仍保留各自完整快照", async () => {
+  let modelCalls = 0;
+  let observations = 0;
+  const prompts: LanguageModelV4CallOptions[] = [];
+  const session = new AgentSession({
+    id: "observation-reused-call-id",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        prompts.push(options);
+        const index = modelCalls++;
+        return streamChunks(index < 2 ? toolCallStep("browser__snapshot", {}) : textStep("done"));
+      },
+    }),
+    sources: [
+      {
+        agentName: "browser",
+        client: {
+          callTool: async () => {
+            const index = observations++;
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    page: { url: "https://example.test" },
+                    snapshot: {
+                      snapshotId: `snapshot-${index}`,
+                      browserInstance: "instance-a",
+                      pageId: "page-a",
+                      documentId: "document-a",
+                      nodes: [
+                        {
+                          role: "button",
+                          name: `different-${index}-${"x".repeat(300)}`,
+                          ref: "@e1",
+                          depth: 0,
+                          ignored: false,
+                        },
+                      ],
+                      refs: [
+                        {
+                          ref: "@e1",
+                          role: "button",
+                          name: `different-${index}-${"x".repeat(300)}`,
+                          nth: 0,
+                          disabled: false,
+                        },
+                      ],
+                      nodeCount: 1,
+                      truncated: false,
+                      maxNodes: 100,
+                      interactiveOnly: true,
+                    },
+                  }),
+                },
+              ],
+            };
+          },
+        } as unknown as Client,
+        tools: [
+          {
+            tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+            annotations: { readOnlyHint: true },
+            observationRetention: { kind: "browser-ax-snapshot" },
+          },
+        ],
+      },
+    ],
+    maxSteps: 4,
+  });
+  try {
+    await collect(session.send("inspect twice"));
+    assert.equal(observations, 2);
+    assert.match(JSON.stringify(prompts[2]?.prompt), /historicalObservation/u);
+    const canonical = JSON.stringify(session.getMessages());
+    assert.match(canonical, /different-0-x{100}/u);
+    assert.match(canonical, /different-1-x{100}/u);
+  } finally {
+    await session.close();
+  }
+});
+
+test("观察结果落盘后取消不会重放 browser_snapshot", async () => {
+  let browserCalls = 0;
+  let modelCalls = 0;
+  const value = {
+    page: { url: "https://example.test" },
+    snapshot: {
+      snapshotId: "snapshot-cancel",
+      browserInstance: "instance-a",
+      pageId: "page-a",
+      documentId: "document-a",
+      nodes: [{ role: "button", name: "Continue", ref: "@e1", depth: 0, ignored: false }],
+      refs: [{ ref: "@e1", role: "button", name: "Continue", nth: 0, disabled: false }],
+      nodeCount: 1,
+      truncated: false,
+      maxNodes: 100,
+      interactiveOnly: true,
+    },
+  };
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      const index = modelCalls++;
+      return streamChunks(
+        index === 0 ? toolCallStep("browser__snapshot", {}) : textStep("continued"),
+      );
+    },
+  });
+  const browserSource: AgentToolSource = {
+    agentName: "browser",
+    client: {
+      callTool: async () => {
+        browserCalls += 1;
+        return { content: [{ type: "text", text: JSON.stringify(value) }] };
+      },
+    } as unknown as Client,
+    tools: [
+      {
+        tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+        annotations: { readOnlyHint: true },
+        observationRetention: { kind: "browser-ax-snapshot" },
+      },
+    ],
+  };
+  const session = new AgentSession({
+    id: "observation-cancel-no-replay",
+    model,
+    sources: [browserSource],
+    maxSteps: 3,
+  });
+  try {
+    const first: SessionEvent[] = [];
+    for await (const event of session.send("observe")) {
+      first.push(event);
+      if (event.type === "tool-result" && event.toolName === "snapshot") session.cancel();
+    }
+    assert.equal(browserCalls, 1);
+    assert.equal(session.getToolExecutions({}, true).length, 1);
+    assert.ok(first.some((event) => event.type === "turn-cancelled"));
+    await collect(session.send("continue with new request"));
+    assert.equal(browserCalls, 1);
+  } finally {
+    await session.close();
+  }
+});
+
+test("观察历史压力估算在无 usage 的恢复首轮和有 usage 的后续轮次都按投影", async () => {
+  const initialMessages: ModelMessage[] = [{ role: "user", content: "initial task" }];
+  for (let index = 0; index < 80; index += 1) {
+    const toolCallId = `old-observation-${index}`;
+    initialMessages.push({
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId, toolName: "browser__snapshot", input: {} }],
+    });
+    initialMessages.push({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId,
+          toolName: "browser__snapshot",
+          output: {
+            type: "content",
+            value: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  page: { url: "https://example.test" },
+                  snapshot: {
+                    snapshotId: `snapshot-${index}`,
+                    browserInstance: "instance-a",
+                    pageId: "page-a",
+                    documentId: "document-a",
+                    nodes: [
+                      {
+                        role: "textbox",
+                        name: `field-${index}-${"x".repeat(4_000)}`,
+                        ref: "@e1",
+                        depth: 0,
+                        ignored: false,
+                      },
+                    ],
+                    refs: [
+                      {
+                        ref: "@e1",
+                        role: "textbox",
+                        name: `field-${index}-${"x".repeat(4_000)}`,
+                        nth: 0,
+                        disabled: false,
+                      },
+                    ],
+                    nodeCount: 1,
+                    truncated: false,
+                    maxNodes: 100,
+                    interactiveOnly: true,
+                  },
+                }),
+              },
+            ],
+          },
+        },
+      ],
+    });
+  }
+  const observationSource: AgentToolSource = {
+    ...source("browser", "snapshot"),
+    tools: [
+      {
+        tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+        annotations: { readOnlyHint: true },
+        observationRetention: { kind: "browser-ax-snapshot" },
+      },
+    ],
+  };
+  const rawEstimate = estimateMessagesTokens(initialMessages);
+  const projectedEstimate = Math.ceil(rawEstimate / 20);
+  const contextWindow = Math.ceil((rawEstimate + projectedEstimate) / 1.5);
+  const session = new AgentSession({
+    id: "observation-projected-pressure",
+    model: sequencedModel([
+      textStep("first", projectedEstimate),
+      textStep("second", projectedEstimate + 20),
+    ]),
+    sources: [observationSource],
+    maxSteps: 2,
+    initialMessages,
+    contextWindow,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 32_000,
+    },
+  });
+  try {
+    const first = await collect(session.send("first request"));
+    const second = await collect(session.send("second request"));
+    assert.equal(
+      first.some((event) => event.type === "context-compacted"),
+      false,
+    );
+    assert.equal(
+      second.some((event) => event.type === "context-compacted"),
+      false,
+    );
+    assert.equal(session.getMessages().length, initialMessages.length + 4);
+  } finally {
+    await session.close();
+  }
+  const noUsage = {
+    inputTokens: {
+      total: undefined,
+      noCache: undefined,
+      cacheRead: undefined,
+      cacheWrite: undefined,
+    },
+    outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+  };
+  let calls = 0;
+  const withoutUsage = new AgentSession({
+    id: "observation-step-pressure-without-usage",
+    model: new MockLanguageModelV4({
+      doStream: async () => {
+        const index = calls++;
+        return streamChunks(
+          index === 0
+            ? [
+                { type: "stream-start", warnings: [] },
+                {
+                  type: "tool-call",
+                  toolCallId: "read-step",
+                  toolName: "echo-agent__echo",
+                  input: JSON.stringify({ q: "ok" }),
+                },
+                { type: "finish", usage: noUsage, finishReason: TOOL_CALLS },
+              ]
+            : textStep("done"),
+        );
+      },
+    }),
+    sources: [observationSource, source("echo-agent", "echo")],
+    maxSteps: 3,
+    initialMessages,
+    contextWindow,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 32_000,
+    },
+  });
+  try {
+    const events = await collect(withoutUsage.send("read step"));
+    assert.equal(calls, 2);
+    assert.equal(
+      events.some((event) => event.type === "context-compacted"),
+      false,
+    );
+  } finally {
+    await withoutUsage.close();
   }
 });
 

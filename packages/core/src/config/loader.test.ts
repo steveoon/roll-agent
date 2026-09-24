@@ -270,7 +270,9 @@ browser:
     const instancesJson = env?.["BROWSER_INSTANCES_JSON"];
 
     assert.equal(env?.["BROWSER_VISUAL_CURSOR"], "true");
+    assert.equal(env?.["BROWSER_OPERATE_ENGINE"], "sampling");
     assert.equal(typeof instancesJson, "string");
+    assert.equal("operate" in JSON.parse(instancesJson ?? "{}"), false);
     const parsed = JSON.parse(instancesJson ?? "{}") as {
       defaultInstance?: string;
       instances?: Record<

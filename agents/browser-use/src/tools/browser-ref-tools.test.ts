@@ -11,6 +11,7 @@ import type {
 import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
 import { setRuntimeStateForTests } from "../runtime-holder.ts";
 import { browserElementRefStore } from "../element-ref-store.ts";
+import { observeBrowserPage } from "../browser-observation.ts";
 import { browserSnapshot } from "./browser-snapshot.ts";
 import { clickRef } from "./click-ref.ts";
 import { typeRef } from "./type-ref.ts";
@@ -456,6 +457,57 @@ afterEach(() => {
 });
 
 describe("browser generic ref tools", () => {
+  for (const allowIframe of [false, true]) {
+    it(`goal observation reads only permitted iframe trees (allowed=${allowIframe})`, async () => {
+      const controller = createFakeController();
+      controller.includeIframe = true;
+      const snapshot = await observeBrowserPage({
+        controller: controller as unknown as NativeCdpController,
+        page: createNativePage("target-1"),
+        browserInstance: "default",
+        maxNodes: 20,
+        allowedOrigins: ["https://example.com"],
+        allowedFrameIds: new Set(allowIframe ? ["payment-frame"] : []),
+      });
+      assert.equal(
+        snapshot.refs.some((ref) => ref.name === "Pay"),
+        allowIframe,
+      );
+      assert.equal(
+        controller.axTreeCalls.some((call) => call.frameId === "payment-frame"),
+        allowIframe,
+      );
+    });
+  }
+  for (const scope of ["", " \t\n "]) {
+    it(`browser_snapshot treats blank scope ${JSON.stringify(scope)} as unscoped and retains iframe refs`, async () => {
+      const page = createNativePage("target-1");
+      const controller = createFakeController();
+      controller.includeIframe = true;
+      const query = controller.querySelectorAllByNodeId;
+      controller.querySelectorAllByNodeId = async (input) => {
+        if (!input.selector.trim()) throw new Error("DOM Error while querying (-32000)");
+        return query(input);
+      };
+      setRuntimeStateForTests({
+        runtime: createFakeRuntime({ page, controller }),
+        contextManager: createFakeContextManager(),
+      });
+      const result = await browserSnapshot.execute(
+        { pageId: "target-1", scope, maxDepth: 4, interactiveOnly: true },
+        createTestContext(),
+      );
+      assert.equal(result.snapshot.scope, undefined);
+      assert.equal(result.snapshot.maxDepth, 4);
+      assert.ok(
+        result.snapshot.coverageWarnings?.some((warning) => warning.includes("omit maxDepth")),
+      );
+      assert.ok(
+        result.snapshot.refs.some((ref) => ref.name === "Pay" && ref.frameId === "payment-frame"),
+      );
+    });
+  }
+
   it("browser_snapshot caps output by maxSnapshotNodes and stores refs for click_ref", async () => {
     const page = createNativePage("target-1");
     const controller = createFakeController();

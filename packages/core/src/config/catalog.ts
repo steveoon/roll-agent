@@ -89,6 +89,7 @@ export interface ConfigArrayCatalogNode extends ConfigCatalogNodeBase {
 export interface ConfigEnumCatalogNode extends ConfigCatalogNodeBase {
   readonly kind: "enum";
   readonly options: readonly string[];
+  readonly optionLabels?: Readonly<Record<string, string>>;
 }
 
 export interface ConfigLeafCatalogNode extends ConfigCatalogNodeBase {
@@ -213,6 +214,7 @@ function buildCatalogNode(
       kind: "enum",
       widget: "select",
       options: unwrapped.options,
+      ...(metadata?.optionLabels !== undefined ? { optionLabels: metadata.optionLabels } : {}),
     };
   }
 

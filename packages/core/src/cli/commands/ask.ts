@@ -25,6 +25,7 @@ import {
   formatToolSchemaIssue,
   formatAppOutputDiscoveryIssue,
   normalizeListedTools,
+  callListedAgentTool,
 } from "../utils/agent-tools.ts";
 import { log, redactToolArgsForLog } from "../utils/output.ts";
 import {
@@ -234,10 +235,7 @@ export default defineCommand({
 
       log.info(`调用 ${agent.skill.name}.${decision.toolName}`);
       log.debug(`调用参数: ${JSON.stringify(redactToolArgsForLog(finalDecision.input))}`);
-      const toolResult = await client.callTool({
-        name: decision.toolName,
-        arguments: finalDecision.input,
-      });
+      const toolResult = await callListedAgentTool(client, targetTool, finalDecision.input);
 
       if (isToolErrorResult(toolResult, targetTool.appOutput)) {
         const message = extractTextContent(toolResult.content).join("\n") || "Tool 调用失败";

@@ -52,9 +52,9 @@
     }
   },
   "dependencies": {
+    "@roll-agent/browser": "workspace:*",
     "@roll-agent/reply-authority-client": "workspace:*",
     "@roll-agent/sdk": "workspace:*",
-    "@roll-agent/browser": "workspace:*",
     "zod": "^3.25.76"
   },
   "devDependencies": {

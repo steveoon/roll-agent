@@ -231,3 +231,63 @@ function configPreviewResponse(): Response {
     },
   });
 }
+
+describe("Companion environment diagnostics", () => {
+  const base = {
+    phase: "recovering",
+    enabled: true,
+    enrolled: true,
+    runtimeOnline: false,
+    relayProfile: "roll-cloud-v1",
+  };
+  const report = {
+    environment: "service",
+    checkedAt: new Date().toISOString(),
+    blocking: true,
+    truncated: false,
+    issues: [
+      {
+        code: "env-unresolved",
+        severity: "error",
+        variable: "SERVICE_KEY",
+        paths: ["agents.env.demo.TOKEN"],
+        message: "环境变量缺失",
+        remedy: "配置后台环境",
+      },
+    ],
+  };
+  it("accepts both legacy status and typed diagnostics", async () => {
+    const browser = installBrowserHarness([
+      jsonResponse({ data: base }),
+      jsonResponse({ data: { ...base, environmentDiagnostics: report } }),
+    ]);
+    try {
+      const api = new RollUiApi();
+      assert.equal((await api.getCompanionStatus()).environmentDiagnostics, undefined);
+      assert.deepEqual((await api.getCompanionStatus()).environmentDiagnostics, report);
+    } finally {
+      browser.restore();
+    }
+  });
+  it("rejects malformed diagnostics and secret-bearing unknown fields", async () => {
+    const browser = installBrowserHarness([
+      jsonResponse({
+        data: { ...base, environmentDiagnostics: { ...report, secret: "never-render" } },
+      }),
+      jsonResponse({
+        data: {
+          ok: false,
+          checks: [],
+          environmentDiagnostics: { ...report, issues: "not-an-array" },
+        },
+      }),
+    ]);
+    try {
+      const api = new RollUiApi();
+      await assert.rejects(api.getCompanionStatus(), /响应格式无效/);
+      await assert.rejects(api.getCompanionDoctor(), /响应格式无效/);
+    } finally {
+      browser.restore();
+    }
+  });
+});

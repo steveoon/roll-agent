@@ -1,3 +1,10 @@
+import { defaultSecretsEnvPath } from "../config/secrets-env.ts";
+import {
+  inspectEnvironmentDiagnostics,
+  describeEnvironmentDiagnostics,
+} from "../config/environment-diagnostics.ts";
+import type { EnvironmentDiagnostics } from "../config/environment-diagnostic-schema.ts";
+import { buildScheduledServiceBaselineEnv } from "../config/placeholder-audit.ts";
 import { access } from "node:fs/promises";
 import {
   COMPANION_CONTROL_PROTOCOL_VERSION,
@@ -36,6 +43,7 @@ import type {
   CompanionDoctorCheck,
   CompanionDoctorResult,
   CompanionHostStatus,
+  CompanionManagementStatus,
   CompanionControlRequest,
   CompanionControlResponse,
 } from "./schema.ts";
@@ -54,6 +62,10 @@ export interface CompanionApplicationOptions {
   readonly sessionFactory: CompanionSessionFactory;
   readonly sendControlRequest?: CompanionControlClient;
   readonly assertUserIdentity?: CompanionUserIdentityCheck;
+  readonly inspectEnvironment?: (
+    cwd: string,
+    environment: EnvironmentDiagnostics["environment"],
+  ) => EnvironmentDiagnostics;
 }
 
 export type CompanionControlClient = (
@@ -74,8 +86,20 @@ export class CompanionApplication {
   private readonly sessionFactory: CompanionSessionFactory;
   private readonly sendControlRequest: CompanionControlClient;
   private readonly assertUserIdentity: CompanionUserIdentityCheck;
+  private readonly inspectEnvironment: NonNullable<
+    CompanionApplicationOptions["inspectEnvironment"]
+  >;
 
   constructor(options: CompanionApplicationOptions) {
+    this.inspectEnvironment =
+      options.inspectEnvironment ??
+      ((cwd, environment) =>
+        inspectEnvironmentDiagnostics({
+          cwd,
+          environment,
+          secretsPath: defaultSecretsEnvPath(options.paths.homeDir),
+          env: environment === "service" ? process.env : buildScheduledServiceBaselineEnv(),
+        }));
     this.paths = options.paths;
     this.platform = options.platform;
     this.configStore = options.configStore;
@@ -143,6 +167,12 @@ export class CompanionApplication {
       throw new Error("Enable Roll Companion before installing its service");
     }
     await this.stop();
+    const preflight = this.inspectEnvironment(config.cwd, "estimated-service");
+    if (preflight.issues.length > 0) {
+      this.logger.info(
+        `后台环境预检（估算，未验证实际服务环境）：${describeEnvironmentDiagnostics(preflight)}`,
+      );
+    }
     await this.service.install();
   }
 
@@ -188,17 +218,32 @@ export class CompanionApplication {
     await this.start();
   }
 
-  async getStatus(): Promise<CompanionHostStatus> {
+  async getStatus(): Promise<CompanionManagementStatus> {
     try {
       const response = await this.sendControlRequest(this.paths.controlEndpoint, {
         version: COMPANION_CONTROL_PROTOCOL_VERSION,
-        type: "status",
+        type: "diagnostics",
       });
       if (response.ok) {
-        return response.status;
+        return {
+          ...response.status,
+          ...(response.environmentDiagnostics === undefined
+            ? {}
+            : { environmentDiagnostics: response.environmentDiagnostics }),
+        };
       }
     } catch {
-      // Fall back to persisted enrollment and service state below.
+      // A failed diagnostics request does not prove that the service or Runtime is offline.
+    }
+    try {
+      // Also covers older daemons rejecting diagnostics and diagnostic-only transport failures.
+      const legacy = await this.sendControlRequest(this.paths.controlEndpoint, {
+        version: COMPANION_CONTROL_PROTOCOL_VERSION,
+        type: "status",
+      });
+      if (legacy.ok) return legacy.status;
+    } catch {
+      // Only estimate from persisted state after both read-only requests fail.
     }
     const config = await this.configStore.load();
     if (config === null) {
@@ -208,6 +253,7 @@ export class CompanionApplication {
     return {
       ...stoppedStatus(config),
       phase: service.running ? "starting" : "stopped",
+      environmentDiagnostics: this.inspectEnvironment(config.cwd, "estimated-service"),
     };
   }
 
@@ -251,6 +297,7 @@ export class CompanionApplication {
       logger: this.logger,
       handlers: {
         getStatus: () => supervisor.getStatus(),
+        getDiagnostics: () => this.inspectEnvironment(config.cwd, "service"),
         stop: () => supervisor.stop(),
       },
     });
@@ -343,7 +390,30 @@ export class CompanionApplication {
       ok: service.installed,
       detail: describeService(service),
     });
-    return { ok: checks.every((check) => check.ok), checks };
+    const status = await this.getStatus().catch(
+      (): CompanionManagementStatus => stoppedStatus(config),
+    );
+    const diagnostics = status.environmentDiagnostics;
+    checks.push({
+      name: "runtime",
+      ok: status.runtimeOnline,
+      detail: status.runtimeOnline
+        ? "Runtime 已完成初始化；未验证模型远端认证。"
+        : "Runtime 尚未在线；服务已安装不代表 Runtime 可用。",
+    });
+    checks.push({
+      name: "environment",
+      ok: diagnostics?.environment === "service" && !diagnostics.blocking,
+      detail:
+        diagnostics === undefined
+          ? "当前后台服务未提供环境诊断。检查配置和服务状态；旧版服务需升级并重启后再检查。"
+          : `${diagnostics.environment === "service" ? "后台进程实际环境" : "后台环境预检（估算，尚未验证实际服务环境）"}。${diagnostics.issues.length === 0 ? "未发现配置引用问题；未验证远端认证。" : describeEnvironmentDiagnostics(diagnostics)}`,
+    });
+    return {
+      ok: checks.every((check) => check.ok),
+      checks,
+      ...(diagnostics === undefined ? {} : { environmentDiagnostics: diagnostics }),
+    };
   }
 
   readLogs(): Promise<string> {

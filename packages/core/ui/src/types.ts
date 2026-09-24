@@ -1,3 +1,4 @@
+import type { EnvironmentDiagnostics } from "../../src/config/environment-diagnostic-schema.ts";
 export type JsonObject = Record<string, unknown>;
 export type ConfigPathSegment = string | number;
 export type ConfigPath = readonly ConfigPathSegment[];
@@ -75,6 +76,7 @@ export interface ConfigArrayCatalogNode extends ConfigCatalogNodeBase {
 export interface ConfigEnumCatalogNode extends ConfigCatalogNodeBase {
   readonly kind: "enum";
   readonly options: readonly string[];
+  readonly optionLabels?: Readonly<Record<string, string>>;
 }
 
 export interface ConfigLeafCatalogNode extends ConfigCatalogNodeBase {
@@ -230,6 +232,7 @@ export const COMPANION_PHASES = [
 export type CompanionPhase = (typeof COMPANION_PHASES)[number];
 
 export interface CompanionStatus {
+  readonly environmentDiagnostics?: EnvironmentDiagnostics;
   readonly phase: CompanionPhase;
   readonly enabled: boolean;
   readonly enrolled: boolean;
@@ -248,6 +251,7 @@ export interface CompanionDoctorCheck {
 }
 
 export interface CompanionDoctorResult {
+  readonly environmentDiagnostics?: EnvironmentDiagnostics;
   readonly ok: boolean;
   readonly checks: readonly CompanionDoctorCheck[];
 }

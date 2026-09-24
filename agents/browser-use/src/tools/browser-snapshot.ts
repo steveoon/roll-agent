@@ -12,9 +12,18 @@ import { resolveNativePageForBrowserTool } from "./browser-native-page.ts";
 import { createBrowserRefVisualSession } from "./browser-ref-visual.ts";
 
 const BrowserSnapshotInputSchema = z.object({
-  scope: z.string().max(1000).optional().describe("可选：唯一匹配的 CSS 区域选择器"),
+  scope: z
+    .string()
+    .max(1000)
+    .optional()
+    .describe("可选：唯一匹配的 CSS 区域选择器；省略或空白表示整页"),
   pageId: z.string().optional().describe("可选：通过 list_pages 返回的 pageId/native targetId"),
-  maxDepth: z.number().int().nonnegative().optional().describe("可选：限制 AX Tree 深度"),
+  maxDepth: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("可选：限制 AX Tree 深度；首次观察表单建议省略，深度过小会隐藏字段"),
   maxNodes: z
     .number()
     .int()
@@ -32,9 +41,10 @@ const BrowserSnapshotOutputSchema = z.object({
 export const browserSnapshot = defineTool({
   name: "browser_snapshot",
   description:
-    "读取当前或指定页面的 Accessibility Tree，补充独立选项行、控件上下文和覆盖缺口，并生成 @eN / snapshotId；支持 scope 区域观察，iframe ref 保留 frameId。默认只返回可交互节点。",
+    "观察陌生页面或表单的首选入口：读取 Accessibility Tree，补充独立选项行、控件上下文和覆盖缺口，返回 @eN、snapshotId 和 iframe 的 frameId。省略或空白 scope 表示整页，默认只返回可交互节点。browser_execute 的 page.snapshot() 受 origin 限制不展开 iframe 时，改用本工具；再用 page.ref(ref,snapshotId) 交给 browser_execute 操作，不要猜测 iframe 下标或把外层页面当作完整表单。",
   input: BrowserSnapshotInputSchema,
   output: BrowserSnapshotOutputSchema,
+  observationRetention: { kind: "browser-ax-snapshot" },
   execute: async (input, ctx) => {
     const runtime = getRuntime();
     const ctxManager = getContextManager();

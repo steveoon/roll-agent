@@ -10,6 +10,10 @@ import {
   NativeCdpController,
   createBrowserAxSnapshot,
 } from "@roll-agent/browser";
+import { READ_GOAL_TEXT } from "../goal/task-observation.ts";
+import { GoalPageStateSchema } from "../goal/observation.ts";
+import { BrowserOperateInputSchema } from "../goal/contracts.ts";
+import { buildTaskDecisionRequest } from "../goal/task-policy.ts";
 import { collectDomActionHints } from "./browser-dom-action-candidates.ts";
 
 // Opt-in real DOM test: never attaches to a user's profile or authenticated page.
@@ -169,6 +173,65 @@ test(
         );
         assert.deepEqual(found, ["Parent", "Sibling"]);
       });
+      await t.test(
+        "independent card title and icon actions survive a clickable container",
+        async () => {
+          const found = await hints(
+            `<div class="card" style="cursor:pointer"><div class="job-title">Operations</div><span>Salary 7–8K</span><div class="more-operate" style="width:24px;height:24px"></div><button>Edit</button><button>Open</button></div>`,
+          );
+          assert.ok(found.some((item) => item.name === "Operations"));
+          assert.ok(found.some((item) => /more-operate/.test(item.name)));
+          assert.ok(!found.some((item) => item.name === "Salary 7–8K"));
+        },
+      );
+      await t.test(
+        "unnamed close controls retain DOM evidence without inventing a visible label",
+        async () => {
+          const found = await hints(
+            `<div class="dialog" style="position:fixed;inset:20px"><h2>Notice</h2><div class="popup-close" style="cursor:pointer;width:24px;height:24px"><i class="icon-close"></i></div></div>`,
+          );
+          assert.equal(found.filter((item) => /popup-close/.test(item.name)).length, 1);
+          assert.ok(found.some((item) => /Unlabelled/.test(item.name)));
+        },
+      );
+      await t.test(
+        "page panel and selected tab survive absence of actionable panel controls",
+        async () => {
+          await hints(
+            `<div class="tab-item active">Closed</div><p>No results</p><div class="popup" style="position:fixed;inset:30px;background:white"><h2>Notice</h2><p>Read-only notice without controls</p></div><div role="dialog" style="display:none">Hidden</div>`,
+          );
+          const state = GoalPageStateSchema.parse(
+            await browser.evaluateJson(
+              `(${READ_GOAL_TEXT}).call(document, ["null"], 6000).pageState`,
+            ),
+          );
+          assert.deepEqual(state.panels, ["Notice"]);
+          assert.deepEqual(state.selectedTabs, ["Closed"]);
+          assert.equal(state.busy, false);
+        },
+      );
+      await t.test(
+        "blocked card actions do not remove an independent read-only title",
+        async () => {
+          const found = await hints(
+            `<div class="card" style="cursor:pointer"><div class="record-title">Operations</div><button>Edit</button><button>Open</button></div>`,
+          );
+          const snapshot = await createBrowserAxSnapshot(browser, { domActionHints: found });
+          const request = buildTaskDecisionRequest(
+            BrowserOperateInputSchema.parse({
+              pageId: "test",
+              goal: "Read Operations details",
+              allowedOrigins: ["https://example.com"],
+              blockedNames: ["Edit", "Open"],
+            }),
+            snapshot,
+            [],
+          );
+          const actions = Object.values(request.questions.operation!.criteria);
+          assert.ok(actions.some((label) => /Operations/.test(label) && !/Edit|Open/.test(label)));
+          assert.ok(!actions.some((label) => /^CLICK.*(?:Edit|Open)/.test(label)));
+        },
+      );
       await t.test("collection removes temporary markers", async () => {
         const markers = await browser.evaluateJson(
           "Array.from(document.querySelectorAll('*')).flatMap(el => el.getAttributeNames()).filter(name => name.startsWith('data-roll-browser-action-'))",

@@ -17,6 +17,7 @@ export interface ConfigGuidanceEntry {
   readonly defaultBehavior?: string;
   readonly example?: string;
   readonly setupCommand?: string;
+  readonly optionLabels?: Readonly<Record<string, string>>;
 }
 
 export const CONFIG_GUIDANCE_ENTRIES = [
@@ -587,13 +588,30 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     setupCommand: "roll config setup install",
   },
 
-  // Browser instances
+  // Browser
   {
     path: "browser",
-    title: "浏览器实例",
-    purpose: "管理 browser-use-agent 可以连接或启动的浏览器实例及默认选择。",
-    defaultBehavior: "未声明实例时继续使用 legacy 单实例环境变量配置。",
-    example: "browser:\n  instances: {}",
+    title: "浏览器",
+    purpose: "管理浏览器实例及 browser_operate 的决策引擎。",
+    defaultBehavior: "默认使用 Roll 模型执行 browser_operate；未声明实例时使用 legacy 单实例配置。",
+    example: "browser:\n  operate:\n    engine: sampling\n  instances: {}",
+  },
+  {
+    path: "browser.operate",
+    title: "浏览器任务操作",
+    purpose: "选择 browser_operate 的决策引擎；同一套页面观察、阶段记忆和安全约束保持不变。",
+    defaultBehavior: "默认标准模式，使用 Roll 的 MCP Sampling 模型。",
+    example: "browser:\n  operate:\n    engine: sampling",
+  },
+  {
+    path: "browser.operate.engine",
+    title: "操作模式",
+    purpose:
+      "sampling 为标准模式，使用 Roll 模型；jev 为快速模式，调用 TypeSafe Jev，需配置 Agent 的 TYPESAFE_API_KEY。工具参数不能覆盖此设置。",
+    defaultBehavior:
+      "默认 sampling；启用 jev 后缺少密钥会在操作前报配置错误，不会回退到 sampling。",
+    example: "browser:\n  operate:\n    engine: jev",
+    optionLabels: { sampling: "标准（Roll 模型）", jev: "快速（TypeSafe Jev）" },
   },
   {
     path: "browser.default-instance",

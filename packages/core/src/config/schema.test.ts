@@ -29,6 +29,25 @@ describe("rollConfigSchema", () => {
     assert.equal(DEFAULT_CONFIG.chat.thinkingDisplay, "collapsed");
     assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
+    assert.equal(DEFAULT_CONFIG.browser.operate.engine, "sampling");
+  });
+
+  it("accepts only the two browser operation engines", () => {
+    const base = {
+      llm: { defaultProvider: "anthropic", defaultModel: "test", providers: {} },
+      ask: {},
+      agents: { dataDir: "/tmp/test" },
+    };
+    for (const engine of ["sampling", "jev"]) {
+      const result = rollConfigSchema.safeParse({ ...base, browser: { operate: { engine } } });
+      assert.equal(result.success, true, engine);
+      assert.equal(result.success ? result.data.browser.operate.engine : undefined, engine);
+    }
+    assert.equal(
+      rollConfigSchema.safeParse({ ...base, browser: { operate: { engine: "openrouter" } } })
+        .success,
+      false,
+    );
   });
 
   it("defaults chat.instructions to auto and accepts off or a path", () => {

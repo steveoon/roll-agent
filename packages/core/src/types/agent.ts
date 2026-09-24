@@ -163,6 +163,8 @@ export interface AgentTool {
   readonly schemaIssues?: readonly JsonSchemaRefIssue[];
   readonly appOutput?: AppOutputContract;
   readonly appOutputIssue?: "invalid_contract";
+  /** Validated MCP request deadline advertised by this tool. */
+  readonly executionTimeoutMs?: number;
 }
 
 export function createDefaultRuntimeForTransport(transport: AgentTransport): AgentRuntime {

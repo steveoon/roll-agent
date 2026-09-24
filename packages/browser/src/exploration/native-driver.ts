@@ -1,3 +1,4 @@
+import { parseHelperArgument } from "./helper-arguments.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { clickElementRef, typeElementRef } from "../runtime/element-ref.ts";
@@ -55,6 +56,19 @@ export type BrowserScriptPageDriverOptions = {
   observe: (options?: { scope?: string }) => Promise<unknown>;
   resolveRef: (ref: string, snapshotId: string) => Promise<BrowserElementRef | undefined>;
   capture: (base64: string) => Promise<{ id: string; path: string; mimeType: "image/png" }>;
+  /** Best-effort feedback after a real native mouse dispatch; never controls the action. */
+  onPointer?: (event: {
+    type: "mouseMoved" | "mousePressed";
+    x: number;
+    y: number;
+  }) => Promise<void>;
+  /** Best-effort semantic/geometry hook for a uniquely resolved target. */
+  onTarget?: (event: {
+    backendNodeId: number;
+    frameId: string;
+    role: string;
+    name: string;
+  }) => void;
 };
 
 const attributeSchema = z.enum([
@@ -86,6 +100,7 @@ const inspectSchema = z.object({
   value: z.string().max(8000).optional(),
   href: z.string().max(8000),
   navigationUrl: z.string().max(8000),
+  enterNavigationUrl: z.string().max(8000).optional(),
   documentUrl: z.string().max(8000),
   inScope: z.boolean(),
   scopeMatches: z.number(),
@@ -124,8 +139,9 @@ const INSPECT_NODE = `function(scope, attribute, dispatchedPoint) {
   const href = anchor ? anchor.href : '';
   const form = el.form;
   const submit = (tag === 'button' && (!type || type === 'submit')) || (tag === 'input' && (type === 'submit' || type === 'image'));
-  const navigationUrl = href || (form && (submit || tag === 'input') ? (el.formAction || form.action) : '');
-  const result = {attached,visible,enabled,checked:Boolean(el.checked || el.selected || el.getAttribute('aria-checked') === 'true'),hit,editable,focused:doc.activeElement === el || el.contains(doc.activeElement),text:String(password ? '' : (el.innerText || '')).slice(0,8000),href:String(href).slice(0,8000),navigationUrl:String(navigationUrl).slice(0,8000),documentUrl:String(doc.URL).slice(0,8000),inScope,scopeMatches:scopes.length};
+  const navigationUrl = href || (form && submit ? (el.formAction || form.action) : '');
+  const enterNavigationUrl = navigationUrl || (form && tag === 'input' ? (el.formAction || form.action) : '');
+  const result = {attached,visible,enabled,checked:Boolean(el.checked || el.selected || el.getAttribute('aria-checked') === 'true'),hit,editable,focused:doc.activeElement === el || el.contains(doc.activeElement),text:String(password ? '' : (el.innerText || '')).slice(0,8000),href:String(href).slice(0,8000),navigationUrl:String(navigationUrl).slice(0,8000),enterNavigationUrl:String(enterNavigationUrl).slice(0,8000),documentUrl:String(doc.URL).slice(0,8000),inScope,scopeMatches:scopes.length};
   if (!password && typeof el.value === 'string') result.value = el.value.slice(0,8000);
   if (attribute) result.attribute = attribute === 'href' ? String(href).slice(0,8000) : (el.getAttribute(attribute) === null ? null : String(el.getAttribute(attribute)).slice(0,8000));
   return result;
@@ -216,6 +232,27 @@ export class BrowserScriptPageDriver {
 
   close(): void {
     this.closed = true;
+  }
+
+  private pointer(event: { type: "mouseMoved" | "mousePressed"; x: number; y: number }): void {
+    try {
+      this.options.onPointer?.(event).catch(() => {});
+    } catch {
+      // Visual feedback must not change a browser action's outcome.
+    }
+  }
+
+  private visualTarget(target: ResolvedTarget): void {
+    try {
+      this.options.onTarget?.({
+        backendNodeId: target.backendNodeId,
+        frameId: target.frameId,
+        role: target.role,
+        name: target.name,
+      });
+    } catch {
+      // Visual feedback must not change target resolution or dispatch.
+    }
   }
 
   private allowed(url: string): void {
@@ -423,6 +460,7 @@ export class BrowserScriptPageDriver {
       editable?: boolean;
       focus?: boolean;
       navigation?: boolean;
+      implicitSubmit?: boolean;
       point?: { x: number; y: number };
     } = {},
   ): Promise<Inspection> {
@@ -481,8 +519,11 @@ export class BrowserScriptPageDriver {
     if (input.focus && !value.focused) {
       fail("focus_changed", "Input focus no longer belongs to the selected target");
     }
-    if (input.navigation && value.navigationUrl) {
-      this.allowed(value.navigationUrl);
+    const navigationUrl = input.implicitSubmit
+      ? (value.enterNavigationUrl ?? value.navigationUrl)
+      : value.navigationUrl;
+    if (input.navigation && navigationUrl) {
+      this.allowed(navigationUrl);
       await this.before("navigate", target);
     }
     return value;
@@ -516,6 +557,9 @@ export class BrowserScriptPageDriver {
         });
         this.lastActionExecuted = true;
         await controller.dispatchMouseEvent(input);
+        if (input.type === "mouseMoved" || input.type === "mousePressed") {
+          this.pointer({ type: input.type, x: input.x, y: input.y });
+        }
       },
       dispatchKeyEvent: async (input: Parameters<DriverController["dispatchKeyEvent"]>[0]) => {
         await validate?.();
@@ -550,6 +594,7 @@ export class BrowserScriptPageDriver {
     const text = method === "fill" ? z.string().max(16_000).parse(params[1]) : undefined;
     const options = optionsSchema.parse(params[method === "fill" ? 2 : 1] ?? {});
     const target = await this.one(locator, "interact");
+    this.visualTarget(target);
     if (method === "hover") {
       await this.ready(target);
       this.lastActionExecuted = true;
@@ -564,6 +609,7 @@ export class BrowserScriptPageDriver {
       );
       await this.ready(target, { hit: true, point });
       await this.options.controller.dispatchMouseEvent({ type: "mouseMoved", ...point });
+      this.pointer({ type: "mouseMoved", ...point });
     } else {
       const controller = this.guardedController(target, method);
       if (method === "fill") {
@@ -743,9 +789,10 @@ export class BrowserScriptPageDriver {
   }
 
   private async choose(params: unknown[]): Promise<unknown> {
-    const locator = BrowserScriptLocatorSchema.parse(params[0]);
-    const options = BrowserChooseOptionsSchema.parse(params[1]);
+    const locator = parseHelperArgument(BrowserScriptLocatorSchema, params[0], "choose", "target");
+    const options = parseHelperArgument(BrowserChooseOptionsSchema, params[1], "choose", "options");
     const target = await this.one(locator, "interact");
+    this.visualTarget(target);
     const deadline = Date.now() + options.timeoutMs;
     const began = performance.now();
     let info = await this.control(target, options.panel);
@@ -840,6 +887,7 @@ export class BrowserScriptPageDriver {
             { css: option.css, frameId: target.frameId },
             "interact",
           );
+          this.visualTarget(optionTarget);
           const current = await this.control(target, options.panel);
           if (
             !current.options.some(
@@ -943,11 +991,17 @@ export class BrowserScriptPageDriver {
     if (params.length > 3) fail("invalid_arguments", "Too many browser helper arguments");
     const handlers: Record<string, () => Promise<unknown>> = {
       inspectControl: async () => {
-        const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
-        const options = z
-          .object({ panel: z.string().min(1).max(2000).optional() })
-          .strict()
-          .parse(params[1] ?? {});
+        const target = await this.one(
+          parseHelperArgument(BrowserScriptLocatorSchema, params[0], "inspectControl", "target"),
+          "read",
+        );
+        this.visualTarget(target);
+        const options = parseHelperArgument(
+          z.object({ panel: z.string().min(1).max(2000).optional() }).strict(),
+          params[1] ?? {},
+          "inspectControl",
+          "options",
+        );
         return {
           ...(await this.control(target, options.panel)),
           frameId: target.frameId,
@@ -975,11 +1029,17 @@ export class BrowserScriptPageDriver {
         return await this.observeMetadata(options.scope);
       },
       read: async () => {
-        const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "read");
-        const options = z
-          .object({ attribute: attributeSchema.optional() })
-          .strict()
-          .parse(params[1] ?? {});
+        const target = await this.one(
+          parseHelperArgument(BrowserScriptLocatorSchema, params[0], "read", "target"),
+          "read",
+        );
+        this.visualTarget(target);
+        const options = parseHelperArgument(
+          z.object({ attribute: attributeSchema.optional() }).strict(),
+          params[1] ?? {},
+          "read",
+          "options",
+        );
         const value = await this.inspect(target, options.attribute);
         if (!value.attached || !value.inScope) {
           fail("stale_target", "Read target changed during inspection");
@@ -1030,6 +1090,29 @@ export class BrowserScriptPageDriver {
         const options = optionsSchema
           .extend({ target: BrowserScriptLocatorSchema.optional() })
           .parse(params[1] ?? {});
+        // Escape is page-scoped: a new call may need to dismiss a panel opened by
+        // an earlier call. Never click an arbitrary control just to establish focus.
+        if (key === "Escape" && !options.target) {
+          for (const type of ["rawKeyDown", "keyUp"] as const) {
+            await this.before("interact");
+            const allowedFocus = await this.options.controller.evaluateJson(
+              `(() => { /* page-escape-focus */ const origins=${JSON.stringify(this.options.allowedOrigins)}; let doc=document; for(let depth=0;depth<32;depth++){ try { if(!origins.includes(doc.location.origin))return false; const el=doc.activeElement; if(el && /^(IFRAME|FRAME)$/.test(el.tagName)){if(!el.contentDocument)return false;doc=el.contentDocument;continue}return true }catch{return false}}return false })()`,
+            );
+            if (allowedFocus !== true) {
+              fail("origin_blocked", "Focused frame is outside approved or observable origins");
+            }
+            await this.before("interact");
+            this.lastActionExecuted = true;
+            await this.options.controller.dispatchKeyEvent({
+              type,
+              key,
+              code: key,
+              windowsVirtualKeyCode: 27,
+            });
+          }
+          await this.afterExpectation(options.expect);
+          return { executed: true, verification: this.lastVerification };
+        }
         const target = options.target ? await this.one(options.target, "interact") : this.focused;
         if (!target) {
           fail(
@@ -1037,6 +1120,7 @@ export class BrowserScriptPageDriver {
             "Press requires an explicit target or a target focused by this script",
           );
         }
+        this.visualTarget(target);
         if (options.target) {
           await clickElementRef({
             controller: this.guardedController(target, "click"),
@@ -1059,7 +1143,11 @@ export class BrowserScriptPageDriver {
           Space: 32,
         };
         for (const type of ["rawKeyDown", "keyUp"] as const) {
-          await this.ready(target, { focus: type === "rawKeyDown", navigation: key === "Enter" });
+          await this.ready(target, {
+            focus: type === "rawKeyDown",
+            navigation: key === "Enter",
+            implicitSubmit: key === "Enter",
+          });
           this.lastActionExecuted = true;
           await this.options.controller.dispatchKeyEvent({
             type,
@@ -1073,6 +1161,7 @@ export class BrowserScriptPageDriver {
       },
       scroll: async () => {
         const target = await this.one(BrowserScriptLocatorSchema.parse(params[0]), "interact");
+        this.visualTarget(target);
         const options = optionsSchema
           .extend({
             dx: z.number().finite().min(-2000).max(2000).default(0),
@@ -1092,6 +1181,7 @@ export class BrowserScriptPageDriver {
         );
         await this.ready(target, { hit: true, point });
         await this.options.controller.dispatchMouseEvent({ type: "mouseMoved", ...point });
+        this.pointer({ type: "mouseMoved", ...point });
         await this.ready(target, { hit: true, point });
         await this.options.controller.dispatchMouseEvent({
           type: "mouseWheel",

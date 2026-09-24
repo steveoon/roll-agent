@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MockLanguageModelV4 } from "ai/test";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildSamplingGenerateTextParams, registerSamplingHandler } from "./sampling-handler.ts";
 import type {
   LanguageModelV4,
@@ -152,4 +154,45 @@ it("registerSamplingHandler routes subsequent requests to a swapped model", asyn
 
   assert.equal(first.doGenerateCalls.length, 1);
   assert.equal(second.doGenerateCalls.length, 1);
+});
+
+it("preserves output limits and truncation through actual MCP Sampling transport", async () => {
+  const model = new MockLanguageModelV4({
+    doGenerate: async (options: LanguageModelV4CallOptions) => ({
+      content: [{ type: "text", text: '{"action":"click"}' }],
+      finishReason: {
+        unified: options.maxOutputTokens === 8192 ? "length" : "stop",
+        raw: undefined,
+      },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+      },
+      warnings: [],
+    }),
+  });
+  const client = new Client(
+    { name: "sampling-client", version: "1" },
+    { capabilities: { sampling: {} } },
+  );
+  const server = new McpServer({ name: "sampling-server", version: "1" });
+  registerSamplingHandler(client, model);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    for (const maxTokens of [1024, 4096, 8192]) {
+      const response = await server.server.createMessage({
+        messages: [{ role: "user", content: { type: "text", text: "batch generation" } }],
+        maxTokens,
+      });
+      assert.equal(response.stopReason, maxTokens === 8192 ? "maxTokens" : "endTurn");
+    }
+    assert.deepEqual(
+      model.doGenerateCalls.map((call) => call.maxOutputTokens),
+      [1024, 4096, 8192],
+    );
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

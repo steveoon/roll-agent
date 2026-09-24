@@ -673,6 +673,16 @@ export class RollNodeClient {
         stdio: "pipe",
       },
     );
+    // A failed spawn has no Runtime to initialize. Keep the original OS error and avoid
+    // rejecting a pending initialize response while its stdin write is still in progress.
+    await new Promise<void>((resolve, reject) => {
+      const failed = (error: Error) => reject(error);
+      child.once("error", failed);
+      child.once("spawn", () => {
+        child.off("error", failed);
+        resolve();
+      });
+    });
     const client = await RollNodeClient.connect({
       transport: toChildTransport(child),
       ...(options.clientName !== undefined ? { clientName: options.clientName } : {}),

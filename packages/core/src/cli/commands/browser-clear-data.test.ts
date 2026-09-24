@@ -197,6 +197,7 @@ function createBrowserConfig(
 
   return {
     instances: browserInstances,
+    operate: { engine: "sampling" },
   };
 }
 

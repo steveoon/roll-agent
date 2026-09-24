@@ -1,6 +1,6 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。提供招聘平台预编排、通用 AX snapshot/ref 操作、受控 JavaScript 组合执行及显式启用的站点经验复用；BOSS 使用 native CDP，可读取消息、打开聊天、发送签名回复、筛选候选人和截取简历。
+description: 浏览器操控 Agent。提供招聘平台预编排、通用表单与完整目标委派、AX snapshot/ref 操作、受控 JavaScript 组合执行及显式启用的站点经验复用；BOSS 使用 native CDP，可读取消息、打开聊天、发送签名回复、筛选候选人和截取简历。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -13,9 +13,28 @@ metadata:
 
 按 **平台专用工具 → 已启用站点经验 → 通用探索** 的顺序选择能力。已经覆盖的 BOSS 操作继续使用 `zhipin_*`，不要改写成脚本或视觉循环。
 
-- 未建模页面先观察，必要时用 `browser_workflow_list({url})` 查找适用的已启用经验，再调用 `browser_workflow_run`。
-- 已明确的一组步骤使用 `browser_execute` 合并执行。JS 只可使用 `page` helpers 和 `args`，没有 Node、fetch、任意页面 evaluate 或裸 CDP。
+- 当前 URL 已知时先用 `browser_workflow_list({url})` 查找适用的已启用经验，再调用 `browser_workflow_run`。没有适用经验的未知目标先观察；目标或范围尚不明确时保留单步探索，资料、字段范围和停止点明确的多字段表单按下述规则委派。用户明确指定工具时遵循用户。
+- 表单字段由执行器基于当前观察检查，调用方统一验收整次委派，不逐字段召回宿主确认；用户明确指定的字段即使页面标注为可选，也属于本次目标。字段可能先显示摘要、编辑或补充入口：未看到输入框时，先展开与该字段明确相关的已观察入口，再观察实际控件和选项。必要时滚动相关区域；不能仅凭一次快照没有输入框就宣布该字段无法填写。
+- 资料与文案齐全、字段范围和停止点明确的多字段表单，首选 `browser_operate`（默认 `strategy:"task"`），尤其是需要下拉选择、联动字段或弹层编辑器的任务。一次委派本次全部字段，由执行器逐轮观察并选择动作；无需宿主预先知道点击顺序，也不要仅因能自行拆步骤就改成逐字段点击或脚本。平台专用工具与已启用的适用经验仍优先。
+- 已确定步骤的短脚本、批量输入与断言使用 `browser_execute`；单次点击/输入及委派受阻后的局部修正可用单步工具。`browser_execute` 执行宿主脚本，不调用 Jev。脚本仍需观察动态状态，新的决策点交回宿主；JS 只可使用 `page` helpers 和 `args`，没有 Node、fetch、任意页面 evaluate 或裸 CDP。
+- 填表时一次提供本次委派的 `formTask`：`mode:"create"|"edit"` 由调用方指定，不能根据空字段猜测；`fields`中可写项为`{name,intent:"set",valueName,comparison?:"auto"|"literal"|"semantic"}`，引用`values`中唯一名称；comparison默认auto，文本严格比较、已识别的枚举控件按语义比较。通常省略comparison，用户明确要求逐字一致时才用literal；只读保留项为`{name,intent:"preserve"}`。preserve只观察，不自动写回；如果明确授权恢复某个旧值，应作为set并提供该值。
+- `formTask.stopAt`默认`applied`：当前值已应用到主表单且编辑器关闭，不代表服务器已保存。`current-view`用于在本次当前编辑视图设置好后保持该视图。禁止把填好自动扩展成保存或发布。不能同时传formTask和readTask，二者均要求strategy:task。
+- `execution`是单次调用的共享执行上下文：初始值、当前可失效状态、最近动作、变化与焦点；读取A和表单共用。unknown先观察，不能当空值补填；set范围内的联动重置可局部修复；preserve变化、归属不明或文档改变交回。`unassigned`变化表示没有绑定到委派字段，必须报告，不自动扩大修改范围。此层没有跨调用session或独立业务计划。
+- `goal` 原样保留用户目标，不总结或重新排版。原样类文字应从用户原文直接截取到 `values`，逐字保留已有换行、空格和标点；原文没有换行就不能自行分段。最终核验也必须按原文检查这些差异，不能用语义相同代替原样一致。
+- 调用方在调用前把已有事实和需要生成的完整文案放进命名 `values`；所选决策引擎选择源值，代码原样复制（保留换行）。也提供有限的 goal 原文片段候选，但不承诺任意自然语言提取、单位转换或自由写作。没有匹配候选返回 `needs_input`；由调用方补充已有内容或必要的新资料后继续。网页文本不成为输入事实。
+- 默认标准模式 `sampling` 使用 Roll MCP Sampling 模型；core-managed Agent 通过 Roll 配置 `browser.operate.engine: jev` 切换至 TypeSafe 官方 `/v1/systemone`，外部管理的 Agent 须自行设置 `BROWSER_OPERATE_ENGINE=jev`。仅 Jev 模式需要 `TYPESAFE_API_KEY`；工具 `engine` 参数不能切换模式，旧调用传入时必须与进程配置一致。task 循环没有宿主准备、逐项语义检查、字段完成复核或回退助手；Jev 模式不需要 Sampling。`maxTextCalls`、`maxRecoveryDecisions` 仅兼容旧参数，已不生效；`textCalls` 为空，`recoveryDecisions` 为 0。
+- 保留当前观察、严格 ref/文档/站点检查、遮挡检查、精确输入读回和停滞停止；不会因一个字段判断而召回宿主。输入查询词不等于选中候选，选中候选不一定已确认应用。停滞返回 `needs_reasoning` 和最后观察，调用方应分析缺口，不能原样无限重试；`executed=true` 的失败动作不能盲目重放。
+- task 决策输入区分字段触发器、菜单候选、查询词和已应用值，并保留可确认的控件归属及标签来源。`pickerFields`、`valueKind` 和字段 ID 是观察线索；未知关系不猜测，菜单文字不能代替字段值。`expanded` 与菜单可见性分开，异步选项未出现时应按原始顺序等待。完成后仍由调用方核验整项任务。
+- 导航与只读任务的完成点按原始目标判断：筛选后的空列表也可能是正确结果；列表摘要不等于已进入详情。结合 `selectedTabs`、`pageBusy`、`activePanels` 验收，不能忽略遮挡弹窗。无文字图标的 DOM 属性只是线索，候选缺失或覆盖不完整只能说明尚未找到入口，不能断言页面不存在该入口。
+- 对“读取目标详情后关闭/返回”的任务，在第一次 `browser_operate` 提供 `readTask:{target,captureView,outputs,terminal:{view,selectedTab?}}`。target 和 captureView 描述目标身份及所需视图；outputs 是需要读取的字段名称（最多8项），不是输入 values。不要把同一往返任务拆成多个调用来代替阶段记忆。`progress.evidence` 返回带来源的原文，关闭详情后据此汇报；`interaction_done` 仍需调用方统一验收，始终 verified:false。本版记忆仅活在单次调用，不支持跨调用续跑。普通填表省略readTask；历史写入不证明当前值仍正确。
+- `model_done` 只表示决策引擎准备交回，始终 `verified:false`。调用方在循环结束后对照完整原始目标统一检查表单 `handoff.fields`、非表单 `finalObservation` 和实际页面；`resolvedValues` 只是输入/选择记录，不是独立验收。`observationFresh:false`、截断、覆盖缺口或值冲突时补一次定向只读观察，再仅修正不符合要求的字段，并保留其他正确内容。核验展示值、成功/错误说明时用 `interactiveOnly:false`，省略 `maxDepth`；不要把 `maxDepth:0` 当作无限深度。
+- 完整资料按固定顺序执行时可选 `strategy:"fields"`。每段文本上限 8000 字符，两种模式都只执行已观察元素对应的固定动作，并遵守 origins、`blockedNames`、原生策略和最终发布边界。详见 [通用页面探索](references/browser-exploration.md)。
 - 遇到陌生下拉，先用 `page.inspectControl(field)` 查看触发器、面板关联与当前选项，再用 `page.choose(field,{label:"目标文案"})` 选择并验证。field 优先使用严格 ref，或带正确 `frameId` 的 locator；门户面板无明确关联时需指定唯一的 `panel` CSS 区域，不全页面搜索后选择第一个同名项。
+- `page.read(target)` 直接返回当前输入值 `.value`；`{attribute:"value"}` 不受支持。自定义下拉可能只有 `.text`，用 `{target,text:"不限",match:"equals"}` 断言，不把空 `.value` 判成选择失败。`inspectControl/choose` 的 `panel` 必须是目标所在 frame 内的 CSS 字符串（可用 `panelCss`），不是 `page.locator()` 对象。
+- `invalid_argument` 是调用契约错误，按返回的参数位置和用法修正；不要通过换 ref、反复快照解决。失败先检查 `actions[].executed`；已写入或结果不确定的动作不得自动重放。
+- 表单 `browser_operate` 返回紧凑 `handoff`：`fields` 是当前字段证据与未完成原因，`valueTruncated` 表示长值节选，`observationFresh` 标明是否读到了最终页面。它不证明业务完成，仍需按原始目标验收；对缺失/节选证据做一次定向读取，只修正不匹配字段。`steps` 保留动作结果并省略概率分布；`totalSteps/omittedSteps` 标明摘要覆盖范围。无进展交接后不要原样重跑整张表。
+- 缺少弹层内控件时，先检查最新观察中是否存在编辑入口；原始覆盖缺口、模型实际裁剪和历史观察替换是不同原因。不要仅因控件未展开就扩大快照或回查旧 ref。
+
 - Snapshot 会按原生/ARIA/列表结构识别独立选项行，避免父容器聚合所有选项文案；普通文章列表不自动变成控件。跨 iframe 操作会检查祖先遮挡和焦点，无法可靠检查时返回覆盖缺口。
 - 表单操作失配后保留现场并重新观察；不要通过 reload 自动恢复未保存的表单。级联菜单逐级声明预期，虚拟列表只承诺当前渲染的选项，不盲目递归点击。
 - 对结果声明 `expect` 或 `postconditions`；`status:completed` 只表示脚本结束，业务结果是否验证要看 `verification`。失败后检查已执行步骤，不重放整段。
@@ -27,6 +46,7 @@ metadata:
 ## 使用前提
 
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
+- 仅当操作模式为 Jev 时，在 `agents.env.browser-use-agent.TYPESAFE_API_KEY` 或配置台 Agent 环境变量页提供 TypeSafe API key；也可引用 `${TYPESAFE_API_KEY}`。外部管理的 Agent 则由进程管理方设置 `BROWSER_OPERATE_ENGINE=jev` 和密钥。默认 `sampling` 不需要此密钥，但需要 MCP 客户端提供 Sampling 能力。密钥只传给 browser-use Agent，不属于 Roll 的通用 LLM provider 配置。修改运行中 Agent 的配置后按配置台提示重启服务。
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；页面操作工具支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。经验列表、草稿保存和状态管理使用当前用户的全局经验库，不选择浏览器实例。
@@ -173,6 +193,7 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 | `click_ref(ref, pageId?, snapshotId?, browserActionApproval?)` | 点击快照 ref；推荐携带 `snapshotId`，严格校验实例、页面、document 和最新快照，过期时停止。只有未传 `snapshotId` 的兼容调用保留 `role/name/nth` fallback。 |
 | `type_ref(ref, text, clear?, pageId?, snapshotId?, browserActionApproval?)` | 向快照 ref 输入；`clear:true` 先清空控件，`snapshotId` 启用相同严格绑定；iframe ref 复用原 `frameId`。 |
 | `browser_execute(pageId, source, args?, capabilities, allowedOrigins, preconditions?, postconditions?, timeoutMs?, maxCalls?, scriptApproval?)` | 单页受控 JS 组合执行；默认上限 30 秒、100 次 helper、32MiB 脚本堆、64KiB 文本输出，截图为独立产物。返回动作记录、验证、观察变化和耗时，不自动重放。 |
+| `browser_operate(pageId, goal, allowedOrigins, values?, strategy?, blockedNames?, ...)` | 多字段动态表单首选的完整目标委派；默认使用 Roll MCP Sampling，可显式配置 Jev。执行器在每轮新观察后选择动作，返回最终观察和 `verified:false`，调用方仍需验收原始目标。准确输入以实时工具 schema 为准。 |
 | `browser_workflow_list(url)` | 按 URL 发现适用的已启用经验，返回简短签名与适用条件；不启动浏览器。 |
 | `browser_workflow_save_draft(draft)` | 保存参数化的不可变版本草稿并检查语法；不执行、不启用，不自动保存本次参数或页面正文。 |
 | `browser_workflow_validate(id, version, pageId, args?, scriptApproval?)` | 显式实际执行该版本；只有执行成功且结果验证通过才记录验证凭据，遵守正常页面操作策略。 |
@@ -181,7 +202,7 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 
 ## 通用页面操作编排
 
-通用工具用于没有平台专用方法覆盖的页面操作。依次选择平台专用工具、已启用的适用经验、通用探索；未知目标先观察，已明确的连续步骤再组合执行。
+通用工具用于没有平台专用方法覆盖的页面操作。依次选择平台专用工具、已启用的适用经验、通用探索；遵循用户明确指定的工具；未知目标先观察，范围明确后按下表选择。
 
 工具选择优先级：
 
@@ -189,8 +210,9 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 | --- | --- | --- |
 | BOSS 已建模业务链路，例如读消息、打开聊天、换微信、打招呼、筛选候选人 | `zhipin_*` 专用 tool | 只有专用 tool 缺失或无法覆盖新按钮时，才使用 `browser_snapshot` + `click_ref` / `type_ref` |
 | 已有已启用经验覆盖当前 URL 与任务 | `browser_workflow_list` + `browser_workflow_run` | 适用条件或定位/断言失效后重新探索，不反复重放 |
-| 通用网页上的确定性连续步骤 | `browser_execute`，使用唯一 locator 并声明结果断言 | 未知目标或覆盖缺口处再请求区域快照或截图 |
-| 尚需探索的按钮、链接、输入框 | `browser_snapshot` 找上下文与 `role/name`，再用严格 ref 单步操作 | 用业务读取或有期限的断言验证；仅在需要重新定位时刷新快照 |
+| 多字段表单的资料、字段范围与停止点明确，需根据新观察选择动作，例如下拉、联动字段或弹层编辑 | `browser_operate` 完整委派 | 结束后由调用方按原始目标验收，不能把 `verified:false` 当成功 |
+| 已确定步骤的短脚本、批量输入与断言 | `browser_execute`，在脚本内观察动态状态、使用唯一 locator 并声明结果断言 | 新决策点或覆盖缺口交回宿主观察 |
+| 单次点击/输入、尚未明确范围的探索，或委派受阻后的局部修正 | `browser_snapshot` 找上下文与 `role/name`，再用严格 ref 单步操作 | 用业务读取或有期限的断言验证；页面变化后刷新快照 |
 | 页面、tab、平台选择 | `list_pages` + `select_page` 或平台专用 opener | 不要直接猜内部 URL |
 | 风控或底层行为诊断 | `zhipin_diagnose_browser_state` | 正常业务路径不要默认诊断 |
 
@@ -207,23 +229,29 @@ click_ref(ref, pageId, snapshotId) 或 type_ref(ref, text, clear?, pageId, snaps
   -> 若 actionPolicy=confirm，先获得用户批准，再原样补入 browserActionApproval
   -> 用业务 read tool / 结果断言验证；需要重新定位时再 snapshot
 
-步骤明确后:
+已确定步骤的短脚本、批量输入与断言:
 browser_execute(pageId, source, args, capabilities, allowedOrigins, postconditions)
   -> 检查 status、verification 和已执行动作
   -> 有复用价值且验证成功时，整理草稿 → 显式验证 → 用户批准具体版本 → 启用
+
+多字段动态表单资料、范围和停止点明确时首选:
+browser_operate(pageId, goal, values, allowedOrigins, ...)
+  -> 检查表单 handoff、非表单 finalObservation/progress、steps[].executed 和 verified:false
+  -> 由调用方按完整原始目标及当前页面/业务状态验收
 ```
 
 关键规则：
 
 1. `@eN` 只来自最近一次 Snapshot。单步工具推荐同时传 `pageId` / `snapshotId`；脚本中的 `page.ref(ref, snapshotId)` 必须绑定同一 browserInstance、页面、document 和最新快照，不能跨页面或跨实例使用。
 2. `@eN` 不等同于 BOSS 推荐页的 `@cN` / `@jN`；`@cN`、`@jN` 只服务对应 `zhipin_*` 工具。
-3. 不要自行构造 `@eN`；只能传 `browser_snapshot.snapshot.refs[].ref`。
+3. 不要自行构造 `@eN`；只能传最新 `browser_snapshot` 返回的节点 `ref`（紧凑模型视图把原 `refs[]` 的定位细节合入节点 `refDetails`，未匹配节点的引用放在 `unmatchedRefs`；MCP 原始结果仍保留 `refs[]`）。
 4. 选择目标时优先匹配 `role + name`，并排除 `disabled:true` 的节点；若目标是非语义短文本控件，使用 `role:"clickable"` / `role:"focusable"` / `role:"editable"`、可见文案和 `properties.domActionable:true` 判断。
 5. 如果 `refs[]` 或 `nodes[]` 中出现 `frameId`，说明该 ref 来自 iframe 子 frame；orchestrator 只需要继续传 `ref` 和必要的 `pageId`，不要手工传或改写 `frameId`。
 6. `snapshot.truncated:true` 表示观察被截断；优先用 `scope` 限定相关表单、弹窗或区域，再按需调整 `maxDepth` / `maxNodes`。同时检查 `coverageWarnings`，不要把未覆盖区域当成空页面。
 7. 页面导航、刷新、弹窗出现、列表重排、筛选变化后，先重新 `browser_snapshot`，不要复用旧 `@eN`。
 8. `browser_snapshot` 是 AX 语义快照，不是完整 HTML、截图或网络状态；需要业务数据时仍应使用对应 read tool。
 9. 当前 iframe 支持是同 target / 同 CDP session 内递归内联；递归受 `maxNodes`、frame 去重和 CDP frame 可解析性限制。跨 target / OOPIF iframe 需要 Native CDP session multiplexing，当前不承诺覆盖。
+10. 仅 Roll chat 的 AgentSession 模型上下文会把同一 browserInstance、pageId 的旧观察换成历史摘要，包括导航前的文档；可用摘要的 `resultId` 调用内建 `roll__observation` 分页回查。OpenClaw 等通过 `roll run` 调用的外部宿主不会自动获得该投影或回查工具，应读取实际工具输出并按需重新观察。无论入口，旧 `snapshotId` 只用于核对来源，旧 ref 始终失效；回查内容不能作为当前页面操作定位依据。局部、截断或带覆盖警告的快照不能证明整页已覆盖。
 
 单步兼容接口细节见 `references/generic-browser-refs.md`；组合执行、严格定位、审批与经验管理见 [通用页面探索](references/browser-exploration.md)。
 

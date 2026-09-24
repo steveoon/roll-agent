@@ -158,6 +158,7 @@ export type NativeCdpKeyEventInput = {
   readonly windowsVirtualKeyCode?: number;
   readonly nativeVirtualKeyCode?: number;
   readonly modifiers?: number;
+  readonly commands?: readonly string[];
 };
 
 export type NativeCdpFrame = {
@@ -941,6 +942,7 @@ export class NativeCdpController {
         ? { nativeVirtualKeyCode: input.nativeVirtualKeyCode }
         : {}),
       ...(input.modifiers !== undefined ? { modifiers: input.modifiers } : {}),
+      ...(input.commands !== undefined ? { commands: input.commands } : {}),
     });
   }
 

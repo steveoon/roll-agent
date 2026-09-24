@@ -9,6 +9,7 @@
 - [Prepared Reply And Variant Selection](#prepared-reply-and-variant-selection)
 - [Batch Tool Calls](#batch-tool-calls)
 - [Known Intent, Unknown Tool](#known-intent-unknown-tool)
+- [Browser Tool Choice](#browser-tool-choice)
 - [Browser Runtime Lifecycle](#browser-runtime-lifecycle)
 - [Persistent Agent Recovery](#persistent-agent-recovery)
 - [Local-Path Agent Refresh](#local-path-agent-refresh)
@@ -188,6 +189,8 @@ Rules:
 - For dependent workflows, split the workflow into multiple batches:
   read batch -> parse/filter results -> generate/preview batch -> parse/filter results ->
   optional judge/decision batch -> parse/filter results -> side-effect batch.
+- CLI batch mode only sequences explicit tool calls. It is not a substitute for a browser agent's
+  bounded combined-execution or task tool, which may observe and check within one authorized call.
 
 Example with an account/profile routing key:
 
@@ -241,6 +244,20 @@ For `needs_input`, the stdout JSON contains:
 | `runtimeIssues` | Runtime prerequisites such as missing env | Prefer `roll config setup agent <agent-name>`; use `roll config explain agents.env.<agent-name>` to inspect required keys. Temporary shell exports are acceptable only for one-off retries |
 
 Both arrays are returned at once, not layer-by-layer. Resolve the full set before retrying.
+
+## Browser Tool Choice
+
+Start with the live target skill and `roll agent tools <agent-name> --json`; the shared template does
+not define browser tool schemas. Prefer a platform tool or enabled applicable workflow. For unknown
+targets, observe and use a single fresh ref action when the next step needs host interpretation.
+When a sequence and its checks are already clear, use controlled combined execution if the target
+agent offers it and no intermediate host decision is needed. Delegate a complete goal to a task
+executor only when the caller can supply its facts, permitted actions, and stopping point.
+
+After any path, inspect partial actions and verify the original goal through an appropriate read.
+Approval, fresh refs/snapshot IDs, and uncertain-outcome recovery still apply. `roll run --json`
+does not provide Roll chat's internal observation history projection or `roll__observation` recall.
+See [cross-agent orchestration](cross-agent-orchestration.md) for the full decision rules.
 
 ## Browser Runtime Lifecycle
 
@@ -688,3 +705,14 @@ Rules:
 - On Node 22.6–22.11, query connections use `query_only` SQL write protection because native `readOnly` is unavailable; this is not an OS-level read-only file handle. Query paths do not create or migrate the ledger. Newer Node versions also use native `readOnly`.
 - After upgrading roll or changing the Node install, run `roll schedule service restart` (refuses while a run is live; `--force` interrupts daemon-owned runs, while `run-now --inline` continues). `roll update` does this automatically after Agent maintenance when no run is live, preserves the installed scheduler data-dir, and prints a hint otherwise. Check `roll schedule service status --json` -> `binary.status` or the `Scheduler service` line of `roll doctor --json` when a schedule stops firing after a reboot.
 - Do not use `--abandon` as a shortcut for `remove` or `cancel`; it leaves processes running.
+
+
+## Generic browser form recovery
+
+Respect an explicitly requested tool; otherwise prefer a matching platform tool or enabled workflow. For a generic multi-field form with supplied facts/text, field scope and a stopping point, prefer `browser_operate`, especially when dropdowns, dependent fields or editors require new observations. Delegate the complete field set without prescribing click order; being able to split the work into steps is not a reason to take over each field. Use `browser_execute` for short scripts with known steps, batch inputs and assertions; use single-step tools for one action, exploration before scope is known, or local corrections after delegation stops. `browser_execute` runs host-authored scripts and does not itself invoke Jev. Prepare missing text/facts before delegation; do not expand filling into saving or publishing.
+
+- Read current input/textarea text with `const value = (await page.read(target)).value`; do not request `{attribute:"value"}`. Custom picker labels may live in `.text`; use a text assertion for those controls.
+- `page.inspectControl(target,{panel})` and `page.choose(target,{label,panel})` take a **CSS string** for `panel` in the target frame, not a locator object. Prefer the returned `panelCss`. All scripts need `read` capability, including scripts that interact.
+- On `invalid_argument`, follow the reported parameter path and signature. Do not take repeated snapshots to repair an API argument mistake. Read `actions[].executed` before resuming: completed or uncertain writes must not be replayed automatically.
+- For form delegation, use `handoff.fields` to distinguish current satisfied/unknown/unsatisfied fields, and inspect `handoff.observationFresh`. `valueTruncated` marks excerpts, not exact readback. The response remains `verified:false`; verify against the original goal and inspect missing evidence once before correcting only mismatches. Step probabilities/internal page dumps are omitted; `handoff.totalSteps/omittedSteps` state action coverage.
+- A repeated open/close or scrolling cycle returns `needs_reasoning`; do not send the same whole-form delegation unchanged. Check an observed editor entry before assuming hidden controls were removed by snapshot compression. Historical refs cannot be used as current action targets.

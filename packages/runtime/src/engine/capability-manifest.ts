@@ -30,6 +30,7 @@ export const CAPABILITY_TOOL_ROLES = {
   scheduleExtend: "schedule-extend",
   scheduleList: "schedule-list",
   transcriptRead: "transcript-read",
+  observationRead: "observation-read",
   userInput: "user-input",
 } as const;
 
@@ -373,6 +374,7 @@ const CAPABILITY_APPROVAL_BY_ROLE: Readonly<
   [CAPABILITY_TOOL_ROLES.fileRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.sessionList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.transcriptRead]: CAPABILITY_APPROVAL_MODES.readOnly,
+  [CAPABILITY_TOOL_ROLES.observationRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.agentInstall]: CAPABILITY_APPROVAL_MODES.alwaysConfirm,
   [CAPABILITY_TOOL_ROLES.scheduleList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.userInput]: CAPABILITY_APPROVAL_MODES.readOnly,

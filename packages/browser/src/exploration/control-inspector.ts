@@ -93,7 +93,7 @@ export const INSPECT_CONTROL = `function(panelSelector) {
   out.panelCss=path(panel);out.expanded=native?false:choice.visible(panel);
   out.multiple=out.multiple || panel.getAttribute('aria-multiselectable')==='true';
   if(rows.length>100)out.coverageWarnings.push('options_truncated');
-  out.options=rows.slice(0,100).map(el=>({css:path(el),label:clean(el.label || choice.text(el)).slice(0,500),value:el.hasAttribute('value')?String(el.value ?? el.getAttribute('value')).slice(0,8000):null,selected:Boolean(el.selected || el.getAttribute('aria-selected')==='true' || el.getAttribute('aria-checked')==='true'),disabled:Boolean(el.matches(':disabled') || el.closest('[aria-disabled="true"],[inert],optgroup[disabled]'))}));
+  out.options=rows.slice(0,100).map(el=>({css:path(el),label:clean(el.label || choice.text(el)).slice(0,500),value:(native || el.hasAttribute('value'))?String(el.value ?? el.getAttribute('value')).slice(0,8000):null,selected:Boolean(el.selected || el.getAttribute('aria-selected')==='true' || el.getAttribute('aria-checked')==='true'),disabled:Boolean(el.matches(':disabled') || el.closest('[aria-disabled="true"],[inert],optgroup[disabled]'))}));
   if(!native && out.expanded && !out.options.length)out.coverageWarnings.push('no_rendered_options');
   if(!native)out.coverageWarnings.push('rendered_options_only');
   return out;

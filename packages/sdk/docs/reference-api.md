@@ -152,7 +152,7 @@ optional:
 `execute(input, ctx)` 的 `ctx` 提供：
 
 - `ctx.logger`：结构化日志（stderr）
-- `ctx.llm.generateText(prompt)`：通过 MCP Sampling 调用指挥官 LLM；当前 SDK 为单次请求声明 `maxTokens: 1024`
+- `ctx.llm.generateText(prompt, { maxOutputTokens? })`：通过 MCP Sampling 调用指挥官 LLM；默认输出上限为 1024，可显式设置 1–8192，达到上限会报错
 
 `ctx.llm` 的 provider、model 与 reasoning/thinking 档位由指挥官控制。`runtime.thinking-level` 会作用于 `roll ask`、`roll run` 和 `roll chat` 发起的 Sampling；交互式 `roll chat` 使用 `/think`、`/effort` 或对应快捷键切档后，后续 Sampling 请求也使用新档位。SDK 自身不读取 Roll 配置，且指挥官不会为了 thinking budget 主动调大 SDK 请求对应的 `maxOutputTokens`。
 

@@ -26,6 +26,7 @@ import type {
   SharedV4ProviderOptions,
 } from "@ai-sdk/provider";
 import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
+import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
 import type { JsonSchemaRefIssue } from "@roll-agent/core/tool-runtime/json-schema-refs";
 import type {
@@ -91,6 +92,7 @@ import {
   readDisplayOutput,
   readToolOutcome,
   type ToolCancellationExecutionState,
+  type ToolModelOutput,
 } from "../tool-bridge/normalize-result.ts";
 import { friendlyInvalidToolInputMessage } from "../tool-bridge/bounded-param.ts";
 import {
@@ -201,6 +203,16 @@ import {
   repairActiveToolProtocol,
 } from "./tool-protocol-repair.ts";
 import { buildTranscriptToolset, type TranscriptReader } from "../tool-bridge/transcript-tool.ts";
+import {
+  buildObservationRecallToolset,
+  type ObservationRecallInput,
+} from "../tool-bridge/observation-recall-tool.ts";
+import { readObservationPage } from "./observation-readback.ts";
+import {
+  canonicalObservationOutput,
+  projectObservationMessages,
+  restoreCanonicalObservationOutputs,
+} from "./observation-projection.ts";
 import {
   UserInputInteractionManager,
   type SessionUserInputRequestId,
@@ -340,6 +352,7 @@ interface ActiveTurn {
   readonly execSessionIds: Set<number>;
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
+  readonly canonicalObservationOutputs: Map<string, ToolModelOutput>;
   readonly persistedStepKeys: Set<string>;
   readonly toolExecutions: ToolExecutionRecord[];
   expiresAt?: string;
@@ -468,6 +481,7 @@ function createActiveTurn(): ActiveTurn {
     execSessionIds: new Set<number>(),
     pendingToolCalls: new Map<string, PendingToolCall>(),
     completedStepResponses: new Map<string, readonly ModelMessage[]>(),
+    canonicalObservationOutputs: new Map<string, ToolModelOutput>(),
     persistedStepKeys: new Set<string>(),
     toolExecutions: [],
     userMessagePersisted: false,
@@ -488,10 +502,30 @@ interface CompletedModelStep {
   readonly response: { readonly messages: readonly ModelMessage[] };
 }
 
-function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep): void {
-  activeTurn.completedStepResponses.set(`${step.callId}:${String(step.stepNumber)}`, [
-    ...step.response.messages,
-  ]);
+function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep): ModelMessage[] {
+  const key = `${step.callId}:${String(step.stepNumber)}`;
+  const remembered = activeTurn.completedStepResponses.get(key);
+  if (remembered) return [...remembered];
+  const canonical = restoreCanonicalObservationOutputs(
+    step.response.messages,
+    activeTurn.canonicalObservationOutputs,
+  );
+  activeTurn.completedStepResponses.set(key, canonical);
+  return canonical;
+}
+
+function canonicalMessagesForSteps(
+  activeTurn: ActiveTurn,
+  steps: readonly CompletedModelStep[],
+): ModelMessage[] {
+  return steps.flatMap(
+    (step) =>
+      activeTurn.completedStepResponses.get(`${step.callId}:${String(step.stepNumber)}`) ??
+      restoreCanonicalObservationOutputs(
+        step.response.messages,
+        activeTurn.canonicalObservationOutputs,
+      ),
+  );
 }
 
 function completedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
@@ -756,13 +790,6 @@ function addUsage(acc: SessionTokenUsage, next: SessionTokenUsage): SessionToken
   };
 }
 
-function maxTokenCount(current: number | undefined, next: number | undefined): number | undefined {
-  if (next === undefined) {
-    return current;
-  }
-  return current === undefined ? next : Math.max(current, next);
-}
-
 function isPotentialInputEcho(candidate: string, input: string): boolean {
   const normalizedCandidate = candidate.trim();
   const normalizedInput = input.trim();
@@ -923,6 +950,13 @@ export class AgentSession {
   private readonly toolCoordinator = new ToolExecutionCoordinator();
   private tools: ToolSet;
   private readonly registry: ToolRegistry;
+  private observationRecallToolId: string | undefined;
+  private readonly observationRetentionByToolId = new Map<
+    string,
+    ObservationRetentionDeclaration
+  >();
+  private readonly observationResultIds = new Map<string, string | undefined>();
+  private readonly ambiguousObservationCallIds = new Set<string>();
   private readonly userInputToolId: string;
   private readonly userInputTool: ToolSet;
   private userInputAvailable = false;
@@ -935,9 +969,7 @@ export class AgentSession {
   private closed = false;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   private lastInputTokens: number | undefined;
-  private lastStepOutputTokens: number | undefined;
-  private lastStepToolResultTokens: number | undefined;
-  private measuredMessageCount: number | undefined;
+  private measuredProjectedTokens: number | undefined;
   private promptOverhead: number | undefined;
   private needsCompaction = false;
 
@@ -1125,8 +1157,20 @@ export class AgentSession {
       registry,
     );
     markToolRole(toolRoles, built.tools, CAPABILITY_TOOL_ROLES.agent);
+    const observationRecallTools =
+      built.observationRetentionByToolId.size > 0
+        ? buildObservationRecallToolset(
+            (input) => this.readObservation(input),
+            registry,
+            this.toolCoordinator,
+            `thread:${this.id}:observation`,
+          )
+        : {};
+    this.observationRecallToolId = Object.keys(observationRecallTools)[0];
+    markToolRole(toolRoles, observationRecallTools, CAPABILITY_TOOL_ROLES.observationRead);
     this.tools = {
       ...transcriptTools,
+      ...observationRecallTools,
       ...skillTools,
       ...(fileToolset
         ? { ...fileToolset.readTools, ...fileToolset.editTools, ...fileToolset.verifyTools }
@@ -1140,6 +1184,9 @@ export class AgentSession {
       ...built.tools,
     };
     this.registry = built.registry;
+    for (const [id, declaration] of built.observationRetentionByToolId) {
+      this.observationRetentionByToolId.set(id, declaration);
+    }
     this.toolRoles = toolRoles;
     this.recordToolSchemaIssues(built.schemaIssuesByToolId);
     this.applyToolSchemaPolicy();
@@ -1327,6 +1374,23 @@ export class AgentSession {
       );
       markToolRole(this.toolRoles, built.tools, CAPABILITY_TOOL_ROLES.agent);
       this.tools = { ...this.tools, ...built.tools };
+      for (const [id, declaration] of built.observationRetentionByToolId) {
+        this.observationRetentionByToolId.set(id, declaration);
+      }
+      if (
+        this.observationRecallToolId === undefined &&
+        this.observationRetentionByToolId.size > 0
+      ) {
+        const recallTools = buildObservationRecallToolset(
+          (input) => this.readObservation(input),
+          this.registry,
+          this.toolCoordinator,
+          `thread:${this.id}:observation`,
+        );
+        this.observationRecallToolId = Object.keys(recallTools)[0];
+        markToolRole(this.toolRoles, recallTools, CAPABILITY_TOOL_ROLES.observationRead);
+        this.tools = { ...this.tools, ...recallTools };
+      }
       this.recordToolSchemaIssues(built.schemaIssuesByToolId);
       this.applyToolSchemaPolicy();
       this.toolSourceAgentNames.add(refresh.source.agentName);
@@ -1546,7 +1610,9 @@ export class AgentSession {
           contextRecoveryAttempts,
           ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
         });
-        let lastStepToolResultTokens = 0;
+        let lastPreparedComparableTokens = 0;
+        let contextInputBaselineTokens: number | undefined;
+        const currentStreamCanonicalMessages: ModelMessage[] = [];
         const invalidScheduleRetryGuard = createInvalidScheduleRetryGuard();
         const createStreamResult = () =>
           streamText({
@@ -1554,14 +1620,24 @@ export class AgentSession {
             system: this.systemPrompt,
             messages: inferenceMessages,
             tools: this.modelTools(),
-            prepareStep: ({ messages }) => ({
-              messages: relocateToolImagesToUserMessages(messages),
-            }),
+            prepareStep: () => {
+              lastPreparedComparableTokens = estimateMessagesTokens(
+                this.projectModelMessages([...this.messages, ...currentStreamCanonicalMessages]),
+              );
+              return {
+                messages: relocateToolImagesToUserMessages(
+                  this.projectModelMessages([
+                    ...inferenceMessages,
+                    ...currentStreamCanonicalMessages,
+                  ]),
+                ),
+              };
+            },
             stopWhen: [
               stepCountIs(Math.max(1, this.maxSteps - activeTurn.completedStepCount)),
               stopOnUserRejected(),
               invalidScheduleRetryGuard.stop,
-              this.stopOnContextPressure(activeTurn),
+              this.stopOnContextPressure(activeTurn, () => lastPreparedComparableTokens),
             ],
             toolApproval: async ({ toolCall }) => {
               this.trackPendingToolCall(
@@ -1593,10 +1669,7 @@ export class AgentSession {
             ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
             onError: () => undefined,
             onStepEnd: (step) => {
-              rememberCompletedStep(activeTurn, step);
-              lastStepToolResultTokens = estimateMessagesTokens(
-                step.response.messages.filter((message) => message.role === "tool"),
-              );
+              currentStreamCanonicalMessages.push(...rememberCompletedStep(activeTurn, step));
             },
             onAbort: ({ steps }) => {
               for (const step of steps) {
@@ -1645,7 +1718,6 @@ export class AgentSession {
         let sawToolCall = false;
         let totalUsage: SessionTokenUsage | undefined;
         let contextInputTokens: number | undefined;
-        let lastStepOutputTokens: number | undefined;
         let outputTokensPerSecond: number | undefined;
         let stepCount = 0;
         let lastStepFinishReason: string | undefined;
@@ -1740,6 +1812,24 @@ export class AgentSession {
                   result,
                 });
                 this.persistToolExecution(record, activeTurn);
+                const canonicalObservation =
+                  outcome.kind === TOOL_OUTCOME_KINDS.success
+                    ? canonicalObservationOutput(
+                        result.raw,
+                        this.observationRetentionByToolId.get(part.toolName),
+                      )
+                    : undefined;
+                if (canonicalObservation) {
+                  activeTurn.canonicalObservationOutputs.set(part.toolCallId, canonicalObservation);
+                  const previousId = this.observationResultIds.get(part.toolCallId);
+                  if (previousId !== undefined && previousId !== record.id) {
+                    this.ambiguousObservationCallIds.add(part.toolCallId);
+                  }
+                  this.observationResultIds.set(
+                    part.toolCallId,
+                    this.ambiguousObservationCallIds.has(part.toolCallId) ? undefined : record.id,
+                  );
+                }
                 if (
                   pending?.potentialSideEffect === true &&
                   outcome.kind !== TOOL_OUTCOME_KINDS.userRejected &&
@@ -1819,8 +1909,13 @@ export class AgentSession {
               }
               case "finish-step": {
                 const stepUsage = toSessionUsage(part.usage);
-                contextInputTokens = maxTokenCount(contextInputTokens, stepUsage.inputTokens);
-                lastStepOutputTokens = stepUsage.outputTokens;
+                if (
+                  stepUsage.inputTokens !== undefined &&
+                  (contextInputTokens === undefined || stepUsage.inputTokens >= contextInputTokens)
+                ) {
+                  contextInputTokens = stepUsage.inputTokens;
+                  contextInputBaselineTokens = lastPreparedComparableTokens;
+                }
                 stepCount += 1;
                 lastStepFinishReason = part.finishReason;
                 const stepThroughput =
@@ -1950,7 +2045,7 @@ export class AgentSession {
         );
         try {
           const steps = await result.steps;
-          responseMessages = steps.flatMap((step) => step.response.messages);
+          responseMessages = canonicalMessagesForSteps(activeTurn, steps);
         } catch (error) {
           this.clearDebugTimer(responseTimer);
           if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
@@ -2047,16 +2142,10 @@ export class AgentSession {
         const pressureInputTokens = contextInputTokens ?? totalUsage?.inputTokens;
         if (pressureInputTokens !== undefined) {
           this.lastInputTokens = pressureInputTokens;
-          this.lastStepOutputTokens = lastStepOutputTokens;
-          this.lastStepToolResultTokens = lastStepToolResultTokens;
-          this.measuredMessageCount = this.messages.length;
+          this.measuredProjectedTokens = contextInputBaselineTokens ?? lastPreparedComparableTokens;
           this.promptOverhead = Math.max(
             0,
-            pressureInputTokens -
-              estimateMessagesTokens(this.messages) +
-              (lastStepOutputTokens ?? 0) +
-              lastStepToolResultTokens -
-              reminderTokens,
+            pressureInputTokens - this.measuredProjectedTokens - reminderTokens,
           );
         }
         activeTurn.completedStepCount += stepCount;
@@ -2532,7 +2621,7 @@ export class AgentSession {
     this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
     this.structuredOutputReasoning = input.structuredOutputReasoning;
     this.lastInputTokens = undefined;
-    this.measuredMessageCount = undefined;
+    this.measuredProjectedTokens = undefined;
     this.promptOverhead = undefined;
     if (input.toolSchemaPolicy !== undefined) {
       this.toolSchemaPolicy = input.toolSchemaPolicy;
@@ -2618,7 +2707,10 @@ export class AgentSession {
     return progressedAny;
   }
 
-  private stopOnContextPressure(activeTurn: ActiveTurn): StopCondition<ToolSet> {
+  private stopOnContextPressure(
+    activeTurn: ActiveTurn,
+    lastPreparedComparableTokens: () => number,
+  ): StopCondition<ToolSet> {
     return ({ steps }) => {
       const settings = this.compaction;
       const last = steps.at(-1);
@@ -2637,16 +2729,16 @@ export class AgentSession {
         return false;
       }
       const usage = toSessionUsage(last.usage);
+      const projected = estimateMessagesTokens(
+        this.projectModelMessages([
+          ...this.messages,
+          ...canonicalMessagesForSteps(activeTurn, steps),
+        ]),
+      );
       const pressure =
         usage.inputTokens === undefined
-          ? this.promptOverheadTokens() +
-            estimateMessagesTokens(this.messages) +
-            estimateMessagesTokens(steps.flatMap((step) => step.response.messages))
-          : usage.inputTokens +
-            (usage.outputTokens ?? 0) +
-            estimateMessagesTokens(
-              last.response.messages.filter((message) => message.role === "tool"),
-            );
+          ? this.promptOverheadTokens() + projected
+          : Math.max(0, usage.inputTokens + projected - lastPreparedComparableTokens());
       if (pressure / this.contextWindow < settings.threshold) {
         return false;
       }
@@ -2660,16 +2752,53 @@ export class AgentSession {
       pendingContent === undefined
         ? 0
         : estimateMessagesTokens([{ role: "user", content: pendingContent }]);
-    if (this.lastInputTokens !== undefined && this.measuredMessageCount !== undefined) {
-      return (
-        this.lastInputTokens +
-        (this.lastStepOutputTokens ?? 0) +
-        (this.lastStepToolResultTokens ?? 0) +
-        estimateMessagesTokens(this.messages.slice(this.measuredMessageCount)) +
-        pending
-      );
+    const projected = estimateMessagesTokens(this.projectModelMessages(this.messages));
+    if (this.lastInputTokens !== undefined && this.measuredProjectedTokens !== undefined) {
+      return Math.max(0, this.lastInputTokens + projected - this.measuredProjectedTokens + pending);
     }
-    return this.promptOverheadTokens() + estimateMessagesTokens(this.messages) + pending;
+    return this.promptOverheadTokens() + projected + pending;
+  }
+
+  private observationResultId(toolCallId: string): string | undefined {
+    if (this.observationResultIds.has(toolCallId)) return this.observationResultIds.get(toolCallId);
+    const matches = this.listPersistedToolExecutions?.({ toolCallId, limit: 2 }) ?? [];
+    if (matches.length > 1) this.ambiguousObservationCallIds.add(toolCallId);
+    const id = matches.length === 1 ? matches[0]?.id : undefined;
+    this.observationResultIds.set(toolCallId, id);
+    return id;
+  }
+
+  private readObservation(input: ObservationRecallInput): unknown {
+    const record =
+      this.getPersistedToolExecution?.(input.resultId) ??
+      (() => {
+        const sequence = this.inMemoryToolExecutions.findIndex(
+          (candidate) => candidate.id === input.resultId,
+        );
+        const candidate = this.inMemoryToolExecutions[sequence];
+        return candidate ? { ...candidate, sequence } : undefined;
+      })();
+    if (!record) throw new Error("当前会话中没有这个工具结果");
+    const declaration = [...this.observationRetentionByToolId].find(([id]) => {
+      const route = this.registry.resolve(id);
+      return route?.agentName === record.agentName && route.toolName === record.toolName;
+    })?.[1];
+    if (!declaration) throw new Error("该结果不是可回查的浏览器观察");
+    return readObservationPage(
+      input,
+      record,
+      [...this.messages, ...(this.activeTurn ? unpersistedStepMessages(this.activeTurn) : [])],
+      declaration,
+      this.observationResultId(record.toolCallId) === record.id,
+    );
+  }
+
+  private projectModelMessages(messages: readonly ModelMessage[]): ModelMessage[] {
+    return projectObservationMessages(messages, {
+      declarations: this.observationRetentionByToolId,
+      resultId: (toolCallId) => this.observationResultId(toolCallId),
+      ...(this.observationRecallToolId ? { recallToolId: this.observationRecallToolId } : {}),
+    });
   }
 
   private promptOverheadTokens(): number {
@@ -3477,9 +3606,7 @@ export class AgentSession {
         this.compactionCheckpoint = checkpoint;
       }
       this.lastInputTokens = undefined;
-      this.lastStepOutputTokens = undefined;
-      this.lastStepToolResultTokens = undefined;
-      this.measuredMessageCount = undefined;
+      this.measuredProjectedTokens = undefined;
       this.needsCompaction = false;
     }
 

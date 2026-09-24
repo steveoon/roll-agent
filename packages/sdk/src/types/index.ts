@@ -1,4 +1,5 @@
 import type { AppOutputDeclaration } from "@roll-agent/protocol/app-output";
+import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { z } from "zod";
 import type { ToolAnnotations as McpToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentContext } from "../context.ts";
@@ -38,6 +39,8 @@ export interface AnyToolDefinition {
   readonly output: z.ZodType;
   readonly annotations?: McpToolAnnotations;
   readonly resourceHints?: readonly ToolResourceHint[];
+  /** Opt-in model-history retention contract; execution result remains unchanged. */
+  readonly observationRetention?: ObservationRetentionDeclaration;
   /** Explicit opt-in to the persistent application result channel. */
   readonly appOutput?: Omit<AppOutputDeclaration, "remoteReadable"> & {
     readonly remoteReadable?: boolean;

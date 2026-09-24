@@ -69,6 +69,42 @@ future-options:
 }
 
 describe("ConfigApplicationService", () => {
+  it("redacts a TypeSafe key entered through the Agent environment editor", () => {
+    const raw = CONFIG_WITH_SECRETS.replace(
+      "REPLY_AUTHORITY_KEYS_URL: https://example.com/keys",
+      "REPLY_AUTHORITY_KEYS_URL: https://example.com/keys\n      TYPESAFE_API_KEY: configured-test-key",
+    );
+    withConfig(raw, ({ configPath }) => {
+      const service = new ConfigApplicationService({
+        configPath,
+        agentEnvFields: [
+          { agentName: "browser-use-agent", name: "TYPESAFE_API_KEY", secret: true },
+        ],
+      });
+      const snapshot = service.read();
+      assert.doesNotMatch(snapshot.yaml, /configured-test-key/u);
+      assert.ok(
+        snapshot.configuredSecretPaths.some(
+          (path) => path.join(".") === "agents.env.browser-use-agent.TYPESAFE_API_KEY",
+        ),
+      );
+      const persisted = structuredClone(snapshot.persisted) as Record<string, unknown>;
+      const browserEnv = requireMutableRecord(
+        requireMutableRecord(requireMutableRecord(persisted["agents"])["env"])["browser-use-agent"],
+      );
+      browserEnv["TYPESAFE_API_KEY"] = "replacement-test-key";
+      const preview = service.previewStructured(persisted, snapshot.revision);
+      assert.doesNotMatch(JSON.stringify(preview), /replacement-test-key/u);
+      assert.ok(
+        preview.effects.some(
+          (effect) => effect.kind === "restart-agent" && effect.agentName === "browser-use-agent",
+        ),
+      );
+      service.saveStructured(persisted, snapshot.revision);
+      assert.match(readFileSync(configPath, "utf-8"), /TYPESAFE_API_KEY: replacement-test-key/u);
+    });
+  });
+
   it("returns persisted values without resolving env and redacts plaintext secrets", () => {
     withConfig(CONFIG_WITH_SECRETS, ({ service }) => {
       const snapshot = service.read();
@@ -589,6 +625,7 @@ agents:
   it("plans restart, new-session, next-command and manual effects from segment paths", () => {
     const effects = planConfigActivation([
       ["browser", "instances", "boss-a", "cdpPort"],
+      ["browser", "operate", "engine"],
       ["agents", "env", "notify-agent", "FEISHU_BOT_WEBHOOK"],
       ["agents", "dataDir"],
       ["chat", "screenMode"],

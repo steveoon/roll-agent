@@ -134,6 +134,31 @@ test(
         assert.equal(await page.locator("select").inputValue(), "b");
       });
       await t.test(
+        "native options without a value attribute expose their implicit value",
+        async () => {
+          await reset(
+            '<select id="implicit"><option>First</option><option>Second</option></select>',
+          );
+          const r = await program('await page.choose(page.locator("#implicit"),{value:"Second"});');
+          assert.equal(r.status, "completed", JSON.stringify(r));
+          assert.equal(await page.locator("#implicit").inputValue(), "Second");
+        },
+      );
+      await t.test(
+        "clicking a form input is allowed while Enter submission remains denied",
+        async () => {
+          await reset(
+            '<form action="/submit"><input id="query"><button type="submit">Submit</button></form>',
+          );
+          const click = await program('await page.click(page.locator("#query"));');
+          assert.equal(click.status, "completed", JSON.stringify(click));
+          const enter = await program('await page.press("Enter",{target:page.locator("#query")});');
+          assert.equal(enter.status, "failed");
+          assert.equal(enter.error?.code, "capability_blocked");
+          assert.ok(!page.url().includes("/submit"));
+        },
+      );
+      await t.test(
         "class-free contained list with delegated composite rows and hidden duplicates",
         async () => {
           await reset(custom());

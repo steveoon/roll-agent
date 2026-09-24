@@ -1,3 +1,4 @@
+import { environmentDiagnosticsSchema } from "../../src/config/environment-diagnostic-schema.ts";
 import { COMPANION_ACTION_PATHS, type CompanionAction } from "./lib/companion-state.ts";
 import { SCHEDULE_ACTION_PATHS, type ScheduleAction } from "./lib/schedule-state.ts";
 import { isRecord } from "./lib/config-value.ts";
@@ -487,7 +488,11 @@ function isConfigCatalogNode(value: unknown): value is ConfigCatalogNode {
       return isConfigCatalogNode(value.item);
     case "enum":
       return (
-        Array.isArray(value.options) && value.options.every((option) => typeof option === "string")
+        Array.isArray(value.options) &&
+        value.options.every((option) => typeof option === "string") &&
+        (value.optionLabels === undefined ||
+          (isRecord(value.optionLabels) &&
+            Object.values(value.optionLabels).every((label) => typeof label === "string")))
       );
     case "string":
     case "boolean":
@@ -579,6 +584,8 @@ function isAgentRuntimeStatus(value: unknown): value is AgentRuntimeStatus {
 function isCompanionStatus(value: unknown): value is CompanionStatus {
   return (
     isRecord(value) &&
+    (value.environmentDiagnostics === undefined ||
+      environmentDiagnosticsSchema.safeParse(value.environmentDiagnostics).success) &&
     isCompanionPhase(value.phase) &&
     typeof value.enabled === "boolean" &&
     typeof value.enrolled === "boolean" &&
@@ -660,6 +667,8 @@ function isCompanionPhase(value: unknown): value is CompanionPhase {
 function isCompanionDoctorResult(value: unknown): value is CompanionDoctorResult {
   return (
     isRecord(value) &&
+    (value.environmentDiagnostics === undefined ||
+      environmentDiagnosticsSchema.safeParse(value.environmentDiagnostics).success) &&
     typeof value.ok === "boolean" &&
     Array.isArray(value.checks) &&
     value.checks.every(isCompanionDoctorCheck)

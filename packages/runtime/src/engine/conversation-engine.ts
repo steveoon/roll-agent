@@ -1,6 +1,11 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
+import {
+  OBSERVATION_RETENTION_META_KEY,
+  observationRetentionDeclarationSchema,
+  type ObservationRetentionDeclaration,
+} from "@roll-agent/protocol/observation-retention";
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -320,6 +325,18 @@ function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractObservationRetention(listed: unknown): {
+  readonly declaration?: ObservationRetentionDeclaration;
+  readonly issue?: string;
+} {
+  if (!isRecord(listed) || !isRecord(listed._meta)) return {};
+  if (!Object.hasOwn(listed._meta, OBSERVATION_RETENTION_META_KEY)) return {};
+  const parsed = observationRetentionDeclarationSchema.safeParse(
+    listed._meta[OBSERVATION_RETENTION_META_KEY],
+  );
+  return parsed.success ? { declaration: parsed.data } : { issue: "声明字段无效" };
 }
 
 function isResourceHintKind(value: string): value is ToolResourceHint["kind"] {
@@ -1054,6 +1071,13 @@ export class ConversationEngine {
       });
       const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
         const resourceHintExtraction = extractResourceHints(listed[index]);
+        const observationRetention = extractObservationRetention(listed[index]);
+        if (observationRetention.issue) {
+          reportIssue({
+            agentName: agent.skill.name,
+            message: `Tool "${agentTool.name}" 的 ${OBSERVATION_RETENTION_META_KEY} 无效（${observationRetention.issue}），观察历史保持原样`,
+          });
+        }
         if (resourceHintExtraction.issue !== undefined) {
           reportIssue({
             agentName: agent.skill.name,
@@ -1064,6 +1088,9 @@ export class ConversationEngine {
           tool: agentTool,
           annotations: extractAnnotations(listed[index]),
           ...(resourceHintExtraction.hints ? { resourceHints: resourceHintExtraction.hints } : {}),
+          ...(observationRetention.declaration
+            ? { observationRetention: observationRetention.declaration }
+            : {}),
         };
       });
       connectionAcquisition.commit();

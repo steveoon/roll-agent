@@ -4,6 +4,48 @@
 
 单步 `browser_snapshot` / `click_ref` / `type_ref` 的区域观察、上下文选择和严格 ref 用法见 [通用 ref 操作](generic-browser-refs.md)。
 
+遵循用户明确指定的工具；未知目标先观察。资料与文案齐全、字段范围和停止点明确的多字段表单，尤其涉及下拉、联动字段或弹层编辑器时，首选 `browser_operate`；无需提前知道点击顺序，不因宿主能拆步骤就逐字段执行。已确定步骤的短脚本、批量输入与断言用 `browser_execute`，它不调用 Jev。单次点击/输入、范围尚不明确的探索或委派受阻后的局部修正用单步工具。两者都不能绕过发布/保存授权、动态观察、结果验证或失败后现场检查。
+
+## 通过完整目标执行
+
+`browser_operate` 默认 `strategy:"task"`。调用方交代原始目标、已知事实和已准备文案；所选决策引擎在当前页面选择下一步。例：
+
+```json
+{
+  "pageId": "真实页面 ID",
+  "goal": "填写岗位草稿。优先处理前置选择和必填字段，使用资料中的内容，停止在发布前。",
+  "values": [
+    { "name": "职位名称", "text": "餐饮兼职服务员" },
+    { "name": "岗位说明", "text": "调用方已准备并允许使用的完整岗位文案" },
+    { "name": "最低月薪", "text": "5000" },
+    { "name": "最高月薪", "text": "6000" }
+  ],
+  "strategy": "task",
+  "allowedOrigins": ["https://example.com"],
+  "blockedNames": ["发布", "提交"]
+}
+```
+
+示例中的页面、origin 和事实必须替换为实际输入。必填标记不允许编造缺失事实；用户要求的选填字段仍须处理。调用方需要拟写内容时在交付前准备好；决策引擎不负责自由写作。操作过程中无需宿主逐项检查、字段完成复核或内部恢复。
+
+一次决策请求共享当前页面状态，询问一个带目标的完整动作，以及各输入框对应的来源值。完整动作把操作与目标绑定，避免不兼容组合。各来源问题按对应输入框独立执行，只消费选中动作的来源答案；输入框与其来源问题显式绑定，未使用分支的置信度不影响执行。决策引擎可优先处理前置选择和必填字段；编辑入口先点击，再观察里面的真实字段，不能强制给按钮解析一个输入值。
+
+决策输入中的 `pickerFields` 单独表示选择控件，元素通过字段 ID 关联触发器或候选项。关系来源区分 ARIA 和唯一局部 DOM 包含关系；无法唯一定位的归属保持未知，不按距离猜测。原生标签、placeholder、空触发器展示文字和先前观察到的标签分别标注来源；只有文档、frame 和实际节点身份一致时才保留旧标签。节点替换后不沿用。
+
+`valueKind` 区分输入值、已应用值、查询词、占位内容、候选文字和纯展示文字。`sourceValueMatches`/`writtenValueMatches` 仅是明确范围的字符串相等线索，不表示任务完成；候选菜单中的文字不能充当字段值。下拉展开状态 `expanded` 与菜单当前是否可见 `panelVisible` 分开表达，异步菜单未出现不等于控件已关闭。隐藏 backing input 只用于提供有值/空值证据，不向模型输出其内部编码。
+
+动作描述明确区分“打开某字段”“选择该字段的候选”“向搜索框输入查询”。完成问题要求对照每个请求字段的实际结果，不能因为页面某处出现了目标文字就结束。这些输入同时适用于默认的 Sampling 与显式启用的 Jev 决策引擎，不增加宿主复核或置信度门禁。
+
+输入候选由代码从完整 `values` 和有限的 goal 原文片段中提供，决策引擎选择后代码复制完整原文，不把预览截断内容当成实际值。保留无匹配选项；原文候选覆盖不全、需要转换或没有所需文案时返回 `needs_input`，调用方提供针对该控件的值后继续。原生 select 只使用观察到的 option；自定义下拉通过点击、查询和选择推进。页面文本是 UI 证据，不能冒充用户数据。
+
+代码保留站点/策略限制、文档与控件身份检查、可操作性检查、输入精确读回、取消与停滞预算。不执行模型生成的脚本/选择器，不在不确定的动作后自动重放。搜索文字不等于已应用的字段值，模型根据每轮新观察继续选择和确认。
+
+默认 `sampling` 使用 Roll MCP Sampling 模型；core-managed Agent 通过 Roll 配置 `browser.operate.engine: jev` 切换到 TypeSafe，外部管理的 Agent 由进程管理方设置 `BROWSER_OPERATE_ENGINE=jev` 和 `TYPESAFE_API_KEY`。仅 Jev 需要该密钥且不需要宿主 Sampling。工具 `engine` 参数不能覆盖进程配置。不存在第二个辅助模型。旧 `maxTextCalls`、`maxRecoveryDecisions` 参数仅兼容已有调用且不生效；`BROWSER_OPERATE_TEXT_MODEL` 已不使用。输出 `textCalls:[]`、`recoveryDecisions:0`。
+
+停滞或复杂障碍返回 `needs_reasoning`，调用方据实际观察决定下一步，不能盲目重跑。`model_done` 是未验证的完成提议：调用方必须对照完整原始目标统一验收 `finalObservation` 和页面结果。`resolvedValues` 是执行记录；同名字段、搜索框和候选文字不能冒充最终值。如果 `observationFresh:false`，或存在截断、覆盖缺口、冲突，补一次定向只读观察。将错误整理成局部修正任务，保留正确字段；修正后仍要核对原目标。所有验收和返工成本都计入端到端测试，不把快速失败当作提速。
+
+`strategy:"fields"` 保留按完整资料顺序填写的旧路径，也没有文本助手。两种模式均保留 `verified:false`，不宣称平台已接受最终提交。
+
 ## 执行一个组合脚本
 
 先通过 `list_pages` 获取准确 pageId。脚本固定在一个 browserInstance 的一个页面，执行期间复用连接并串行持有实例操作锁。不同实例可并行，页面诊断出口不被脚本占住。
@@ -25,6 +67,12 @@
 通过 CLI 执行时，将该 JSON 保存到临时输入文件，再使用 `roll run browser-use-agent browser_execute --input-file <输入文件> --json`。也可直接使用 `--input-json`。参数属于本次执行，不会自动保存到站点经验中。
 
 默认上限：30 秒、100 次 helper 调用、32MiB 脚本堆，文本结果/日志/轨迹合计 64KiB。`timeoutMs`、`maxCalls` 只能调低。截图单独保存为本地产物，返回 `artifacts` 路径；最多 10 张。脚本环境没有文件读写、模块导入、`process`、`fetch`、裸 CDP 或页面 `evaluate`。
+
+`page` 不是 Playwright。定位器构造器返回普通定位数据，没有 `.all()`、`.count()`、`.fill()`、`.textContent()` 或 `.getAttribute()` 方法；使用 `page.count(target)`、`page.fill(target,text)`、`page.read(target,{attribute})`。不支持 `page.url()` 或 `:visible` 等 Playwright 选择器扩展。遇到 `SCRIPT_ERROR` 时先检查已执行的 `actions`，不要重放已成功的操作。
+
+陌生表单先调用独立的 `browser_snapshot`；空白 `scope` 与省略相同。脚本内 `page.snapshot()` 受 origin 限制不展开 iframe，可能只看到导航栏。此时使用独立快照返回的 `ref` 与 `snapshotId` 构造 `page.ref(ref,snapshotId)`，它会保留 frame 身份并继续执行现有 frame/origin 检查。不要猜测 iframe 的下标，也不要仅凭脚本内快照断言表单不存在。
+
+字段可能以摘要、编辑或补充入口呈现，输入控件要展开后才出现。用户要求填写某字段时，先检查与它明确相关的已观察入口，再决定是否缺少可操作路径；必要时滚动对应区域。用户明确指定的字段即使在页面上标为可选，也需要完成或清楚报告真实阻塞原因。只提供部分表单值的快照不是“字段不支持”的证据。
 
 ## Helpers
 
@@ -139,3 +187,7 @@ export async function readProfile(
 ```
 
 `BrowserProgramDriver` 属于宿主信任边界。直接嵌入时，调用方负责实例锁、整段审批、当前站点/策略检查，以及 `close()` 中断连接；内核不会为任意自定义 driver 补齐这些能力。生产 MCP 入口使用 `BrowserScriptPageDriver` 与 `executeBrowserTool` 统一完成这些检查。执行结束会关闭 driver，不应跨执行复用已关闭对象。
+
+决策请求会去重通用说明和资料表，并按字节预算缩短模型预览；保留原始 goal、所有动作 ID 与执行用完整文本。预览被截断不代表字段不存在，最终观察不使用这种压缩视图。同一决策请求另有一个整项完成判断，仅在动作建议 DONE 时使用；它可指出未完成要求或尚未处理的面板，不额外调用宿主模型，也不逐字段增加检查调用。
+
+调用方必须原样转发用户目标和原样类文本，不能自行增删换行。原文只有一段时不得为了展示而重排成两段；最终核验包含这一点。

@@ -1,6 +1,7 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { APP_OUTPUT_META_KEY, validateAppOutputContract } from "@roll-agent/protocol/app-output";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { readExecutionTimeoutMs } from "../../tool-runtime/execution-timeout.ts";
 import { isJsonSchemaObject, isPlainObject } from "../../tool-runtime/schema.ts";
 import {
   inlineAcyclicLocalJsonSchemaReferences,
@@ -199,6 +200,7 @@ export function normalizeListedTools(
     }
     let appOutput: AgentTool["appOutput"];
     let appOutputIssue: AgentTool["appOutputIssue"];
+    const executionTimeoutMs = readExecutionTimeoutMs(tool._meta);
     if (tool._meta?.[APP_OUTPUT_META_KEY] !== undefined) {
       try {
         appOutput = validateDiscoveredAppOutput({
@@ -216,9 +218,22 @@ export function normalizeListedTools(
       inputSchema,
       ...(appOutput === undefined ? {} : { appOutput }),
       ...(appOutputIssue === undefined ? {} : { appOutputIssue }),
+      ...(executionTimeoutMs === undefined ? {} : { executionTimeoutMs }),
       ...(unresolved.length > 0 ? { schemaIssues: unresolved } : {}),
     };
   });
+}
+
+export async function callListedAgentTool(
+  client: Client,
+  tool: Pick<AgentTool, "name" | "executionTimeoutMs">,
+  args: Record<string, unknown>,
+): ReturnType<Client["callTool"]> {
+  return await client.callTool(
+    { name: tool.name, arguments: args },
+    undefined,
+    tool.executionTimeoutMs === undefined ? undefined : { timeout: tool.executionTimeoutMs },
+  );
 }
 
 export function getToolNameSuggestions(

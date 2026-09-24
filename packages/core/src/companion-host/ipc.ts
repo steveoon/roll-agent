@@ -1,3 +1,4 @@
+import type { EnvironmentDiagnostics } from "../config/environment-diagnostic-schema.ts";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -24,6 +25,7 @@ const SILENT_CONTROL_LOGGER: CompanionLogger = {
 export interface CompanionControlHandlers {
   readonly getStatus: () => CompanionHostStatus | Promise<CompanionHostStatus>;
   readonly stop: () => void | Promise<void>;
+  readonly getDiagnostics?: () => EnvironmentDiagnostics | Promise<EnvironmentDiagnostics>;
 }
 
 export class CompanionControlServer {
@@ -137,10 +139,21 @@ export class CompanionControlServer {
     if (parsed.data.type === "stop") {
       await this.handlers.stop();
     }
+    const status = await this.handlers.getStatus();
+    let environmentDiagnostics: EnvironmentDiagnostics | undefined;
+    if (parsed.data.type === "diagnostics" && this.handlers.getDiagnostics !== undefined) {
+      try {
+        environmentDiagnostics = await this.handlers.getDiagnostics();
+      } catch {
+        // Diagnostics are optional. Never discard an authoritative status or expose the error
+        // text when an observer fails; absence of the report is visible to doctor/UI clients.
+      }
+    }
     return {
       version: COMPANION_CONTROL_PROTOCOL_VERSION,
       ok: true,
-      status: await this.handlers.getStatus(),
+      status,
+      ...(environmentDiagnostics === undefined ? {} : { environmentDiagnostics }),
     };
   }
 

@@ -151,6 +151,25 @@ agents:
     });
   });
 
+  it("passes the configured TypeSafe key into browser-use Agent runtime", () => {
+    const config = validateConfigText(
+      `agents:\n  data-dir: /tmp/test\n  env:\n    browser-use-agent:\n      TYPESAFE_API_KEY: configured-test-key\n`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(getAgentEnv(config, "browser-use-agent")?.TYPESAFE_API_KEY, "configured-test-key");
+    assert.equal(getAgentEnv(config, "browser-use-agent")?.BROWSER_OPERATE_ENGINE, "sampling");
+  });
+
+  it("injects the configured operation engine even without browser instances", () => {
+    const config = validateConfigText(
+      `browser:\n  operate:\n    engine: jev\nagents:\n  data-dir: /tmp/test\n  env:\n    browser-use-agent:\n      BROWSER_OPERATE_ENGINE: sampling\n`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(getAgentEnv(config, "browser-use-agent")?.BROWSER_OPERATE_ENGINE, "jev");
+    assert.equal(getAgentEnv(config, "browser-use-agent")?.BROWSER_INSTANCES_JSON, undefined);
+    assert.equal(getAgentEnv(config, "other-agent"), undefined);
+  });
+
   it("should convert missing required env items into runtime issues", () => {
     const report = inspectAgentEnvRequirements(
       "placeholder-agent",

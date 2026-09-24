@@ -226,45 +226,44 @@ Rules:
 4. Do not invent refs in orchestrator code; only pass refs emitted by the target agent.
 5. Do not mix ref families. A ref emitted by one tool family is only valid for tools documented to consume it.
 
-## Pattern 7: Observe -> Ref Action -> Re-Observe
+## Pattern 7: Observe -> Choose Execution Level -> Verify
 
-Use this pattern when a browser agent exposes a generic page snapshot and ref-based click/type tools.
-It is useful for unmodeled accessible controls, not for replacing domain-specific business tools.
+Use the live target skill and tool schema to choose among these paths:
 
-Example shape:
+| Situation | Execution level |
+| --- | --- |
+| The platform has a purpose-built tool or an enabled workflow that covers the task | Use that tool or workflow with its own validation. |
+| The page or next target is unknown, or the orchestrator must decide after one action | Observe, act on one emitted ref, then observe again. |
+| Several steps and checks are known without an intermediate orchestrator decision | Use controlled combined execution if the target agent offers it. |
+| The target executor can own the full bounded task, including internal observation and recovery | Delegate the complete goal and supplied values, then verify externally. |
 
-```bash
-# 1. Observe the current page through the browser agent
-roll run <browser-agent> <snapshot-tool> --input-json '{"interactiveOnly":true}' --json
+For the single-ref path, parse the snapshot result, match intent against the observed role, name,
+state, and any documented non-semantic markers, then pass only a ref the target emitted. Include the
+page and snapshot IDs when the tool requires or supports strict binding. Re-observe after a mutation
+that may change the page before choosing another ref. A truncated or incomplete snapshot calls for
+more focused observation, not an assumption that a control is absent.
 
-# 2. Parse stdout JSON, pick a ref emitted by the snapshot
-roll run <browser-agent> <click-or-type-ref-tool> --input-json '{"ref":"@e1"}' --json
+Combined execution is useful when the target agent can keep one authorized, bounded sequence with
+its own observations and assertions. Split it at a point where the orchestrator must interpret new
+page data, decide whether to proceed, or seek new authorization. A task executor is appropriate
+only when the caller can provide the original goal, required facts or exact text, allowed action
+scope, and stopping condition. Preserve goal and text verbatim; its done status remains subject to
+external verification.
 
-# 3. Verify with a fresh observation or a domain-specific read tool
-roll run <browser-agent> <snapshot-or-read-tool> --input-json '{...}' --json
-```
+Across all paths:
 
-Selection rules:
+1. Prefer domain-specific readback when it represents business state; a generic snapshot is not a
+   complete HTML dump, screenshot, or business data model.
+2. Keep refs and snapshot IDs scoped to their page, document, routing key, and most recent
+   observation. Do not invent refs or rewrite browser-internal frame metadata.
+3. Follow the target agent's confirmation flow. Save, send, publish, or submit only within the
+   user's authorization. On partial failure or uncertain execution, inspect completed actions and
+   current state before resuming; do not replay the whole call.
+4. An OpenClaw-style host calling `roll run` receives that call's output. Roll chat's internal
+   observation projection and `roll__observation` recall are not automatically available there.
 
-1. Match the user intent against semantic fields such as `role`, `name`, and disabled state.
-   Some browser agents may also expose constrained DOM-action text refs for non-semantic controls
-   such as clickable `span` tabs; use the target agent's docs to identify markers like
-   `properties.domActionable:true`.
-2. Use an explicit page id when multiple pages are open.
-3. If the emitted ref includes browser-internal metadata such as `frameId`, pass only the documented
-   ref handle and page id back to the browser agent; do not synthesize or rewrite that metadata in the
-   orchestrator.
-4. If the snapshot is truncated, narrow the page/context before taking the action.
-5. After any side effect that can re-render the page, take a fresh snapshot before the next ref action.
-6. When an action returns a confirmation gate, retry the same tool with the approval object exactly
-   as returned by that target agent.
-
-Boundary:
-
-- A generic page snapshot is not a complete HTML dump, screenshot, or business data model.
-- Element refs are current-page handles, not durable IDs.
-- Non-accessible widgets, canvas controls, cross-target iframes, and gestures may still need dedicated
-  target-agent tools.
+Non-accessible widgets, canvas controls, cross-target iframes, and gestures may need dedicated
+target-agent tools. Keep exact tool names and schemas in that agent's own skill and references.
 
 ## Pattern 8: State-Setting Tools Are Not Append Operations
 

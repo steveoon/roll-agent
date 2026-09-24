@@ -27,10 +27,11 @@ interface YamlLinePosition {
 function resolveEnvVars(
   obj: unknown,
   fallbackEnv: Readonly<Record<string, string>> = {},
+  processEnv: Readonly<Record<string, string | undefined>> = process.env,
 ): unknown {
   if (typeof obj === "string") {
     return obj.replace(/\$\{([^}]+)\}/g, (original, varName: string) => {
-      const fromProcess = process.env[varName];
+      const fromProcess = processEnv[varName];
       if (fromProcess !== undefined && fromProcess.length > 0) {
         return fromProcess;
       }
@@ -42,12 +43,12 @@ function resolveEnvVars(
     });
   }
   if (Array.isArray(obj)) {
-    return obj.map((item) => resolveEnvVars(item, fallbackEnv));
+    return obj.map((item) => resolveEnvVars(item, fallbackEnv, processEnv));
   }
   if (isRecord(obj)) {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      result[key] = resolveEnvVars(value, fallbackEnv);
+      result[key] = resolveEnvVars(value, fallbackEnv, processEnv);
     }
     return result;
   }
@@ -295,10 +296,21 @@ function parseAndCheckMigrations(
   return parsed;
 }
 
-export function validateConfigText(raw: string, configPath: string): RollConfig {
+export function validateConfigText(
+  raw: string,
+  configPath: string,
+  sources?: {
+    readonly processEnv: Readonly<Record<string, string | undefined>>;
+    readonly fallbackEnv: Readonly<Record<string, string>>;
+  },
+): RollConfig {
   const parsed = parseAndCheckMigrations(raw, configPath);
 
-  const transformed = resolveEnvVars(decodeFromYaml(parsed), loadFallbackEnv());
+  const transformed = resolveEnvVars(
+    decodeFromYaml(parsed),
+    sources?.fallbackEnv ?? loadFallbackEnv(),
+    sources?.processEnv ?? process.env,
+  );
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }

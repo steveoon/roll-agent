@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /** Agent 日志级别 */
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -9,9 +11,20 @@ export interface AgentLogger {
   readonly error: (message: string) => void;
 }
 
+/** 单次 MCP Sampling 文本生成选项。 */
+export const AgentGenerateTextOptionsSchema = z
+  .object({
+    /** MCP Sampling 输出上限；省略时为 1024，最大 8192。 */
+    maxOutputTokens: z.number().int().min(1).max(8192).optional(),
+  })
+  .strict();
+
+export type AgentGenerateTextOptions = Readonly<z.infer<typeof AgentGenerateTextOptionsSchema>>;
+
 /** Agent 上下文中的 LLM 接口（通过 MCP Sampling 访问指挥官 LLM） */
 export interface AgentLLM {
-  readonly generateText: (prompt: string) => Promise<string>;
+  /** 明确达到输出上限的响应会抛错，不返回可能被截断的文本。 */
+  readonly generateText: (prompt: string, options?: AgentGenerateTextOptions) => Promise<string>;
 }
 
 /** Agent 运行时上下文 */

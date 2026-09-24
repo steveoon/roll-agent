@@ -128,6 +128,33 @@ function code(expected: string) {
   return (error: unknown) => error instanceof BrowserScriptError && error.code === expected;
 }
 
+test("pointer feedback follows dispatched native input and cannot alter the action result", async () => {
+  const pointerEvents: string[] = [];
+  const f = fixture({
+    onPointer: async ({ type, x, y }) => {
+      pointerEvents.push(`${type}:${x},${y}`);
+      throw new Error("visual target unavailable");
+    },
+  });
+  await f.driver.invoke("click", [{ css: "button" }]);
+  assert.deepEqual(pointerEvents, ["mouseMoved:50,20", "mousePressed:50,20"]);
+  assert.equal(f.events.filter((event) => event === "mousePressed").length, 1);
+  await f.driver.invoke("read", [{ css: "button" }]);
+  assert.equal(pointerEvents.length, 2);
+  f.setNodes([]);
+  await assert.rejects(f.driver.invoke("click", [{ css: "button" }]), code("target_not_found"));
+  assert.equal(pointerEvents.length, 2);
+
+  const stalled = fixture({ onPointer: async () => await new Promise<void>(() => {}) });
+  await Promise.race([
+    stalled.driver.invoke("click", [{ css: "button" }]),
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("Visual callback blocked native input")), 250);
+    }),
+  ]);
+  assert.equal(stalled.events.filter((event) => event === "mousePressed").length, 1);
+});
+
 test("driver reuses strict ref input pipeline and verifies filled value", async () => {
   const { driver, events } = fixture();
   assert.deepEqual(
@@ -283,6 +310,58 @@ test("read does not accept secret attributes; fixed inspector omits password val
   assert.doesNotMatch(JSON.stringify(result), /never-return-this|"value"/);
 });
 
+test("form text and checkbox clicks are not submissions but Enter remains guarded", async () => {
+  const f = fixture({ capabilities: ["read", "interact"] });
+  await f.driver.invoke("read", [{ css: "input" }]);
+  const inspect = runInNewContext(`(${f.declaration()})`) as (
+    this: unknown,
+    scope: unknown,
+    attribute: unknown,
+  ) => { navigationUrl: string; enterNavigationUrl: string };
+  for (const type of ["text", "checkbox", "submit", "image"]) {
+    const element = {
+      nodeType: 1,
+      isConnected: true,
+      tagName: "INPUT",
+      value: "",
+      innerText: "",
+      readOnly: false,
+      form: { action: "https://example.com/send" },
+      formAction: "",
+      getAttribute: (name: string) => (name === "type" ? type : null),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 40 }),
+      matches: () => false,
+      closest: () => null,
+      contains: () => true,
+      ownerDocument: {
+        URL: "https://example.com/form",
+        defaultView: {
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+        },
+        contains: () => true,
+        elementFromPoint: () => element,
+        activeElement: null,
+      },
+    };
+    const result = inspect.call(element, null, null);
+    assert.equal(
+      result.navigationUrl,
+      ["submit", "image"].includes(type) ? "https://example.com/send" : "",
+    );
+    assert.equal(result.enterNavigationUrl, "https://example.com/send");
+  }
+  const original = f.controller.callFunctionOnObject;
+  f.controller.callFunctionOnObject = async (request) => {
+    const value = await original(request);
+    assert.ok(value && typeof value === "object");
+    return { ...value, navigationUrl: "", enterNavigationUrl: "https://example.com/send" };
+  };
+  await f.driver.invoke("click", [{ css: "input" }]);
+  f.events.length = 0;
+  await assert.rejects(f.driver.invoke("press", ["Enter"]), code("capability_blocked"));
+  assert.deepEqual(f.events, []);
+});
+
 test("observe uses compact native metadata and snapshot remains explicit", async () => {
   let snapshots = 0;
   const f = fixture({
@@ -421,4 +500,77 @@ test("scroll checks its outgoing wheel point again after mousemove moves target"
     code("target_moved"),
   );
   assert.deepEqual(f.events, ["scrollIntoView", "mouseMoved"]);
+});
+
+test("page Escape works without script-owned focus and never clicks to acquire it", async () => {
+  const f = fixture();
+  f.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return true as T;
+  };
+  await f.driver.invoke("press", ["Escape"]);
+  assert.deepEqual(f.events, ["rawKeyDown", "keyUp"]);
+  assert.equal(f.driver.lastActionExecuted, true);
+  await assert.rejects(f.driver.invoke("press", ["Enter"]), code("focus_required"));
+});
+
+test("page Escape respects policy and refuses unreadable or foreign focused frames", async () => {
+  const f = fixture();
+  f.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return false as T;
+  };
+  await assert.rejects(f.driver.invoke("press", ["Escape"]), code("origin_blocked"));
+  assert.deepEqual(f.events, []);
+  const denied = fixture({
+    guard: async () => {
+      throw new Error("policy denied");
+    },
+  });
+  denied.controller.evaluateJson = async <T>(expression: string) => {
+    assert.match(expression, /page-escape-focus/);
+    return true as T;
+  };
+  await assert.rejects(denied.driver.invoke("press", ["Escape"]), /policy denied/);
+  assert.deepEqual(denied.events, []);
+});
+
+test("helper argument errors identify panel and current-value reads without dispatch", async () => {
+  const f = fixture();
+  f.setInspection({ value: "current text" });
+  for (const [method, params, guidance] of [
+    ["choose", [{ css: "select" }, { label: "One", panel: { css: "ul" } }], /panel.*CSS/],
+    ["read", [{ css: "textarea" }, { attribute: "value" }], /page.read\(target\).*value/],
+    ["read", [{ unexpectedSecret: "PRIVATE INPUT" }], /target/],
+  ] as const) {
+    await assert.rejects(f.driver.invoke(method, [...params]), (error: unknown) => {
+      assert.ok(error instanceof BrowserScriptError);
+      assert.equal(error.code, "invalid_argument");
+      assert.match(error.message, guidance);
+      assert.ok(!error.message.includes("PRIVATE INPUT"));
+      return true;
+    });
+    assert.equal(f.driver.lastActionExecuted, false);
+  }
+  assert.deepEqual(f.events, []);
+  assert.equal(
+    ((await f.driver.invoke("read", [{ css: "textarea" }])) as { value: string }).value,
+    "current text",
+  );
+});
+
+test("argument guidance survives the real worker boundary and never replays completed input", async () => {
+  const { runBrowserScript } = await import("./script-runner.ts");
+  const f = fixture();
+  const result = await runBrowserScript({
+    source:
+      "const t=page.locator('textarea'); await page.fill(t,args.text); await page.read(t,{attribute:'value'}); await page.fill(t,'repeat');",
+    args: { text: "PRIVATE INPUT" },
+    invoke: (method, params) => f.driver.invoke(method, params),
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.error?.code, "invalid_argument");
+  assert.match(result.error?.message ?? "", /options.attribute.*page.read\(target\)/);
+  assert.ok(!JSON.stringify(result).includes("PRIVATE INPUT"));
+  assert.equal(f.events.filter((event) => event === "insertText").length, 1);
 });
