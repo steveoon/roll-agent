@@ -1,5 +1,20 @@
 # @roll-agent/client-node
 
+## 0.6.1
+
+### Patch Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`bfbbe77`](https://github.com/steveoon/roll-agent/commit/bfbbe77e0265b0fd841da85205525d8e875fb026) Thanks [@steveoon](https://github.com/steveoon)! - 完善 Companion 后台运行环境诊断与配置引导。按实际服务环境和绑定 Workspace 定位未解析变量、不可读的后备文件及配置问题，区分启动阻断与其他能力提醒，并在管理页面、status 和 doctor 中展示安全的处理建议。
+
+  保留原有环境变量解析优先级以及旧版 Companion status/stop 协议；未运行服务的检查明确标注为估算，Runtime 离线不再因基础检查通过而被误报为就绪。
+
+  选中模型服务的地址等配置引用未解析时同样报告启动阻断。诊断执行或请求失败时继续提供后台真实状态，启动错误保留受控的系统错误码和协议错误类别，不回显原始错误内容。
+
+  Node Client 在确认子进程创建成功后才发送初始化请求，保留进程创建失败的系统错误码，避免启动失败时产生未处理的请求拒绝。
+
+- Updated dependencies [[`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d)]:
+  - @roll-agent/protocol@0.8.0
+
 ## 0.6.0
 
 ### Minor Changes

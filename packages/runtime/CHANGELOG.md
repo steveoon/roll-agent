@@ -1,5 +1,22 @@
 # @roll-agent/runtime
 
+## 0.25.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Honor explicit, bounded MCP tool metadata `roll/executionTimeoutMs` in Runtime, `roll run`, and `roll ask`, while preserving Runtime's turn cancellation signal. Tools without a valid declaration keep the existing MCP timeout. This allows agent-local browser loops to complete without being interrupted by the default per-request deadline.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d) Thanks [@steveoon](https://github.com/steveoon)! - Add opt-in browser observation retention metadata and bounded, read-only observation history recall. Roll now sends compact current AX observations and references older results while retaining canonical tool results and transcripts.
+
+### Patch Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`9d3f6d9`](https://github.com/steveoon/roll-agent/commit/9d3f6d98d7ea1c7e091cfc6b908e2cd4e3e55623) Thanks [@steveoon](https://github.com/steveoon)! - Fix false snapshot projection truncation warnings for absent optional metadata. Return safe, actionable browser helper argument errors without replaying completed actions. Detect repeated form option states and provide bounded, unverified field handoffs instead of oversized internal decision traces; clarify helper and recovery guidance.
+
+  Prefer goal delegation for dynamic multi-field forms with complete inputs and explicit scope; align browser tool descriptions and Skill guidance while preserving explicit user tool choice and local recovery.
+
+- Updated dependencies [[`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d)]:
+  - @roll-agent/protocol@0.8.0
+
 ## 0.24.0
 
 ### Minor Changes

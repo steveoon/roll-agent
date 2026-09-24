@@ -1,5 +1,38 @@
 # @roll-agent/core
 
+## 0.42.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Add an experimental bounded browser_operate loop with Roll MCP Sampling as its default decision engine. Roll's new `browser.operate.engine: jev` setting explicitly enables the fast TypeSafe Jev mode; configure `TYPESAFE_API_KEY` through `agents.env.browser-use-agent` in roll.config or the UI Agent environment editor. The tool's legacy `engine` input cannot override Roll configuration, and fast mode fails before browser access when the key is missing. Both engines share the same task loop, which selects observed actions, targets and caller-source values without a secondary model for preparation, per-field checking, generation or recovery. The fields strategy retains ordered supplied-value execution.
+
+  Copy full supplied values or bounded verbatim goal spans; return unmatched inputs to Roll for missing facts or prepared content. Open editors before discovering their inputs. Preserve native policy, origin, ref, target-freshness, exact input readback and uncertain-action guards. Stop on stagnation without hidden host fallback.
+
+  Return final observations, source records and choice distributions with verified:false. Roll verifies the whole original goal after interaction and corrects only mismatches; model_done is not certified success. Legacy helper-budget inputs remain accepted but unused; task-mode textCalls is empty and recoveryDecisions is zero.
+
+  Provide generic picker ownership, trigger/option distinctions and provenance-tagged labels to browser decision models. Separate query, display and committed values, preserve explicit expanded state during asynchronous loading, and describe actions by their field relationship. Menu text matches no longer imply completed fields; ambiguous ownership and backing values remain unknown.
+
+  Bound model-facing request previews while preserving all action IDs and full execution text. Deduplicate repeated descriptions and input tables. Evaluate whole-goal completion in the same primary request, distinguishing unresolved requirements from open panels, and preserve verbatim user goals/text through Roll preparation. Surface recognized token-limit errors without exposing upstream bodies.
+
+### Patch Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Honor explicit, bounded MCP tool metadata `roll/executionTimeoutMs` in Runtime, `roll run`, and `roll ask`, while preserving Runtime's turn cancellation signal. Tools without a valid declaration keep the existing MCP timeout. This allows agent-local browser loops to complete without being interrupted by the default per-request deadline.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`bfbbe77`](https://github.com/steveoon/roll-agent/commit/bfbbe77e0265b0fd841da85205525d8e875fb026) Thanks [@steveoon](https://github.com/steveoon)! - 完善 Companion 后台运行环境诊断与配置引导。按实际服务环境和绑定 Workspace 定位未解析变量、不可读的后备文件及配置问题，区分启动阻断与其他能力提醒，并在管理页面、status 和 doctor 中展示安全的处理建议。
+
+  保留原有环境变量解析优先级以及旧版 Companion status/stop 协议；未运行服务的检查明确标注为估算，Runtime 离线不再因基础检查通过而被误报为就绪。
+
+  选中模型服务的地址等配置引用未解析时同样报告启动阻断。诊断执行或请求失败时继续提供后台真实状态，启动错误保留受控的系统错误码和协议错误类别，不回显原始错误内容。
+
+  Node Client 在确认子进程创建成功后才发送初始化请求，保留进程创建失败的系统错误码，避免启动失败时产生未处理的请求拒绝。
+
+- Updated dependencies [[`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25), [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d), [`bfbbe77`](https://github.com/steveoon/roll-agent/commit/bfbbe77e0265b0fd841da85205525d8e875fb026), [`9d3f6d9`](https://github.com/steveoon/roll-agent/commit/9d3f6d98d7ea1c7e091cfc6b908e2cd4e3e55623)]:
+  - @roll-agent/runtime@0.25.0
+  - @roll-agent/protocol@0.8.0
+  - @roll-agent/client-node@0.6.1
+  - @roll-agent/companion@0.5.1
+  - @roll-agent/relay-protocol@0.4.1
+
 ## 0.41.0
 
 ### Minor Changes
