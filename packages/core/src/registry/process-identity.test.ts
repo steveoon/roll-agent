@@ -384,65 +384,71 @@ test(
   },
 );
 
-test(
-  "Windows identity falls back to trusted PowerShell 7 when Windows PowerShell cannot run",
-  { skip: process.platform === "win32" },
-  () => {
-    const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-fallback-"));
-    const windowsPowerShell = [
-      "C:\\Windows",
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    ].join("\\");
-    const powerShell7 = ["C:\\Program Files", "PowerShell", "7", "pwsh.exe"].join("\\");
-    writeFileSync(join(dir, windowsPowerShell), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    writeFileSync(join(dir, powerShell7), "#!/bin/sh\necho 637000000000000000\n", {
-      mode: 0o755,
-    });
-    const originalCwd = process.cwd();
-    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-    const envKeys = [
-      "PATH",
-      "SystemRoot",
-      "SYSTEMROOT",
-      "WINDIR",
-      "ProgramFiles",
-      "PROGRAMFILES",
-    ] as const;
-    const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
-    try {
-      process.chdir(dir);
-      for (const key of envKeys) {
-        delete process.env[key];
-      }
-      process.env.PATH = `${dir}:${originalEnv.PATH ?? ""}`;
-      process.env.SystemRoot = "C:\\Windows";
-      process.env.ProgramFiles = "C:\\Program Files";
-      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-
-      assert.equal(
-        readProcessStartToken(process.pid),
-        `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
+for (const failureMode of ["exit", "timeout"] as const) {
+  test(
+    `Windows identity falls back to trusted PowerShell 7 after ${failureMode}`,
+    { skip: process.platform === "win32" },
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-fallback-"));
+      const windowsPowerShell = [
+        "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ].join("\\");
+      const powerShell7 = ["C:\\Program Files", "PowerShell", "7", "pwsh.exe"].join("\\");
+      writeFileSync(
+        join(dir, windowsPowerShell),
+        failureMode === "timeout" ? "#!/bin/sh\nexec /bin/sleep 10\n" : "#!/bin/sh\nexit 1\n",
+        { mode: 0o755 },
       );
-    } finally {
-      if (platformDescriptor !== undefined) {
-        Object.defineProperty(process, "platform", platformDescriptor);
-      }
-      process.chdir(originalCwd);
-      for (const key of envKeys) {
-        const value = originalEnv[key];
-        if (value === undefined) {
+      writeFileSync(join(dir, powerShell7), "#!/bin/sh\necho 637000000000000000\n", {
+        mode: 0o755,
+      });
+      const originalCwd = process.cwd();
+      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+      const envKeys = [
+        "PATH",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "ProgramFiles",
+        "PROGRAMFILES",
+      ] as const;
+      const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+      try {
+        process.chdir(dir);
+        for (const key of envKeys) {
           delete process.env[key];
-        } else {
-          process.env[key] = value;
         }
+        process.env.PATH = `${dir}:${originalEnv.PATH ?? ""}`;
+        process.env.SystemRoot = "C:\\Windows";
+        process.env.ProgramFiles = "C:\\Program Files";
+        Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+
+        assert.equal(
+          readProcessStartToken(process.pid),
+          `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
+        );
+      } finally {
+        if (platformDescriptor !== undefined) {
+          Object.defineProperty(process, "platform", platformDescriptor);
+        }
+        process.chdir(originalCwd);
+        for (const key of envKeys) {
+          const value = originalEnv[key];
+          if (value === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = value;
+          }
+        }
+        rmSync(dir, { recursive: true, force: true });
       }
-      rmSync(dir, { recursive: true, force: true });
-    }
-  },
-);
+    },
+  );
+}
 
 test(
   "Windows identity shares one 8 s deadline across trusted PowerShell candidates",
