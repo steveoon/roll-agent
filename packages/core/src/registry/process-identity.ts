@@ -252,12 +252,15 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
     "try { $p.StartTime.ToUniversalTime().Ticks } finally { $p.Dispose() }";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
   const deadline = performance.now() + identityCommandTimeoutMs("win32");
-  for (const executable of resolveTrustedWindowsPowerShellExecutables()) {
+  const executables = resolveTrustedWindowsPowerShellExecutables();
+  for (const [index, executable] of executables.entries()) {
     const remainingMs = Math.ceil(deadline - performance.now());
     if (remainingMs <= 0) {
       break;
     }
-    const startedAt = runIdentityCommand(executable, args, true, remainingMs);
+    // A slow first candidate must not consume the fallback's entire shared deadline.
+    const candidateBudgetMs = Math.ceil(remainingMs / (executables.length - index));
+    const startedAt = runIdentityCommand(executable, args, true, candidateBudgetMs);
     if (startedAt !== undefined && /^\d+$/u.test(startedAt)) {
       return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
     }
