@@ -25,8 +25,11 @@ jobs:
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
       - name: Process identity regressions
-        run: node --experimental-strip-types --test packages/core/src/registry/process-identity.test.ts
+        run: |
+          export NODE_OPTIONS="--import=$(node -p 'require("node:url").pathToFileURL(require("node:path").resolve("scripts/identity-probe-preload.mjs")).href')"
+          node --experimental-strip-types --test packages/core/src/registry/process-identity.test.ts
       - name: Original regressions with probe diagnostics
+        if: always()
         id: original
         continue-on-error: true
         env:
