@@ -1,5 +1,12 @@
 # @roll-agent/relay-protocol
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [[`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d)]:
+  - @roll-agent/protocol@0.8.0
+
 ## 0.4.0
 
 ### Minor Changes

@@ -1,5 +1,18 @@
 # @roll-agent/sdk
 
+## 0.7.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d) Thanks [@steveoon](https://github.com/steveoon)! - Add opt-in browser observation retention metadata and bounded, read-only observation history recall. Roll now sends compact current AX observations and references older results while retaining canonical tool results and transcripts.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Allow `ctx.llm.generateText(prompt, { maxOutputTokens })` to request a validated MCP Sampling output limit between 1 and 8192 tokens. Existing calls retain the 1024-token default and `Promise<string>` result. Reject responses explicitly marked as truncated instead of returning partial text to tool callers.
+
+### Patch Changes
+
+- Updated dependencies [[`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d)]:
+  - @roll-agent/protocol@0.8.0
+
 ## 0.6.0
 
 ### Minor Changes

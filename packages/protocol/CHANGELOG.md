@@ -1,5 +1,11 @@
 # @roll-agent/protocol
 
+## 0.8.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d) Thanks [@steveoon](https://github.com/steveoon)! - Add opt-in browser observation retention metadata and bounded, read-only observation history recall. Roll now sends compact current AX observations and references older results while retaining canonical tool results and transcripts.
+
 ## 0.7.0
 
 ### Minor Changes
