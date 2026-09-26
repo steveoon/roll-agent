@@ -276,6 +276,56 @@ test("identity command timeout is 8 s on Windows and 2 s elsewhere", () => {
 });
 
 test(
+  "Windows process identity works with cmdlet module autoloading disabled",
+  { skip: process.platform !== "win32" },
+  () => {
+    const fixtureHome = mkdtempSync(join(tmpdir(), "roll-identity-no-modules-"));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          "--input-type=module",
+          "--eval",
+          `
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const original = childProcess.spawnSync;
+let probes = 0;
+childProcess.spawnSync = function (command, args, options) {
+  const altered = [...args];
+  const commandIndex = altered.indexOf('-Command');
+  if (commandIndex !== -1) {
+    probes++;
+    altered[commandIndex + 1] = "$PSModuleAutoLoadingPreference = 'None'; " + altered[commandIndex + 1];
+  }
+  return original(command, altered, options);
+};
+syncBuiltinESMExports();
+const { readProcessStartToken, verifyProcessStartToken } = await import(${JSON.stringify(new URL("./process-identity.ts", import.meta.url).href)});
+const token = readProcessStartToken(process.pid);
+assert.ok(token, 'identity must not depend on Get-Process or module autoloading');
+assert.equal(verifyProcessStartToken(process.pid, token).status, 'match');
+assert.ok(probes >= 2, 'both reads must use the restricted PowerShell environment');
+`,
+        ],
+        {
+          encoding: "utf8",
+          cwd: fixtureHome,
+          env: { ...process.env, HOME: fixtureHome, USERPROFILE: fixtureHome },
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      assert.equal(result.status, 0, `${result.stderr}\n${String(result.error ?? "")}`);
+    } finally {
+      rmSync(fixtureHome, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Windows identity ignores a PATH-resolved powershell.exe and runs the trusted SystemRoot executable",
   { skip: process.platform === "win32" },
   () => {
