@@ -244,9 +244,12 @@ function readLegacyDarwinProcessStartIdentity(pid: number): string | undefined {
 }
 
 function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): string | undefined {
+  // Windows PowerShell's Get-Process cmdlet can stall on ARM64.
+  // Read the same OS-owned StartTime through .NET without depending on module discovery.
   const script =
-    `$p = Get-Process -Id ${String(pid)} -ErrorAction Stop; ` +
-    "$p.StartTime.ToUniversalTime().Ticks";
+    "$ErrorActionPreference = 'Stop'; " +
+    `$p = [System.Diagnostics.Process]::GetProcessById(${String(pid)}); ` +
+    "try { $p.StartTime.ToUniversalTime().Ticks } finally { $p.Dispose() }";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
   const deadline = performance.now() + identityCommandTimeoutMs("win32");
   for (const executable of resolveTrustedWindowsPowerShellExecutables()) {
