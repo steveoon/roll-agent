@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,6 +125,29 @@ test("Windows plan registers through an XML task definition, never through /TR",
   assert.doesNotMatch(xml, /S-1-5-18|SYSTEM|HighestAvailable/u);
   assert.match(xml, /<Description>Roll Companion<\/Description>/u);
 });
+
+test(
+  "Windows service query works with cmdlet module autoloading disabled",
+  { skip: process.platform !== "win32" },
+  () => {
+    // Query an absent name without registering, starting, or changing any task.
+    const plan = createWindowsScheduledTaskPlanForIdentity({
+      windowsTaskName: `Roll query regression ${randomUUID()}`,
+      windowsTaskXmlPath: join(tmpdir(), "unused-roll-task.xml"),
+      displayName: "Read-only query regression",
+      programArguments: [process.execPath],
+    });
+    const script = plan.query.args.at(-1);
+    assert.ok(script);
+    const result = spawnSync(
+      plan.query.command,
+      [...plan.query.args.slice(0, -1), "$PSModuleAutoLoadingPreference = 'None'; " + script],
+      { encoding: "utf8", timeout: 20_000, windowsHide: true },
+    );
+    assert.equal(result.status, 0, `${result.stderr}\n${String(result.error ?? "")}`);
+    assert.equal(result.stdout, "missing");
+  },
+);
 
 test("Windows task XML is encoded as UTF-16LE with BOM", () => {
   const encoded = encodeWindowsTaskXml("<a>é</a>");
