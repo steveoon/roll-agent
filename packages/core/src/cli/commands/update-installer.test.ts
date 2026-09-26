@@ -41,10 +41,12 @@ let disposed = 0;
 const prepared = {
   version: '9.0.0',
   activate: async () => {
+    console.error('diagnostic: entered payload activation');
     assert.equal(getExecutionEnvironment(), current);
     assert.throws(() => acquireSchedulerAdmissionLock());
     assert.throws(() => acquireAgentRegistryLock(dataDir));
     activated++;
+    console.error('diagnostic: returning activated payload');
     return target;
   },
   dispose: async () => { disposed++; },

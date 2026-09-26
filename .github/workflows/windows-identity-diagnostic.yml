@@ -31,7 +31,6 @@ jobs:
       - name: Original regressions with probe diagnostics
         if: always()
         id: original
-        continue-on-error: true
         env:
           NODE_OPTIONS: --import=./scripts/identity-probe-preload.mjs
         run: |
