@@ -28,13 +28,13 @@ jobs:
         run: |
           export NODE_OPTIONS="--import=$(node -p 'require("node:url").pathToFileURL(require("node:path").resolve("scripts/identity-probe-preload.mjs")).href')"
           node --experimental-strip-types --test packages/core/src/registry/process-identity.test.ts
-      - name: Original regressions with probe diagnostics
+      - name: Service state regressions
+        run: node --experimental-strip-types --test packages/core/src/companion-host/service.test.ts
+      - name: Uninstrumented original installer regressions
         if: always()
         id: original
-        env:
-          NODE_OPTIONS: --import=./scripts/identity-probe-preload.mjs
         run: |
-          export NODE_OPTIONS="--import=$(node -p 'require("node:url").pathToFileURL(require("node:path").resolve("scripts/identity-probe-preload.mjs")).href')"
+          git restore --source=aa2471b3850c02a66a55d22c225014eb96e2a3ed -- packages/core/src/cli/commands/update-installer.test.ts
           node --experimental-strip-types --test packages/core/src/execution-environment/distribution.test.ts packages/core/src/execution-environment/windows-zip.test.ts packages/core/src/execution-environment/windows-install-bootstrap.test.ts packages/core/src/cli/commands/update-installer.test.ts
       - name: Isolate PowerShell startup and command execution
         if: always()
