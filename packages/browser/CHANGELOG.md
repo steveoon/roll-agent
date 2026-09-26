@@ -1,5 +1,25 @@
 # @roll-agent/browser
 
+## 0.12.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`584ffe6`](https://github.com/steveoon/roll-agent/commit/584ffe62ce4d449cca1408d07d21568ac7b7471c) Thanks [@steveoon](https://github.com/steveoon)! - Show a bounded, page-local execution card during `browser_execute` and `browser_operate` with the current observation, decision, action, and verification stage. Name uniquely matched authorized form fields and editor entries, outline the native target rectangle, and keep the card away from it. Mirror native mouse dispatches with the existing visual cursor without adding animation sleeps, and distinguish completed interaction from verified business success. Card and cursor switches work independently while sharing an execution lifecycle. Keep card content out of browser observations and hide input values, selectors, refs, and model diagnostics. Reject late visual callbacks from older or completed executions.
+
+  Expose optional, best-effort native pointer and resolved-target feedback callbacks on `BrowserScriptPageDriver` for execution hosts.
+
+### Patch Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Allow clicking ordinary form inputs without requiring navigation capability, while retaining navigation checks for Enter submission, submit controls and links. Preserve native option values derived from their text when no explicit value attribute exists, so selection by value works consistently.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Treat blank optional browser snapshot scopes as an unscoped observation. Clarify the supported script helper signatures and provide safe recovery guidance for script failures, depth-limited observations and iframe forms while preserving existing origin and execution guards.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`9d3f6d9`](https://github.com/steveoon/roll-agent/commit/9d3f6d98d7ea1c7e091cfc6b908e2cd4e3e55623) Thanks [@steveoon](https://github.com/steveoon)! - Fix false snapshot projection truncation warnings for absent optional metadata. Return safe, actionable browser helper argument errors without replaying completed actions. Detect repeated form option states and provide bounded, unverified field handoffs instead of oversized internal decision traces; clarify helper and recovery guidance.
+
+  Prefer goal delegation for dynamic multi-field forms with complete inputs and explicit scope; align browser tool descriptions and Skill guidance while preserving explicit user tool choice and local recovery.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Send Chromium's selectAll editing command with Meta+A on macOS so clear-before-type replaces existing text instead of deleting only the last character and appending. Preserve the existing input policy checks and omit editing commands from key-up events.
+
 ## 0.11.0
 
 ### Minor Changes

@@ -1,5 +1,41 @@
 # @roll-agent/browser-use-agent
 
+## 0.27.0
+
+### Minor Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`584ffe6`](https://github.com/steveoon/roll-agent/commit/584ffe62ce4d449cca1408d07d21568ac7b7471c) Thanks [@steveoon](https://github.com/steveoon)! - Show a bounded, page-local execution card during `browser_execute` and `browser_operate` with the current observation, decision, action, and verification stage. Name uniquely matched authorized form fields and editor entries, outline the native target rectangle, and keep the card away from it. Mirror native mouse dispatches with the existing visual cursor without adding animation sleeps, and distinguish completed interaction from verified business success. Card and cursor switches work independently while sharing an execution lifecycle. Keep card content out of browser observations and hide input values, selectors, refs, and model diagnostics. Reject late visual callbacks from older or completed executions.
+
+  Expose optional, best-effort native pointer and resolved-target feedback callbacks on `BrowserScriptPageDriver` for execution hosts.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d) Thanks [@steveoon](https://github.com/steveoon)! - Add opt-in browser observation retention metadata and bounded, read-only observation history recall. Roll now sends compact current AX observations and references older results while retaining canonical tool results and transcripts.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Add an experimental bounded browser_operate loop with Roll MCP Sampling as its default decision engine. Roll's new `browser.operate.engine: jev` setting explicitly enables the fast TypeSafe Jev mode; configure `TYPESAFE_API_KEY` through `agents.env.browser-use-agent` in roll.config or the UI Agent environment editor. The tool's legacy `engine` input cannot override Roll configuration, and fast mode fails before browser access when the key is missing. Both engines share the same task loop, which selects observed actions, targets and caller-source values without a secondary model for preparation, per-field checking, generation or recovery. The fields strategy retains ordered supplied-value execution.
+
+  Copy full supplied values or bounded verbatim goal spans; return unmatched inputs to Roll for missing facts or prepared content. Open editors before discovering their inputs. Preserve native policy, origin, ref, target-freshness, exact input readback and uncertain-action guards. Stop on stagnation without hidden host fallback.
+
+  Return final observations, source records and choice distributions with verified:false. Roll verifies the whole original goal after interaction and corrects only mismatches; model_done is not certified success. Legacy helper-budget inputs remain accepted but unused; task-mode textCalls is empty and recoveryDecisions is zero.
+
+  Provide generic picker ownership, trigger/option distinctions and provenance-tagged labels to browser decision models. Separate query, display and committed values, preserve explicit expanded state during asynchronous loading, and describe actions by their field relationship. Menu text matches no longer imply completed fields; ambiguous ownership and backing values remain unknown.
+
+  Bound model-facing request previews while preserving all action IDs and full execution text. Deduplicate repeated descriptions and input tables. Evaluate whole-goal completion in the same primary request, distinguishing unresolved requirements from open panels, and preserve verbatim user goals/text through Roll preparation. Surface recognized token-limit errors without exposing upstream bodies.
+
+### Patch Changes
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Improve generic form execution with scroll-aware iframe reachability, bounded page-feedback memory for prerequisites, and read-only preservation evidence for static fields. Keep native input guards and final task verification boundaries.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Treat blank optional browser snapshot scopes as an unscoped observation. Clarify the supported script helper signatures and provide safe recovery guidance for script failures, depth-limited observations and iframe forms while preserving existing origin and execution guards.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25) Thanks [@steveoon](https://github.com/steveoon)! - Distinguish display-only form editor entries from actual value controls. Preserve independently judged field-to-entry relationships across local editor transitions, invalidate summary evidence when values change, and include surrounding field meaning in binding choices. Keep related delegated fields visible in shared editors without granting ownership of unrelated pickers. Reuse the existing decision request for current summary judgments without per-field host calls or site-specific field types.
+
+- [#275](https://github.com/steveoon/roll-agent/pull/275) [`9d3f6d9`](https://github.com/steveoon/roll-agent/commit/9d3f6d98d7ea1c7e091cfc6b908e2cd4e3e55623) Thanks [@steveoon](https://github.com/steveoon)! - Fix false snapshot projection truncation warnings for absent optional metadata. Return safe, actionable browser helper argument errors without replaying completed actions. Detect repeated form option states and provide bounded, unverified field handoffs instead of oversized internal decision traces; clarify helper and recovery guidance.
+
+  Prefer goal delegation for dynamic multi-field forms with complete inputs and explicit scope; align browser tool descriptions and Skill guidance while preserving explicit user tool choice and local recovery.
+
+- Updated dependencies [[`584ffe6`](https://github.com/steveoon/roll-agent/commit/584ffe62ce4d449cca1408d07d21568ac7b7471c), [`ff9bebf`](https://github.com/steveoon/roll-agent/commit/ff9bebf35cdd08c1daac419a1de694a34d5a432d), [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25), [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25), [`9d3f6d9`](https://github.com/steveoon/roll-agent/commit/9d3f6d98d7ea1c7e091cfc6b908e2cd4e3e55623), [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25), [`746f61e`](https://github.com/steveoon/roll-agent/commit/746f61e9975e7fbda222010dbb32e55acd47ec25)]:
+  - @roll-agent/browser@0.12.0
+  - @roll-agent/sdk@0.7.0
+
 ## 0.26.1
 
 ### Patch Changes
