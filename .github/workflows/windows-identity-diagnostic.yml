@@ -24,6 +24,8 @@ jobs:
           node-version: 24.18.0
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
+      - name: Process identity regressions
+        run: node --experimental-strip-types --test packages/core/src/registry/process-identity.test.ts
       - name: Original regressions with probe diagnostics
         id: original
         continue-on-error: true
