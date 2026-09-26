@@ -31,7 +31,7 @@ const WINDOWS_TASK_STATE_VALUES: ReadonlySet<number> = new Set(Object.values(WIN
 
 const WINDOWS_TASK_STATE_QUERY_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
-$service = New-Object -ComObject 'Schedule.Service'
+$service = [Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'))
 $service.Connect()
 $tasks = $service.GetFolder('\').GetTasks(1)
 $task = $null
