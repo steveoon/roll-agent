@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.7",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@roll-agent/protocol": "workspace:*",
     "@vscode/ripgrep": "1.18.0",
     "ai": "^7.0.65",

@@ -125,7 +125,7 @@
     "@ai-sdk/provider": "^4.0.7",
     "@ai-sdk/xai": "4.0.38",
     "@clack/prompts": "1.4.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@roll-agent/client-node": "workspace:*",
     "@roll-agent/companion": "workspace:*",
     "@roll-agent/protocol": "workspace:*",
