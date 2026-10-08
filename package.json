@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.6.0",
-    "@changesets/cli": "^2.30.0",
+    "@changesets/cli": "3.0.3",
     "@types/node": "^22.19.15",
     "esbuild": "0.28.1",
     "eslint": "^9.0.0",
