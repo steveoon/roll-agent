@@ -230,7 +230,7 @@ function buildCompactionNotice(
     ? `，checkpoint #${String(event.checkpointGeneration)}${event.checkpointSummaryStatus && event.checkpointSummaryStatus !== "valid" ? `(${event.checkpointSummaryStatus})` : ""}`
     : "";
   if (event.removed === 0 && !event.truncatedTools) {
-    return `${GLYPHS.compact} ${label}：无需压缩`;
+    return `${GLYPHS.compact} ${label}：未减少上下文（保留策略或安全检查限制了裁剪）`;
   }
   return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}${checkpoint}`;
 }

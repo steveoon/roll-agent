@@ -284,10 +284,32 @@ async function waitForValue<T>(read: () => T | undefined, message: string): Prom
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
+  // A busy event loop can deliver the result before this timer resumes past its deadline.
+  const value = read();
+  if (value !== undefined) return value;
   throw new Error(message);
 }
 
-/** Event barrier for virtual-clock tests; the enclosing test timeout bounds missing events. */
+test("waitForValue rechecks available results after a delayed timer", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const state: { value: string | undefined } = { value: undefined };
+  const waiting = waitForValue(() => state.value, "missing result");
+  state.value = "ready";
+  t.mock.timers.tick(2_000);
+  assert.equal(await waiting, "ready");
+});
+
+test("waitForValue still rejects when a result never arrives", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const rejected = assert.rejects(
+    waitForValue(() => undefined, "missing result"),
+    /missing result/u,
+  );
+  t.mock.timers.tick(2_000);
+  await rejected;
+});
+
+/** Wait for delivery, not a short polling deadline; the enclosing test timeout bounds missing events. */
 function waitForWireValue<T>(connection: JsonRpcConnection, read: () => T | undefined): Promise<T> {
   return new Promise((resolve) => {
     const check = () => {
@@ -967,117 +989,121 @@ test("RuntimeServer.abortAll cancels a pending user input interaction once", asy
   assert.equal(JSON.stringify(client.wire).includes("late-disconnected-value"), false);
 });
 
-test("Runtime Protocol 1.2 ACK precedes Interaction delivery and uses distinct IDs", async (t) => {
-  let executionCount = 0;
-  const harness = createApprovalProtocolHarness(() => {
-    executionCount += 1;
-  });
-  const client = attachRuntimeProtocolClient(harness.clientConn);
-  t.after(() => harness.close());
+for (const elapsedDuringTool of [0, 2_500]) {
+  test(
+    `Runtime Protocol 1.2 ACK precedes Interaction delivery and uses distinct IDs (${elapsedDuringTool}ms elapsed)`,
+    { timeout: 10_000 },
+    async (t) => {
+      if (elapsedDuringTool > 0) t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+      let executionCount = 0;
+      const harness = createApprovalProtocolHarness(() => {
+        executionCount += 1;
+        if (elapsedDuringTool > 0) t.mock.timers.tick(elapsedDuringTool);
+      });
+      const client = attachRuntimeProtocolClient(harness.clientConn);
+      t.after(() => harness.close());
 
-  await client.request(1, RUNTIME_METHODS.initialize, {
-    protocolVersions: ["1.2"],
-    client: { name: "interaction-client", version: "1.2.0" },
-  });
-  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
-    requestId: "00000000-0000-4000-8000-000000000391",
-    title: "v1.2 interaction",
-  })) as { readonly thread: { readonly id: string } };
-  const turnId = "00000000-0000-4000-8000-000000000392";
-  await client.request(3, RUNTIME_METHODS.turnStart, {
-    requestId: "00000000-0000-4000-8000-000000000393",
-    threadId: created.thread.id,
-    turnId,
-    input: { text: "run guarded tool after capability ACK" },
-  });
-  await waitForValue(
-    () => client.events.find((event) => event.event.type === "approval.required"),
-    "v1.2 capability ACK 前未产生 approval view",
-  );
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(
-    client.wire.some(
-      (message) =>
-        isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
-    ),
-    false,
-  );
+      await client.request(1, RUNTIME_METHODS.initialize, {
+        protocolVersions: ["1.2"],
+        client: { name: "interaction-client", version: "1.2.0" },
+      });
+      const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+        requestId: "00000000-0000-4000-8000-000000000391",
+        title: "v1.2 interaction",
+      })) as { readonly thread: { readonly id: string } };
+      const turnId = "00000000-0000-4000-8000-000000000392";
+      await client.request(3, RUNTIME_METHODS.turnStart, {
+        requestId: "00000000-0000-4000-8000-000000000393",
+        threadId: created.thread.id,
+        turnId,
+        input: { text: "run guarded tool after capability ACK" },
+      });
+      await waitForWireValue(harness.clientConn, () =>
+        client.events.find((event) => event.event.type === "approval.required"),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(
+        client.wire.some(
+          (message) =>
+            isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        ),
+        false,
+      );
 
-  await client.request(4, RUNTIME_METHODS.clientCapabilitiesSet, {
-    revision: 1,
-    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
-  });
-  const approvalRequest = await waitForValue(
-    () =>
-      client.wire.find(
-        (message): message is JsonRpcRequest =>
-          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
-      ),
-    "v1.2 capability ACK 后未收到 approval.request",
-  );
-  const capabilityAckIndex = client.wire.findIndex(
-    (message) => "id" in message && message.id === 4 && "result" in message,
-  );
-  assert.ok(capabilityAckIndex >= 0);
-  assert.ok(capabilityAckIndex < client.wire.indexOf(approvalRequest));
-  const params = approvalRequest.params as ApprovalRequestParamsV12;
-  assert.equal(params.threadId, created.thread.id);
-  assert.equal(params.turnId, turnId);
-  assert.equal(params.approval.turnId, turnId);
-  assert.equal(params.sensitivity, "normal");
-  assert.match(params.interactionId, /^[0-9a-f-]{36}$/u);
-  assert.ok(Date.parse(params.expiresAt) > Date.now());
-  assert.notEqual(params.interactionId, approvalRequest.id);
+      await client.request(4, RUNTIME_METHODS.clientCapabilitiesSet, {
+        revision: 1,
+        serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      });
+      const approvalRequest = await waitForWireValue(harness.clientConn, () =>
+        client.wire.find(
+          (message): message is JsonRpcRequest =>
+            isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        ),
+      );
+      const capabilityAckIndex = client.wire.findIndex(
+        (message) => "id" in message && message.id === 4 && "result" in message,
+      );
+      assert.ok(capabilityAckIndex >= 0);
+      assert.ok(capabilityAckIndex < client.wire.indexOf(approvalRequest));
+      const params = approvalRequest.params as ApprovalRequestParamsV12;
+      assert.equal(params.threadId, created.thread.id);
+      assert.equal(params.turnId, turnId);
+      assert.equal(params.approval.turnId, turnId);
+      assert.equal(params.sensitivity, "normal");
+      assert.match(params.interactionId, /^[0-9a-f-]{36}$/u);
+      assert.ok(Date.parse(params.expiresAt) > Date.now());
+      assert.notEqual(params.interactionId, approvalRequest.id);
 
-  const expectedPendingInteraction = {
-    method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
-    interactionId: params.interactionId,
-    threadId: threadIdSchema.parse(created.thread.id),
-    turnId: turnIdSchema.parse(turnId),
-    expiresAt: params.expiresAt,
-    sensitivity: "normal",
-    approvalId: params.approval.id,
-  } as const satisfies PendingInteractionProjection;
-  const waitingSnapshot = (await client.request(5, RUNTIME_METHODS.threadSnapshot, {
-    threadId: created.thread.id,
-    limit: 100,
-  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
-  assert.deepEqual(waitingSnapshot.pendingInteractions, [expectedPendingInteraction]);
-  const projectedInteraction = waitingSnapshot.pendingInteractions[0];
-  assert.ok(projectedInteraction);
-  assert.deepEqual(Object.keys(projectedInteraction).sort(), [
-    "approvalId",
-    "expiresAt",
-    "interactionId",
-    "method",
-    "sensitivity",
-    "threadId",
-    "turnId",
-  ]);
-  for (const forbidden of ["id", "preview", "payload", "result"] as const) {
-    assert.equal(forbidden in projectedInteraction, false);
-  }
-  const openedSnapshot = (await client.request(6, RUNTIME_METHODS.threadOpen, {
-    threadId: created.thread.id,
-  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
-  assert.deepEqual(openedSnapshot.pendingInteractions, [expectedPendingInteraction]);
+      const expectedPendingInteraction = {
+        method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        interactionId: params.interactionId,
+        threadId: threadIdSchema.parse(created.thread.id),
+        turnId: turnIdSchema.parse(turnId),
+        expiresAt: params.expiresAt,
+        sensitivity: "normal",
+        approvalId: params.approval.id,
+      } as const satisfies PendingInteractionProjection;
+      const waitingSnapshot = (await client.request(5, RUNTIME_METHODS.threadSnapshot, {
+        threadId: created.thread.id,
+        limit: 100,
+      })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+      assert.deepEqual(waitingSnapshot.pendingInteractions, [expectedPendingInteraction]);
+      const projectedInteraction = waitingSnapshot.pendingInteractions[0];
+      assert.ok(projectedInteraction);
+      assert.deepEqual(Object.keys(projectedInteraction).sort(), [
+        "approvalId",
+        "expiresAt",
+        "interactionId",
+        "method",
+        "sensitivity",
+        "threadId",
+        "turnId",
+      ]);
+      for (const forbidden of ["id", "preview", "payload", "result"] as const) {
+        assert.equal(forbidden in projectedInteraction, false);
+      }
+      const openedSnapshot = (await client.request(6, RUNTIME_METHODS.threadOpen, {
+        threadId: created.thread.id,
+      })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+      assert.deepEqual(openedSnapshot.pendingInteractions, [expectedPendingInteraction]);
 
-  harness.clientConn.send({
-    jsonrpc: "2.0",
-    id: approvalRequest.id,
-    result: { decision: "approve" },
-  });
-  await waitForValue(
-    () => client.events.find((event) => event.event.type === "turn.completed"),
-    "v1.2 approval 后 Turn 未完成",
+      harness.clientConn.send({
+        jsonrpc: "2.0",
+        id: approvalRequest.id,
+        result: { decision: "approve" },
+      });
+      await waitForWireValue(harness.clientConn, () =>
+        client.events.find((event) => event.event.type === "turn.completed"),
+      );
+      assert.equal(executionCount, 1);
+      const settledSnapshot = (await client.request(7, RUNTIME_METHODS.threadSnapshot, {
+        threadId: created.thread.id,
+        limit: 100,
+      })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+      assert.deepEqual(settledSnapshot.pendingInteractions, []);
+    },
   );
-  assert.equal(executionCount, 1);
-  const settledSnapshot = (await client.request(7, RUNTIME_METHODS.threadSnapshot, {
-    threadId: created.thread.id,
-    limit: 100,
-  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
-  assert.deepEqual(settledSnapshot.pendingInteractions, []);
-});
+}
 
 test("Runtime Protocol 1.2 capability ACK frame precedes an Interaction created inside the ACK window", async (t) => {
   const coordinator = new ResponderCapturingRuntimeClientRequestCoordinator();

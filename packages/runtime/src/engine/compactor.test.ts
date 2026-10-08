@@ -941,6 +941,71 @@ test("步骤边界切受 maxRemovedTranscriptMessages 约束", async () => {
   assert.ok(result.removed <= 4, `removed ${String(result.removed)} exceeds evidence cap`);
 });
 
+test("较早的长轮次可在证据批次内按步骤压缩，并完整保留后续轮次", async () => {
+  const later = [
+    { role: "user" as const, content: "later-u" },
+    ...toolStep("later-tool", 1500),
+    { role: "assistant" as const, content: "later-final" },
+  ];
+  const messages = [...monsterTurn(20, 1500), ...later];
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 32_000,
+    targetTokens: 1000,
+    maxRemovedTranscriptMessages: 32,
+    model: draftModel(),
+  });
+
+  assert.ok(
+    result.removed > 2,
+    `removed ${String(result.removed)} did not advance into the long turn`,
+  );
+  assert.ok(result.removed <= 32);
+  assert.equal(result.messages[0]?.content, "big-u");
+  assert.deepEqual(result.messages.slice(-later.length), later);
+  for (const [index, message] of result.messages.entries()) {
+    if (message.role !== "tool") continue;
+    const previous = result.messages[index - 1];
+    assert.equal(previous?.role, "assistant");
+    assert.ok(previous && Array.isArray(previous.content));
+    const callIds = previous.content.flatMap((part) =>
+      part.type === "tool-call" ? [part.toolCallId] : [],
+    );
+    assert.deepEqual(
+      message.content.flatMap((part) => (part.type === "tool-result" ? [part.toolCallId] : [])),
+      callIds,
+    );
+  }
+});
+
+for (const evidenceCap of [0, 1, 2, 4]) {
+  test(`较早长轮裁剪不能越过 ${String(evidenceCap)} 条证据边界`, async () => {
+    const messages = [
+      ...monsterTurn(20, 1500),
+      { role: "user" as const, content: "later-u" },
+      { role: "assistant" as const, content: "later-final" },
+    ];
+    const result = await compactMessages({
+      messages,
+      strategy: "truncate",
+      keepRecentTurns: 4,
+      keepRecentTokens: 32_000,
+      targetTokens: 1,
+      maxRemovedTranscriptMessages: evidenceCap,
+      model: draftModel(),
+    });
+    assert.ok(result.removed <= evidenceCap);
+    assert.deepEqual(result.messages.slice(-2), messages.slice(-2));
+    if (evidenceCap < 2) assert.deepEqual(result.messages, messages);
+    if (evidenceCap === 4) {
+      // The first large Tool result has not been presented: its pair must remain.
+      assert.deepEqual(result.messages.slice(1, 3), messages.slice(3, 5));
+    }
+  });
+}
+
 test("暂停在工具步骤后的轮内压缩不截断最后一个步骤的工具结果,只截断更早的", async () => {
   const messages: ModelMessage[] = [
     { role: "user", content: "big-u" },

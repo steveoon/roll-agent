@@ -182,65 +182,128 @@ scheduler:
   }
 });
 
-test("e2e: daemon 拉起 exec 子进程并把结果写回账本，SIGTERM 后干净退出", async () => {
-  const { workspace, env } = setupWorkspace();
-  const schedulerDir = resolve(workspace, "scheduler");
-  let daemon: ReturnType<typeof spawnRollProcess> | undefined;
-  try {
-    const added = runRoll(
-      [
-        "schedule",
-        "add",
-        "巡检",
-        "--name",
-        "daemon-e2e",
-        "--every",
-        "1h",
-        "--now",
-        "--cwd",
+test(
+  process.platform === "win32"
+    ? "e2e: daemon 写回账本，Windows 强制退出后识别遗留记录并允许重启"
+    : "e2e: daemon 拉起 exec 子进程并把结果写回账本，SIGTERM 后干净退出",
+  async () => {
+    const { workspace, env } = setupWorkspace();
+    const schedulerDir = resolve(workspace, "scheduler");
+    let daemon: ReturnType<typeof spawnRollProcess> | undefined;
+    try {
+      const added = runRoll(
+        [
+          "schedule",
+          "add",
+          "巡检",
+          "--name",
+          "daemon-e2e",
+          "--every",
+          "1h",
+          "--now",
+          "--cwd",
+          workspace,
+          "--json",
+        ],
         workspace,
-        "--json",
-      ],
-      workspace,
-      { env },
-    );
-    assert.equal(added.status, 0, added.stderr);
-    const created = JSON.parse(added.stdout) as { id: string };
-    daemon = spawnRollProcess(["schedule", "daemon", "--foreground"], workspace, env);
-    const handle = daemon;
-    let rows: InvocationJson[] = [];
-    await waitForSmokeCondition(
-      "daemon to run the invocation through a spawned exec child",
-      () => {
-        const runs = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
-        rows = runs.status === 0 ? (JSON.parse(runs.stdout) as InvocationJson[]) : [];
-        return rows.some((row) => row.status === "retry" || row.status === "failed");
-      },
-      () => formatSpawnedRollProcess("daemon", handle),
-      40_000,
-    );
-    const settled = rows.find((row) => row.status === "retry" || row.status === "failed");
-    assert.ok(settled);
-    assert.ok(settled.attempt >= 1);
-    assert.equal(typeof settled.executorPid, "number");
-    assert.ok((settled.error ?? "").length > 0);
-    assert.doesNotMatch(settled.error ?? "", /未写入执行结果/u);
-    assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), true);
-    const status = runRoll(["schedule", "status", "--json"], workspace, { env });
-    assert.equal(
-      (JSON.parse(status.stdout) as { daemon: { liveness: string } }).daemon.liveness,
-      "running",
-    );
-  } finally {
-    if (daemon !== undefined) {
+        { env },
+      );
+      assert.equal(added.status, 0, added.stderr);
+      const created = JSON.parse(added.stdout) as { id: string };
+      daemon = spawnRollProcess(["schedule", "daemon", "--foreground"], workspace, env);
+      const handle = daemon;
+      let rows: InvocationJson[] = [];
+      await waitForSmokeCondition(
+        "daemon to run the invocation through a spawned exec child",
+        () => {
+          const runs = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
+          rows = runs.status === 0 ? (JSON.parse(runs.stdout) as InvocationJson[]) : [];
+          return rows.some((row) => row.status === "retry" || row.status === "failed");
+        },
+        () => formatSpawnedRollProcess("daemon", handle),
+        40_000,
+      );
+      const settled = rows.find((row) => row.status === "retry" || row.status === "failed");
+      assert.ok(settled);
+      assert.ok(settled.attempt >= 1);
+      assert.equal(typeof settled.executorPid, "number");
+      assert.ok((settled.error ?? "").length > 0);
+      assert.doesNotMatch(settled.error ?? "", /未写入执行结果/u);
+      assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), true);
+      const status = runRoll(["schedule", "status", "--json"], workspace, { env });
+      assert.equal(
+        (JSON.parse(status.stdout) as { daemon: { liveness: string } }).daemon.liveness,
+        "running",
+      );
+      // Prevent a retry from starting while exercising the daemon restart path.
+      const paused = runRoll(["schedule", "pause", created.id], workspace, { env });
+      assert.equal(paused.status, 0, paused.stderr);
+      // Pausing terminalizes pending retries. Compare the updated ledger across restart.
+      const pausedRuns = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
+      assert.equal(pausedRuns.status, 0, pausedRuns.stderr);
+      rows = JSON.parse(pausedRuns.stdout) as InvocationJson[];
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.status, "failed");
       daemon.child.kill("SIGTERM");
       const exit = await waitForSpawnedRollExit(daemon, "daemon", 20_000);
-      assert.equal(exit.code, 0, formatSpawnedRollProcess("daemon", daemon));
-      assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), false);
+      if (process.platform === "win32") {
+        // Node emulates SIGTERM with forced termination on Windows; JS finally does not run.
+        assert.equal(exit.code, null, formatSpawnedRollProcess("daemon", daemon));
+        assert.equal(exit.signal, "SIGTERM");
+        assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), true);
+        const stopped = runRoll(["schedule", "status", "--json"], workspace, { env });
+        assert.equal(stopped.status, 0, stopped.stderr);
+        assert.equal(
+          (JSON.parse(stopped.stdout) as { daemon: { liveness: string } }).daemon.liveness,
+          "stopped",
+        );
+        daemon = spawnRollProcess(["schedule", "daemon", "--foreground"], workspace, env);
+        const replacement = daemon;
+        await waitForSmokeCondition(
+          "replacement daemon to recover the stale lock and record",
+          () => {
+            const status = runRoll(["schedule", "status", "--json"], workspace, { env });
+            if (status.status !== 0) return false;
+            const value = JSON.parse(status.stdout) as {
+              daemon: { liveness: string; pid?: number };
+            };
+            return (
+              value.daemon.liveness === "running" && value.daemon.pid === replacement.child.pid
+            );
+          },
+          () => formatSpawnedRollProcess("replacement daemon", replacement),
+          40_000,
+        );
+        const afterRestart = runRoll(["schedule", "runs", created.id, "--json"], workspace, {
+          env,
+        });
+        assert.equal(afterRestart.status, 0, afterRestart.stderr);
+        assert.deepEqual(
+          JSON.parse(afterRestart.stdout),
+          rows,
+          "restart must not replay the settled invocation",
+        );
+      } else {
+        assert.equal(exit.code, 0, formatSpawnedRollProcess("daemon", daemon));
+        assert.equal(exit.signal, null);
+        assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), false);
+      }
+    } finally {
+      try {
+        if (
+          daemon !== undefined &&
+          daemon.child.exitCode === null &&
+          daemon.child.signalCode === null
+        ) {
+          daemon.child.kill("SIGKILL");
+          await waitForSpawnedRollExit(daemon, "daemon cleanup", 20_000);
+        }
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
     }
-    rmSync(workspace, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test("e2e: 登记后修改 runtime.approval 会让下一次执行终态失败并提示 resume；resume 重新授权", () => {
   const { workspace, env } = setupWorkspace();

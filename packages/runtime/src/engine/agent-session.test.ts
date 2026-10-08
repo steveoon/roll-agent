@@ -3480,6 +3480,116 @@ test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace",
   assert.equal(events.at(-1)?.type, "message-finish");
 });
 
+for (const contextWindow of [1000, undefined]) {
+  test(`AgentSession 手动压缩使用已知窗口预算，未知窗口保留原策略 (${String(contextWindow)})`, async () => {
+    const initialMessages: ModelMessage[] = [{ role: "user", content: "keep this request" }];
+    for (let step = 0; step < 6; step += 1) {
+      initialMessages.push({ role: "assistant", content: `${String(step)}:${"x".repeat(1500)}` });
+    }
+    const session = new AgentSession({
+      id: "manual-pressure-budget",
+      model: sequencedModel([]),
+      sources: [],
+      maxSteps: 2,
+      initialMessages,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      compaction: {
+        enabled: true,
+        strategy: "truncate",
+        threshold: 0.75,
+        keepRecentTurns: 4,
+        keepRecentTokens: 32_000,
+      },
+    });
+    try {
+      const events = await collect(session.compact("manual"));
+      const compacted = events.find((event) => event.type === "context-compacted");
+      assert.ok(compacted);
+      if (contextWindow === undefined) {
+        assert.equal(compacted.removed, 0);
+        assert.deepEqual(session.getMessages(), initialMessages);
+      } else {
+        assert.ok(compacted.removed > 0);
+        assert.ok(estimateMessagesTokens(session.getMessages()) < 750);
+        assert.equal(session.getMessages()[0]?.content, "keep this request");
+        assert.deepEqual(session.getMessages().at(-1), initialMessages.at(-1));
+      }
+    } finally {
+      await session.close();
+    }
+  });
+}
+
+test("AgentSession 自动压缩较早长轮次，不重放已完成工具", async () => {
+  const initialMessages: ModelMessage[] = [{ role: "user", content: "long task" }];
+  for (let step = 0; step < 20; step += 1) {
+    const toolCallId = `completed-${String(step)}`;
+    initialMessages.push(
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId,
+            toolName: "probe__inspect",
+            input: { script: "x".repeat(14_000) },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId,
+            toolName: "probe__inspect",
+            output: { type: "text", value: "already done" },
+          },
+        ],
+      },
+    );
+  }
+  initialMessages.push(
+    { role: "assistant", content: "done" },
+    { role: "user", content: "later request" },
+    { role: "assistant", content: "ok" },
+  );
+  let toolCalls = 0;
+  const model = sequencedModel([textStep("continued once", 100)]);
+  const session = new AgentSession({
+    id: "earlier-long-turn",
+    model,
+    sources: [
+      source("probe", "inspect", () => {
+        toolCalls += 1;
+        return "unexpected replay";
+      }),
+    ],
+    maxSteps: 2,
+    initialMessages,
+    contextWindow: 100_000,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 4,
+      keepRecentTokens: 32_000,
+    },
+  });
+  try {
+    const events = await collect(session.send("continue"));
+    const compacted = events.find((event) => event.type === "context-compacted");
+    assert.ok(compacted && compacted.removed > 0);
+    assert.ok(compacted.removed <= 32);
+    assert.equal(model.doStreamCalls.length, 1);
+    assert.equal(toolCalls, 0);
+    assert.ok(JSON.stringify(session.getMessages()).includes("later request"));
+    assert.equal(events.at(-1)?.type, "message-finish");
+  } finally {
+    await session.close();
+  }
+});
+
 test("AgentSession 从历史恢复且尚无实测 usage 时,首轮按估算触发自动压缩", async () => {
   const model = sequencedModel([textStep("after", 1)]);
   const longAnswer = "answer-".repeat(40);
