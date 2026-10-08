@@ -1,5 +1,12 @@
 # @roll-agent/core
 
+## 0.42.2
+
+### Patch Changes
+
+- Updated dependencies [[`94ce2a9`](https://github.com/steveoon/roll-agent/commit/94ce2a9c85ffc25f21d7ca0521087d99a2dc444b)]:
+  - @roll-agent/runtime@0.25.2
+
 ## 0.42.1
 
 ### Patch Changes
