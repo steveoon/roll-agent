@@ -1,5 +1,15 @@
 # @roll-agent/runtime
 
+## 0.25.1
+
+### Patch Changes
+
+- [#279](https://github.com/steveoon/roll-agent/pull/279) [`aa981de`](https://github.com/steveoon/roll-agent/commit/aa981de6072873ef7ac8bc85c9be47f8e13cba0b) Thanks [@steveoon](https://github.com/steveoon)! - Fix context compaction stalling when an earlier long turn exceeds the semantic evidence batch. Compact completed steps within the evidence boundary while preserving later turns, tool pairs, and durable checkpoints. Apply the context budget to manual compaction and report attempts that do not reduce context without claiming compression is unnecessary.
+
+- [#280](https://github.com/steveoon/roll-agent/pull/280) [`1f7fcab`](https://github.com/steveoon/roll-agent/commit/1f7fcaba153c5be60519d8d1afb0b08c5606bf88) Thanks [@steveoon](https://github.com/steveoon)! - Update MCP SDK and affected transitive dependencies to address published OAuth credential disclosure, URI parsing, proxy trust, and HTTP client security advisories.
+- Updated dependencies [[`1f7fcab`](https://github.com/steveoon/roll-agent/commit/1f7fcaba153c5be60519d8d1afb0b08c5606bf88)]:
+  - @roll-agent/protocol@0.8.1
+
 ## 0.25.0
 
 ### Minor Changes

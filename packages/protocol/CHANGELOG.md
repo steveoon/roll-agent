@@ -1,5 +1,11 @@
 # @roll-agent/protocol
 
+## 0.8.1
+
+### Patch Changes
+
+- [#280](https://github.com/steveoon/roll-agent/pull/280) [`1f7fcab`](https://github.com/steveoon/roll-agent/commit/1f7fcaba153c5be60519d8d1afb0b08c5606bf88) Thanks [@steveoon](https://github.com/steveoon)! - Update MCP SDK and affected transitive dependencies to address published OAuth credential disclosure, URI parsing, proxy trust, and HTTP client security advisories.
+
 ## 0.8.0
 
 ### Minor Changes
