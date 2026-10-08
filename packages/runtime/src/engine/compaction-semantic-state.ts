@@ -1873,10 +1873,15 @@ export function mergeCompactionSemanticState(
 
 function boundedText(value: string, maxChars: number): string {
   const normalized = normalizedText(value);
-  const characters = [...normalized];
-  return characters.length <= maxChars
-    ? normalized
-    : `${characters.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
+  // Zod string limits count UTF-16 code units. Iterate code points so truncation
+  // respects that budget without splitting a surrogate pair, reserving the ellipsis.
+  if (normalized.length <= maxChars) return normalized;
+  let prefix = "";
+  for (const character of normalized) {
+    if (prefix.length + character.length > maxChars - 1) break;
+    prefix += character;
+  }
+  return `${prefix}…`;
 }
 
 function semanticReminderItems(
