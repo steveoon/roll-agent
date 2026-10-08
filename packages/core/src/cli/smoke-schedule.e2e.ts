@@ -238,6 +238,12 @@ test(
       // Prevent a retry from starting while exercising the daemon restart path.
       const paused = runRoll(["schedule", "pause", created.id], workspace, { env });
       assert.equal(paused.status, 0, paused.stderr);
+      // Pausing terminalizes pending retries. Compare the updated ledger across restart.
+      const pausedRuns = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
+      assert.equal(pausedRuns.status, 0, pausedRuns.stderr);
+      rows = JSON.parse(pausedRuns.stdout) as InvocationJson[];
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.status, "failed");
       daemon.child.kill("SIGTERM");
       const exit = await waitForSpawnedRollExit(daemon, "daemon", 20_000);
       if (process.platform === "win32") {
