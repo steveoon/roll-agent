@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { simulateReadableStream } from "ai";
+import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type {
@@ -2219,6 +2219,183 @@ test("ConversationEngine passes advertised tool timeout through discovery and ex
     await engine.dispose();
   }
 });
+for (const strategy of ["truncate", "summarize"] as const) {
+  test(`ConversationEngine 较早长轮分批 ${strategy} 后 SQLite 恢复保留证据且不重放`, async () => {
+    const dir = tempDir();
+    let store: ThreadStore | undefined;
+    let engine: ConversationEngine | undefined;
+    try {
+      const config = rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "mock",
+          defaultModel: "default-model",
+          providers: { mock: { apiKey: "test" } },
+        },
+        ask: {},
+        runtime: { contextWindow: 1000, compaction: { strategy } },
+        agents: { dataDir: join(dir, "agents") },
+      });
+      store = new ThreadStore(dir);
+      const threadId = store.createThread();
+      const messages: ModelMessage[] = [{ role: "user", content: "只检查文件，不要发送消息" }];
+      const records = Array.from({ length: 20 }, (_, step) =>
+        createToolExecutionRecord({
+          toolCallId: `done-${String(step)}`,
+          agentName: "probe",
+          toolName: "inspect",
+          input: { script: "x".repeat(14_000) },
+          result: successfulToolResult("already inspected"),
+        }),
+      );
+      for (const record of records) {
+        store.appendToolExecution(threadId, record);
+        messages.push(
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: record.toolCallId,
+                toolName: "probe__inspect",
+                input: { script: "x".repeat(14_000) },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: record.toolCallId,
+                toolName: "probe__inspect",
+                output: { type: "text", value: "already inspected" },
+              },
+            ],
+          },
+        );
+      }
+      messages.push(
+        { role: "assistant", content: "done" },
+        { role: "user", content: "继续检查" },
+        { role: "assistant", content: "ok" },
+      );
+      store.appendMessages(threadId, messages, {
+        toolExecutionCoverage: {
+          executionIds: records.map((record) => record.id),
+          representation: "raw_transcript",
+        },
+      });
+      const transcriptBefore = store.listTranscriptMessages(threadId);
+      const executionsBefore = store.listToolExecutions(threadId);
+      let toolCalls = 0;
+      const sources = [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => {
+              toolCalls += 1;
+              return { content: [{ type: "text", text: "unexpected replay" }] };
+            },
+          } as never,
+          tools: [
+            {
+              tool: { name: "inspect", inputSchema: { type: "object" as const } },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ];
+      const model = structuredCompactionEngineModel([], (options) => {
+        const constraint = structuredCompactionEvidence(options).find((entry) =>
+          /user: 只检查文件，不要发送消息/u.test(entry.summary),
+        );
+        return {
+          ...createEmptyCompactionModelDraft(),
+          constraints:
+            constraint === undefined
+              ? []
+              : [
+                  {
+                    priorItemId: null,
+                    text: "不要发送消息",
+                    sourceEvidenceIds: [constraint.evidenceId],
+                    sourceQuotes: [constraint.summary],
+                  },
+                ],
+        };
+      });
+      engine = new ConversationEngine({
+        config,
+        model,
+        store,
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+      });
+      const session = await engine.resumeSession(threadId);
+      for (let pass = 0; pass < 2; pass += 1) {
+        const events: SessionEvent[] = [];
+        for await (const event of session.compact("manual")) events.push(event);
+        assert.deepEqual(
+          events.filter((event) => event.type === "error"),
+          [],
+        );
+        const compacted = events.find((event) => event.type === "context-compacted");
+        assert.ok(compacted && compacted.removed > 0, JSON.stringify(events));
+        assert.equal(compacted.checkpointGeneration, pass + 1);
+        assert.equal(compacted.strategy, strategy);
+        if (strategy === "summarize") assert.equal(compacted.checkpointSummaryStatus, "valid");
+        assert.deepEqual(store.getMessages(threadId), session.getMessages());
+        assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
+        assert.deepEqual(store.listToolExecutions(threadId), executionsBefore);
+      }
+      const activeBefore = store.getMessages(threadId);
+      const checkpointBefore = store.getLatestCheckpoint(threadId);
+      assert.ok(checkpointBefore);
+      assert.ok(
+        checkpointBefore.constraints.some((constraint) =>
+          constraint.quote.includes("不要发送消息"),
+        ),
+      );
+      assert.equal(checkpointBefore.toolState.countsByOutcome.success, 20);
+      assert.equal(model.doStreamCalls.length, 0);
+      await engine.dispose();
+      engine = undefined;
+      store.close();
+      store = new ThreadStore(dir);
+      assert.deepEqual(store.getMessages(threadId), activeBefore);
+      assert.deepEqual(store.getLatestCheckpoint(threadId), checkpointBefore);
+      assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
+      const prompts: LanguageModelV4CallOptions[] = [];
+      const resumedModel = textModelCapture((options) => prompts.push(options));
+      engine = new ConversationEngine({
+        config,
+        model: resumedModel,
+        store,
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+      });
+      const resumed = await engine.resumeSession(threadId);
+      assert.deepEqual(resumed.getMessages(), activeBefore);
+      const events: SessionEvent[] = [];
+      for await (const event of resumed.send("继续")) events.push(event);
+      assert.deepEqual(
+        events.filter((event) => event.type === "error"),
+        [],
+      );
+      assert.equal(events.at(-1)?.type, "message-finish");
+      assert.equal(prompts.length, 1);
+      assert.match(JSON.stringify(prompts[0]?.prompt), /不要发送消息/u);
+      assert.equal(toolCalls, 0);
+      assert.deepEqual(store.listToolExecutions(threadId), executionsBefore);
+    } finally {
+      await engine?.dispose();
+      store?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("ConversationEngine resourceHints 对 partial-invalid 整体回退，并规范化 field", async () => {
   const config = rollConfigSchema.parse({

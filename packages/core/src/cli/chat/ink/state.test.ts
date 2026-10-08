@@ -448,6 +448,23 @@ test("compaction events toggle spinner and commit a notice", () => {
   );
 });
 
+for (const reason of ["auto", "manual"] as const) {
+  test(`${reason} compaction without progress does not claim compression is unnecessary`, () => {
+    const state = event(createInitialState("deepseek-flash", 1_000_000), "no-progress", {
+      type: "context-compacted",
+      reason,
+      strategy: "summarize",
+      removed: 0,
+      kept: 44,
+      beforeInputTokens: 1_000_000,
+    });
+    const item = state.history.at(-1);
+    assert.ok(item?.kind === "compaction");
+    assert.match(item.notice, /未减少上下文/u);
+    assert.doesNotMatch(item.notice, /无需压缩/u);
+  });
+}
+
 test("message-finish commits streamed assistant text and updates status", () => {
   let state = createInitialState("qwen", 200000);
   state = event(state, "x", { type: "text-delta", delta: "答案" });

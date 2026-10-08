@@ -3220,7 +3220,7 @@ export class AgentSession {
   ): Promise<void> {
     try {
       this.reconcileUncoveredToolExecutionContext();
-      await this.runCompaction(queue, reason, activeTurn, true, undefined);
+      await this.runCompaction(queue, reason, activeTurn, true, this.compactionTargetTokens());
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
     } finally {

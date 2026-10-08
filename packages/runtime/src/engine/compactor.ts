@@ -134,7 +134,9 @@ export function findTurnBoundaries(messages: readonly ModelMessage[]): number[] 
 const FILE_PART_TOKEN_ESTIMATE = 1600;
 const FILE_PART_DATA_PLACEHOLDER = "[file-data]";
 
-function isFilePartLike(value: unknown): value is { readonly type: "file"; readonly data: unknown } {
+function isFilePartLike(
+  value: unknown,
+): value is { readonly type: "file"; readonly data: unknown } {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -218,12 +220,19 @@ function planCut(input: CompactionInput): CompactionCutPlan {
     maxRemovedTranscriptMessages,
   );
   cut = Math.max(cut, budgetCut);
-  const lastTurnStart = boundaries[boundaries.length - 1] ?? 0;
-  if (withinTarget(messages.slice(cut)) || cut !== lastTurnStart) {
+  if (withinTarget(messages.slice(cut))) {
     return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
   }
-  const turnUserMessage = messages[lastTurnStart];
-  const steps = stepBoundaries(messages, lastTurnStart);
+  // The evidence batch can end inside an earlier turn. Make bounded progress there
+  // instead of requiring its entire history to fit before reaching a newer turn.
+  const turnStart = boundaries.findLast((boundary) => boundary <= cut);
+  if (turnStart === undefined) {
+    return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
+  }
+  const nextTurnStart = boundaries.find((boundary) => boundary > cut) ?? messages.length;
+  const turnUserMessage = messages[turnStart];
+  // Do not cross a later user request while retaining the current turn's user.
+  const steps = stepBoundaries(messages.slice(0, nextTurnStart), turnStart);
   if (turnUserMessage === undefined || steps.length === 0) {
     return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
   }

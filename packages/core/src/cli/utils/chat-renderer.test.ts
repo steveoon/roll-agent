@@ -128,6 +128,27 @@ function captureStderr(run: () => Promise<void>): Promise<string> {
   );
 }
 
+for (const reason of ["auto", "manual"] as const) {
+  test(`${reason} zero-progress compaction reports no reduction on stderr`, async () => {
+    const renderer = new ChatRenderer(async () => false);
+    const output = await captureStderr(async () => {
+      await renderer.handle(
+        {
+          type: "context-compacted",
+          reason,
+          strategy: "summarize",
+          removed: 0,
+          kept: 44,
+          beforeInputTokens: 1_000_000,
+        },
+        { approve() {}, reject() {} },
+      );
+    });
+    assert.match(output, /未减少上下文/u);
+    assert.doesNotMatch(output, /无需压缩/u);
+  });
+}
+
 test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits JSON", async () => {
   let message = "";
   const renderer = new ChatRenderer(async (m) => {

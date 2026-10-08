@@ -76,6 +76,7 @@ jobs:
           packages/runtime/src/tool-bridge/session-exec-tool.test.ts
           packages/runtime/src/tool-bridge/skill-tool.test.ts
           packages/runtime/src/engine/agent-session.test.ts
+          packages/runtime/src/engine/compactor.test.ts
           packages/runtime/src/engine/system-prompt.test.ts
           packages/runtime/src/engine/conversation-engine.test.ts
           packages/runtime/src/server/runtime-server.test.ts
@@ -90,6 +91,7 @@ jobs:
           packages/core/src/cli/chat/ink/state.test.ts
           packages/core/src/cli/chat/ink/app.test.ts
           packages/core/src/cli/utils/current-cli-shim.test.ts
+          packages/core/src/cli/utils/chat-renderer.test.ts
           packages/core/src/skills/library.test.ts
 
       - name: Chat exit and managed Agent lifecycle regressions
@@ -124,8 +126,7 @@ jobs:
           packages/core/src/companion-host/windows-system.test.ts
           packages/core/src/companion-host/windows-powershell.test.ts
 
-      - name: Scheduler E2E smoke (diagnostic, non-blocking)
-        continue-on-error: true
+      - name: Scheduler E2E smoke
         timeout-minutes: 5
         run: >
           node --experimental-strip-types --experimental-sqlite --test
