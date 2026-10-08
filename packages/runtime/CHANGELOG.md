@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 0.25.2
+
+### Patch Changes
+
+- [#282](https://github.com/steveoon/roll-agent/pull/282) [`94ce2a9`](https://github.com/steveoon/roll-agent/commit/94ce2a9c85ffc25f21d7ca0521087d99a2dc444b) Thanks [@steveoon](https://github.com/steveoon)! - Fix context compaction failing with sourceQuotes length validation errors when long conversation text contains emoji or other supplementary Unicode characters. Bound semantic evidence and checkpoint text using the same UTF-16 limits as validation, without splitting surrogate pairs.
+
 ## 0.25.1
 
 ### Patch Changes
