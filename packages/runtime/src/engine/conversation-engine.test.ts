@@ -2037,6 +2037,120 @@ function structuredCompactionEvidence(options: LanguageModelV4CallOptions): read
   return parsed.evidence;
 }
 
+for (const scenario of ["summarize", "truncate", "fallback"] as const) {
+  test(`ConversationEngine Unicode compaction ${scenario} persists and resumes`, async () => {
+    const dir = tempDir();
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          strategy: scenario === "truncate" ? "truncate" : "summarize",
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: join(dir, "agents") },
+    });
+    let engine: ConversationEngine | undefined;
+    let store: ThreadStore | undefined;
+    let draftCalls = 0;
+    try {
+      store = new ThreadStore(dir);
+      engine = new ConversationEngine({
+        config,
+        store,
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+        model: structuredCompactionEngineModel([engineTextStep("已记录要求")], (options) => {
+          draftCalls += 1;
+          if (scenario === "fallback") return {};
+          const evidence = structuredCompactionEvidence(options);
+          assert.ok(evidence.some((entry) => entry.summary.includes("😀")));
+          assert.ok(evidence.every((entry) => entry.summary.length <= 512));
+          return {
+            ...createEmptyCompactionModelDraft(),
+            uncertainties: evidence.map((entry) => ({
+              priorItemId: null,
+              text: entry.summary,
+              sourceEvidenceIds: [entry.evidenceId],
+              sourceQuotes: [entry.summary],
+            })),
+          };
+        }),
+      });
+      const session = await engine.createSession();
+      const threadId = session.id;
+      const request = `不要发送消息，只整理草稿。${"😀".repeat(400)}`;
+      await drain(session.send(request));
+      await drain(session.send(`${request}继续整理`));
+      const transcriptBefore = store.listTranscriptMessages(threadId);
+      const events: SessionEvent[] = [];
+      for await (const event of session.compact("manual")) events.push(event);
+      assert.deepEqual(
+        events.filter((event) => event.type === "error"),
+        [],
+      );
+      const compacted = events.find((event) => event.type === "context-compacted");
+      assert.ok(compacted && compacted.removed > 0);
+      assert.equal(compacted.strategy, scenario === "summarize" ? "summarize" : "truncate");
+      assert.equal(draftCalls, scenario === "truncate" ? 0 : 1);
+      const checkpoint = store.getLatestCheckpoint(threadId);
+      assert.ok(checkpoint && checkpoint.version === 2);
+      if (scenario === "fallback") assert.equal(checkpoint.summary.status, "fallback");
+      assert.ok(checkpoint.semanticState.goal);
+      assert.ok(checkpoint.semanticState.goal.sourceQuotes[0]?.includes("😀"));
+      for (const item of [
+        checkpoint.semanticState.goal,
+        ...checkpoint.semanticState.constraints,
+        ...checkpoint.semanticState.uncertainties,
+      ]) {
+        for (const quote of item.sourceQuotes) {
+          assert.ok(quote.length <= 512);
+          assert.ok(quote.isWellFormed());
+        }
+      }
+      assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
+      await engine.dispose();
+      engine = undefined;
+      store.close();
+      store = new ThreadStore(dir);
+      let prompt = "";
+      engine = new ConversationEngine({
+        config,
+        store,
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+        model: textModelCapture((options) => {
+          prompt = JSON.stringify(options.prompt);
+        }),
+      });
+      const resumed = await engine.resumeSession(threadId);
+      const resumedEvents: SessionEvent[] = [];
+      for await (const event of resumed.send("继续")) resumedEvents.push(event);
+      assert.deepEqual(
+        resumedEvents.filter((event) => event.type === "error"),
+        [],
+      );
+      assert.equal(resumedEvents.at(-1)?.type, "message-finish");
+      assert.match(prompt, /不要发送消息/u);
+      const restoredCheckpoint = store.getLatestCheckpoint(threadId);
+      assert.ok(restoredCheckpoint && restoredCheckpoint.version === 2);
+      assert.deepEqual(restoredCheckpoint.semanticState, checkpoint.semanticState);
+    } finally {
+      await engine?.dispose();
+      store?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const scenario of ["duplicates", "evidence-overflow"] as const) {
   test(`ConversationEngine semantic candidate ${scenario} 压缩后可持久化恢复并继续聊天`, async () => {
     const dir = tempDir();

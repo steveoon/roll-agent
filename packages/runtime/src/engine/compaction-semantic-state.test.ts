@@ -12,6 +12,8 @@ import {
   mergeCompactionSemanticState,
   renderCompactionSemanticModelContext,
   renderCompactionSemanticSummary,
+  replaceCompactionSemanticGoal,
+  replaceCompactionSemanticConstraints,
   seedLegacyCompactionSnapshotUncertainties,
   validateCompactionModelDraft,
   type CompactionModelDraft,
@@ -22,6 +24,54 @@ import {
 const SUCCESS_EXECUTION_ID = "2410ef09-e409-4209-a33e-8baeee665e4a";
 const FAILED_EXECUTION_ID = "7ac79ed8-a86c-4df8-b2c0-90cb71b82a27";
 const MANAGER_INSTANCE_ID = "83500e19-0ee3-4721-9ddb-58a8945aa7aa";
+
+for (const [name, source, expected] of [
+  ["BMP overflow", "中".repeat(600), `${"中".repeat(511)}…`],
+  ["emoji below limit", `${"中".repeat(509)}😀`, `${"中".repeat(509)}😀`],
+  ["emoji at limit", `${"中".repeat(510)}😀`, `${"中".repeat(510)}😀`],
+  ["emoji fits before ellipsis", `${"中".repeat(509)}😀尾尾`, `${"中".repeat(509)}😀…`],
+  ["emoji crosses truncation boundary", `${"中".repeat(510)}😀尾尾`, `${"中".repeat(510)}…`],
+  ["astral-only overflow", "😀".repeat(600), `${"😀".repeat(255)}…`],
+] as const) {
+  test(`compaction Unicode bounds: ${name}`, () => {
+    const initial = createEmptyCompactionSemanticState();
+    const goal = replaceCompactionSemanticGoal(initial, {
+      verbatimRequest: source,
+      sourceSequence: 1,
+    });
+    const constraints = replaceCompactionSemanticConstraints(initial, [
+      { quote: source, sourceSequence: 1 },
+    ]);
+    const registry = buildCompactionSemanticEvidenceRegistry({
+      messages: [{ sequence: 1, role: "user", summary: source }],
+      toolExecutions: [],
+      resources: [],
+      runningSessions: [],
+    });
+    const validated = validateCompactionModelDraft({
+      draft: emptyDraft(),
+      evidenceRegistry: registry,
+      harnessGoal: { verbatimRequest: source, sourceSequence: 1 },
+    });
+    assert.equal(goal.goal?.sourceQuotes[0], expected);
+    assert.equal(constraints.constraints[0]?.sourceQuotes[0], expected);
+    assert.equal(registry[0]?.summary, expected);
+    assert.equal(validated.state.goal?.sourceQuotes[0], expected);
+    for (const state of [goal, constraints, validated.state]) {
+      assert.doesNotThrow(() => compactionSemanticStateSchema.parse(state));
+      for (const item of [state.goal, ...state.constraints, ...state.uncertainties]) {
+        if (item === null) continue;
+        assert.ok(item.text.length <= 1_024);
+        assert.ok(item.text.isWellFormed());
+        for (const quote of item.sourceQuotes) {
+          assert.ok(quote.length <= 512);
+          assert.ok(quote.isWellFormed());
+        }
+      }
+    }
+    assert.deepEqual(initial, createEmptyCompactionSemanticState());
+  });
+}
 
 function emptyDraft(overrides: Partial<CompactionModelDraft> = {}): CompactionModelDraft {
   return compactionModelDraftSchema.parse({
