@@ -307,8 +307,8 @@ describe("buildRollConfigCatalog", () => {
     assert.deepEqual(node.options, ["sampling", "jev"]);
     assert.equal(node.defaultValue, "sampling");
     assert.deepEqual(node.optionLabels, {
-      sampling: "标准（Roll 模型）",
-      jev: "快速（TypeSafe Jev）",
+      sampling: "标准模式（默认）",
+      jev: "快速模式",
     });
   });
 

@@ -592,26 +592,25 @@ export const CONFIG_GUIDANCE_ENTRIES = [
   {
     path: "browser",
     title: "浏览器",
-    purpose: "管理浏览器实例及 browser_operate 的决策引擎。",
+    purpose: "管理浏览器实例，以及执行网页任务时使用的引擎。",
     defaultBehavior: "默认使用 Roll 模型执行 browser_operate；未声明实例时使用 legacy 单实例配置。",
     example: "browser:\n  operate:\n    engine: sampling\n  instances: {}",
   },
   {
     path: "browser.operate",
     title: "浏览器任务操作",
-    purpose: "选择 browser_operate 的决策引擎；同一套页面观察、阶段记忆和安全约束保持不变。",
-    defaultBehavior: "默认标准模式，使用 Roll 的 MCP Sampling 模型。",
+    purpose: "选择执行网页任务时使用的引擎。",
+    defaultBehavior: "标准模式沿用 Roll 的模型配置。",
     example: "browser:\n  operate:\n    engine: sampling",
   },
   {
     path: "browser.operate.engine",
     title: "操作模式",
     purpose:
-      "sampling 为标准模式，使用 Roll 模型；jev 为快速模式，调用 TypeSafe Jev，需配置 Agent 的 TYPESAFE_API_KEY。工具参数不能覆盖此设置。",
-    defaultBehavior:
-      "默认 sampling；启用 jev 后缺少密钥会在操作前报配置错误，不会回退到 sampling。",
-    example: "browser:\n  operate:\n    engine: jev",
-    optionLabels: { sampling: "标准（Roll 模型）", jev: "快速（TypeSafe Jev）" },
+      "标准模式沿用 Roll 的模型配置；快速模式需要在浏览器 Agent 的环境变量中单独配置服务密钥。更改后需重启浏览器 Agent 服务。",
+    defaultBehavior: "未设置时使用标准模式；选择快速模式但未配置密钥时，会提示补充配置。",
+    example: "browser:\n  operate:\n    engine: sampling",
+    optionLabels: { sampling: "标准模式（默认）", jev: "快速模式" },
   },
   {
     path: "browser.default-instance",
