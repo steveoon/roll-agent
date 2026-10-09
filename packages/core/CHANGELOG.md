@@ -1,5 +1,13 @@
 # @roll-agent/core
 
+## 0.42.4
+
+### Patch Changes
+
+- [#286](https://github.com/steveoon/roll-agent/pull/286) [`3982a66`](https://github.com/steveoon/roll-agent/commit/3982a66e2170a7ba5301ddf0e0432ca0de1242e3) Thanks [@steveoon](https://github.com/steveoon)! - 修复脚本安装的 Roll 在慢速网络下升级时，发行包下载被 npm 安装的 120 秒超时提前中断的问题。独立发行包下载默认允许 15 分钟，并可通过 `install.distribution-download-timeout-ms` 单独调整。升级增加下载量、百分比、速度、预计剩余时间及校验、解压、启动验证提示；超时和连接失败说明已下载大小、耗时及重试建议，网络错误保留底层原因，失败仍清理临时文件并保留当前版本。
+- Updated dependencies []:
+  - @roll-agent/runtime@0.25.2
+
 ## 0.42.3
 
 ### Patch Changes
