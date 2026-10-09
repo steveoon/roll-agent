@@ -1,5 +1,15 @@
 # @roll-agent/core
 
+## 0.42.3
+
+### Patch Changes
+
+- [#284](https://github.com/steveoon/roll-agent/pull/284) [`f42243a`](https://github.com/steveoon/roll-agent/commit/f42243af70f24311a1e2bcf7da46639b0f160464) Thanks [@steveoon](https://github.com/steveoon)! - Simplify browser task operation settings to two plainly named model choices, removing the duplicate default option and showing friendly names in the effective-value summary. Keep restoring defaults available as a separate action.
+
+- [#284](https://github.com/steveoon/roll-agent/pull/284) [`f42243a`](https://github.com/steveoon/roll-agent/commit/f42243af70f24311a1e2bcf7da46639b0f160464) Thanks [@steveoon](https://github.com/steveoon)! - 将复制对话的安装尾注更新为 macOS/Linux 与 Windows 的官方安装脚本命令，替换原 npm 全局安装提示。
+- Updated dependencies []:
+  - @roll-agent/runtime@0.25.2
+
 ## 0.42.2
 
 ### Patch Changes
