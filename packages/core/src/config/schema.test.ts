@@ -7,9 +7,22 @@ import {
   chatScreenModeSchema,
   chatThinkingDisplaySchema,
   rollConfigSchema,
+  installConfigSchema,
 } from "./schema.ts";
 
 describe("rollConfigSchema", () => {
+  it("validates an independent distribution download deadline without changing npm defaults", () => {
+    assert.equal(
+      installConfigSchema.parse({ distributionDownloadTimeoutMs: 1_800_000 }).networkTimeoutMs,
+      120_000,
+    );
+    for (const value of [0, 9999, 10_000.5, "900000"]) {
+      assert.equal(
+        installConfigSchema.safeParse({ distributionDownloadTimeoutMs: value }).success,
+        false,
+      );
+    }
+  });
   it("builds DEFAULT_CONFIG from schema defaults plus the required seed", () => {
     assert.deepEqual(
       DEFAULT_CONFIG,
@@ -28,6 +41,7 @@ describe("rollConfigSchema", () => {
     assert.equal(DEFAULT_CONFIG.chat.screenMode, "auto");
     assert.equal(DEFAULT_CONFIG.chat.thinkingDisplay, "collapsed");
     assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
+    assert.equal(DEFAULT_CONFIG.install.distributionDownloadTimeoutMs, 900_000);
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
     assert.equal(DEFAULT_CONFIG.browser.operate.engine, "sampling");
   });

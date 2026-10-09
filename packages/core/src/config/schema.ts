@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_DISTRIBUTION_DOWNLOAD_TIMEOUT_MS } from "../execution-environment/distribution-progress.ts";
 
 const browserPlatforms = ["zhipin", "yupao"] as const;
 const browserRuntimeModes = ["managed-cdp", "remote-cdp", "existing-session"] as const;
@@ -142,6 +143,12 @@ export const installConfigSchema = z.object({
   preferOffline: z.boolean().default(false),
   /** 单次 npm 安装命令的超时（毫秒）。 */
   networkTimeoutMs: z.number().int().min(10_000).default(120_000),
+  /** 独立发行包下载的总时限（毫秒），不影响 npm 安装或发行清单查询。 */
+  distributionDownloadTimeoutMs: z
+    .number()
+    .int()
+    .min(10_000)
+    .default(DEFAULT_DISTRIBUTION_DOWNLOAD_TIMEOUT_MS),
 });
 
 export const browserInstanceConfigSchema = z

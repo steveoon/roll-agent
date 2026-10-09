@@ -82,11 +82,18 @@ import {
   type SelfUpdateTarget,
 } from "../../execution-environment/self-update.ts";
 import {
+  DistributionDownloadTimeoutError,
+  DistributionDownloadNetworkError,
   DistributionUpdateInterruptedError,
   fetchDistributionManifest,
   prepareDistributionUpdate,
   type PreparedDistribution,
 } from "../../execution-environment/distribution.ts";
+import {
+  createDistributionUpdateReporter,
+  formatDistributionDownloadTimeout,
+  formatDistributionDownloadNetworkError,
+} from "../utils/distribution-update-progress.ts";
 import { acquireSchedulerAdmissionLockWithRetry } from "../../scheduler-host/scheduler-admission.ts";
 import { DAEMON_LIVENESS, inspectDaemon } from "../../scheduler-host/daemon-record.ts";
 import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
@@ -858,21 +865,31 @@ export default defineCommand({
     log.info("");
     let preparedDistribution: PreparedDistribution | undefined;
     if (selfUpdateTarget.channel === "standalone" && info.hasUpdate) {
-      const spinner = createSpinner(`下载并验证 Roll v${info.latest}...`).start();
+      const reporter = createDistributionUpdateReporter(info.latest);
       try {
         const manifest = await fetchDistributionManifest({
           version: info.latest,
-          timeoutMs: installConfig.networkTimeoutMs,
         });
         preparedDistribution = await prepareDistributionUpdate(executionEnvironment, manifest, {
-          timeoutMs: installConfig.networkTimeoutMs,
+          timeoutMs: installConfig.distributionDownloadTimeoutMs,
+          onEvent: reporter.onEvent,
         });
-        spinner.succeed(`Roll v${info.latest} 已验证，准备进入更新维护阶段`);
+        reporter.succeed(`Roll v${info.latest} 已验证，准备进入更新维护阶段`);
       } catch (error) {
-        spinner.fail("独立发行包下载或验证失败，当前版本与 Agent 保持原状");
-        log.error(error instanceof Error ? error.message : String(error));
+        reporter.fail("独立发行包下载或验证失败，当前版本与 Agent 保持原状");
+        log.error(
+          error instanceof DistributionDownloadTimeoutError
+            ? formatDistributionDownloadTimeout(error)
+            : error instanceof DistributionDownloadNetworkError
+              ? formatDistributionDownloadNetworkError(error)
+              : error instanceof Error
+                ? error.message
+                : String(error),
+        );
         process.exitCode = error instanceof DistributionUpdateInterruptedError ? error.exitCode : 1;
         return;
+      } finally {
+        reporter.stop();
       }
     }
     let registryLock: AgentRegistryLock | undefined;

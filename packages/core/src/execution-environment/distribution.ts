@@ -20,6 +20,12 @@ import {
 import { z } from "zod";
 import { resolveExecutionEnvironment, type ExecutionEnvironment } from "./index.ts";
 import { extractWindowsZip } from "./windows-zip.ts";
+import {
+  DEFAULT_DISTRIBUTION_DOWNLOAD_TIMEOUT_MS,
+  DISTRIBUTION_UPDATE_PHASES,
+  type DistributionDownloadProgress,
+  type DistributionUpdateEvent,
+} from "./distribution-progress.ts";
 
 export const DISTRIBUTION_ORIGIN = "https://roll.duliday.com";
 export const distributionVersionSchema = z
@@ -184,6 +190,28 @@ export class DistributionUpdateInterruptedError extends Error {
   }
 }
 
+export class DistributionDownloadTimeoutError extends Error {
+  readonly progress: DistributionDownloadProgress;
+  readonly timeoutMs: number;
+
+  constructor(progress: DistributionDownloadProgress, timeoutMs: number, cause: unknown) {
+    super(`Roll distribution download timed out after ${timeoutMs / 1000} seconds`, { cause });
+    this.name = "DistributionDownloadTimeoutError";
+    this.progress = progress;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export class DistributionDownloadNetworkError extends Error {
+  readonly progress: DistributionDownloadProgress;
+
+  constructor(progress: DistributionDownloadProgress, cause: unknown) {
+    super("Roll distribution download failed due to a network error", { cause });
+    this.name = "DistributionDownloadNetworkError";
+    this.progress = progress;
+  }
+}
+
 /** Download and smoke-test before acquiring Agent maintenance locks or changing current.txt. */
 export async function prepareDistributionUpdate(
   current: ExecutionEnvironment,
@@ -191,6 +219,7 @@ export async function prepareDistributionUpdate(
   options: {
     readonly timeoutMs?: number;
     readonly fetch?: typeof globalThis.fetch;
+    readonly onEvent?: (event: DistributionUpdateEvent) => void;
     readonly rename?: typeof rename;
     readonly smoke?: (
       environment: ExecutionEnvironment,
@@ -244,6 +273,7 @@ export async function prepareDistributionUpdate(
     const archive = join(scratch, asset.filename);
     await downloadDistributionAsset(manifest, asset, archive, { ...options, signal });
     signal.throwIfAborted();
+    options.onEvent?.({ phase: DISTRIBUTION_UPDATE_PHASES.extract });
     const candidate = join(scratch, "candidate");
     await mkdir(candidate);
     await extractDistributionArchive(archive, candidate, platform, signal);
@@ -268,6 +298,7 @@ export async function prepareDistributionUpdate(
     }
     const smokeHome = join(scratch, "smoke-home");
     await mkdir(smokeHome);
+    options.onEvent?.({ phase: DISTRIBUTION_UPDATE_PHASES.check });
     await (options.smoke ?? smokeDistribution)(environment, smokeHome, signal);
     signal.throwIfAborted();
     let activated = false;
@@ -400,6 +431,7 @@ export async function downloadDistributionAsset(
     readonly timeoutMs?: number;
     readonly fetch?: typeof globalThis.fetch;
     readonly signal?: AbortSignal;
+    readonly onEvent?: (event: DistributionUpdateEvent) => void;
   } = {},
 ): Promise<void> {
   const validated = distributionManifestSchema.parse(manifest);
@@ -407,37 +439,65 @@ export async function downloadDistributionAsset(
   if (JSON.stringify(expected) !== JSON.stringify(asset)) {
     throw new Error("Asset does not belong to manifest");
   }
-  const response = await (options.fetch ?? globalThis.fetch)(
-    `${DISTRIBUTION_ORIGIN}/releases/${validated.version}/${expected.filename}`,
-    {
-      redirect: "error",
-      signal: AbortSignal.any([
-        AbortSignal.timeout(options.timeoutMs ?? 180_000),
-        ...(options.signal ? [options.signal] : []),
-      ]),
-    },
-  );
-  if (!response.ok) throw new Error(`Roll distribution download HTTP ${response.status}`);
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Empty distribution archive");
-  const file = await open(destination, "wx", 0o600);
-  const hash = createHash("sha256");
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DISTRIBUTION_DOWNLOAD_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = AbortSignal.any([timeoutSignal, ...(options.signal ? [options.signal] : [])]);
+  const startedAt = performance.now();
   let size = 0;
+  const progress = (): DistributionDownloadProgress => ({
+    downloadedBytes: size,
+    totalBytes: expected.size,
+    elapsedMs: performance.now() - startedAt,
+  });
+  // Catch only transport operations: disk, validation and observer errors retain their identity.
+  const networkFailure = (error: unknown): never => {
+    if (signal.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+    throw new DistributionDownloadNetworkError(progress(), error);
+  };
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > expected.size) throw new Error("Roll distribution size mismatch");
-      hash.update(value);
-      await file.writeFile(value);
+    options.onEvent?.({ phase: DISTRIBUTION_UPDATE_PHASES.download, progress: progress() });
+    const response = await (options.fetch ?? globalThis.fetch)(
+      `${DISTRIBUTION_ORIGIN}/releases/${validated.version}/${expected.filename}`,
+      { redirect: "error", signal },
+    ).catch(networkFailure);
+    if (!response.ok) throw new Error(`Roll distribution download HTTP ${response.status}`);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Empty distribution archive");
+    try {
+      const file = await open(destination, "wx", 0o600);
+      const hash = createHash("sha256");
+      try {
+        for (;;) {
+          signal.throwIfAborted();
+          const { done, value } = await reader.read().catch(networkFailure);
+          if (done) break;
+          size += value.byteLength;
+          if (size > expected.size) throw new Error("Roll distribution size mismatch");
+          hash.update(value);
+          await file.writeFile(value);
+          signal.throwIfAborted();
+          options.onEvent?.({ phase: DISTRIBUTION_UPDATE_PHASES.download, progress: progress() });
+        }
+        signal.throwIfAborted();
+        options.onEvent?.({ phase: DISTRIBUTION_UPDATE_PHASES.verify });
+        if (size !== expected.size || hash.digest("hex") !== expected.sha256) {
+          throw new Error("Roll distribution checksum/size mismatch");
+        }
+      } finally {
+        await file.close();
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
     }
-    if (size !== expected.size || hash.digest("hex") !== expected.sha256) {
-      throw new Error("Roll distribution checksum/size mismatch");
+  } catch (error) {
+    if (
+      signal.aborted &&
+      signal.reason === timeoutSignal.reason &&
+      (error === timeoutSignal.reason || (error instanceof Error && error.name === "AbortError"))
+    ) {
+      throw new DistributionDownloadTimeoutError(progress(), timeoutMs, error);
     }
-  } finally {
-    await reader.cancel().catch(() => {});
-    await file.close();
+    throw error;
   }
 }
 

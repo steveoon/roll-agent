@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:http";
 import {
   mkdtemp,
   mkdir,
@@ -31,7 +32,10 @@ import {
   retryWindowsFileOperation,
   validateDistributionTree,
   type DistributionManifest,
+  DistributionDownloadTimeoutError,
+  DistributionDownloadNetworkError,
 } from "./distribution.ts";
+import type { DistributionUpdateEvent } from "./distribution-progress.ts";
 
 const platform = `${process.platform}-${process.arch}`;
 
@@ -323,6 +327,259 @@ test("streaming download rejects corrupt or oversized archives", async () => {
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("native fetch body abort is diagnosed as a download timeout with partial byte counts", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "roll-native-timeout-"));
+  const server = createServer((_request, response) => response.write("arc"));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const manifest = manifestFor(Buffer.from("archive"));
+  const destination = join(home, "archive");
+  await assert.rejects(
+    downloadDistributionAsset(manifest, manifest.assets[0]!, destination, {
+      timeoutMs: 2000,
+      fetch: (_url, options) => fetch("http://127.0.0.1:" + address.port, options),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof DistributionDownloadTimeoutError);
+      assert.equal(error.progress.downloadedBytes, 3);
+      assert.equal(error.progress.totalBytes, 7);
+      assert.ok(error.progress.elapsedMs >= 2000);
+      return true;
+    },
+  );
+  assert.equal(await readFile(destination, "utf8"), "arc");
+});
+
+test("native fetch connection loss retains partial byte counts and its transport cause", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "roll-native-disconnect-"));
+  let disconnect: (() => void) | undefined;
+  const server = createServer((_request, response) => {
+    response.write("arc");
+    disconnect = () => response.destroy();
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const manifest = manifestFor(Buffer.from("archive"));
+  await assert.rejects(
+    downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, "archive"), {
+      timeoutMs: 10_000,
+      fetch: (_url, options) => fetch("http://127.0.0.1:" + address.port, options),
+      onEvent: (event) => {
+        if (event.phase === "download" && event.progress.downloadedBytes === 3) {
+          assert.ok(disconnect);
+          disconnect();
+        }
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof DistributionDownloadNetworkError);
+      assert.equal(error.progress.downloadedBytes, 3);
+      assert.equal(error.progress.totalBytes, 7);
+      assert.ok(error.cause instanceof TypeError);
+      assert.equal(error.cause.message, "terminated");
+      assert.ok(error.cause.cause instanceof Error);
+      assert.match(error.cause.cause.message, /other side closed/);
+      return true;
+    },
+  );
+});
+
+test("fetch and body transport timeouts carry progress without becoming the total deadline error", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "roll-transport-timeout-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const manifest = manifestFor(Buffer.from("archive"));
+  for (const body of [false, true]) {
+    const cause = Object.assign(new Error(body ? "Body Timeout Error" : "Headers Timeout Error"), {
+      code: body ? "UND_ERR_BODY_TIMEOUT" : "UND_ERR_HEADERS_TIMEOUT",
+    });
+    const original = new TypeError(body ? "terminated" : "fetch failed", { cause });
+    await assert.rejects(
+      downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, String(body)), {
+        fetch: async () => {
+          if (!body) throw original;
+          let sent = false;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              pull(controller) {
+                if (!sent) {
+                  sent = true;
+                  controller.enqueue(Buffer.from("arc"));
+                } else controller.error(original);
+              },
+            }),
+          );
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof DistributionDownloadNetworkError);
+        assert.equal(error.cause, original);
+        assert.equal(error.progress.downloadedBytes, body ? 3 : 0);
+        assert.equal(error.progress.totalBytes, 7);
+        return true;
+      },
+    );
+  }
+});
+
+test("abort, filesystem and observer failures are not relabeled as network errors", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "roll-download-error-identity-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bytes = Buffer.from("archive");
+  const manifest = manifestFor(bytes);
+  const aborted = new DOMException("cancelled", "AbortError");
+  await assert.rejects(
+    downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, "abort"), {
+      fetch: async () => {
+        throw aborted;
+      },
+    }),
+    (error: unknown) => error === aborted,
+  );
+  await assert.rejects(
+    downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, "missing/archive"), {
+      fetch: async () => new Response(bytes),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "code" in error && error.code === "ENOENT");
+      assert.equal(error instanceof DistributionDownloadNetworkError, false);
+      return true;
+    },
+  );
+  const observer = new Error("observer failed");
+  await assert.rejects(
+    downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, "observer"), {
+      fetch: async () => new Response(bytes),
+      onEvent: (event) => {
+        if (event.phase === "download" && event.progress.downloadedBytes > 0) throw observer;
+      },
+    }),
+    (error: unknown) => error === observer,
+  );
+});
+
+test("default archive deadline permits a slow download beyond the old 120 seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  t.mock.method(performance, "now", () => Date.now());
+  const deadlines: number[] = [];
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    deadlines.push(ms);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), ms);
+    return controller.signal;
+  });
+  const home = await mkdtemp(join(tmpdir(), "roll-slow-download-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bytes = Buffer.from("archive");
+  const manifest = manifestFor(bytes);
+  const events: DistributionUpdateEvent[] = [];
+  const halfway = Promise.withResolvers<void>();
+  const stream = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = stream.writable.getWriter();
+  const pending = downloadDistributionAsset(manifest, manifest.assets[0]!, join(home, "archive"), {
+    fetch: async () => new Response(stream.readable),
+    onEvent: (event) => {
+      events.push(event);
+      if (event.phase === "download" && event.progress.downloadedBytes > 0) halfway.resolve();
+    },
+  });
+  await writer.write(bytes.subarray(0, 3));
+  await halfway.promise;
+  t.mock.timers.tick(120_001);
+  await writer.write(bytes.subarray(3));
+  await writer.close();
+  await pending;
+  assert.deepEqual(deadlines, [900_000]);
+  assert.deepEqual(await readFile(join(home, "archive")), bytes);
+  assert.equal(events[0]?.phase, "download");
+  assert.equal(events.at(-1)?.phase, "verify");
+  const completed = events.at(-2);
+  assert.equal(completed?.phase, "download");
+  if (completed?.phase === "download") {
+    assert.equal(completed.progress.downloadedBytes, bytes.length);
+    assert.equal(completed.progress.elapsedMs, 120_001);
+  }
+});
+
+test("download timeout reports partial bytes and removes scratch without changing the old version", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  t.mock.method(performance, "now", () => Date.now());
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), ms);
+    return controller.signal;
+  });
+  const home = await mkdtemp(join(tmpdir(), "roll-timeout-cleanup-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const old = join(home, "versions/1.0.0");
+  await fixtureVersion(old, "1.0.0");
+  await writeFile(join(home, "installation.json"), '{"schemaVersion":1,"channel":"standalone"}');
+  await writeFile(join(home, "current.txt"), "1.0.0\n");
+  const halfway = Promise.withResolvers<void>();
+  const events: DistributionUpdateEvent[] = [];
+  const pending = prepareDistributionUpdate(
+    resolveExecutionEnvironment({ packageRoot: join(old, "app") }),
+    manifestFor(Buffer.from("archive")),
+    {
+      timeoutMs: 10_000,
+      fetch: async (_url, options) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(Buffer.from("arc"));
+              options?.signal?.addEventListener(
+                "abort",
+                () => controller.error(options.signal?.reason),
+                { once: true },
+              );
+            },
+          }),
+        ),
+      onEvent: (event) => {
+        events.push(event);
+        if (event.phase === "download" && event.progress.downloadedBytes > 0) halfway.resolve();
+      },
+    },
+  );
+  const rejected = assert.rejects(pending, (error: unknown) => {
+    assert.ok(error instanceof DistributionDownloadTimeoutError);
+    assert.equal(error.timeoutMs, 10_000);
+    assert.deepEqual(error.progress, { downloadedBytes: 3, totalBytes: 7, elapsedMs: 10_000 });
+    return true;
+  });
+  await halfway.promise;
+  t.mock.timers.tick(10_000);
+  await rejected;
+  assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
+  assert.equal(
+    (await readdir(home)).some((name) => name === ".install-lock" || name.startsWith(".update-")),
+    false,
+  );
+  assert.equal(
+    events.some((event) => event.phase !== "download"),
+    false,
+  );
+  const release = await acquireDistributionLock(home);
+  await release();
+});
 test("archive entry validation rejects traversal, unexpected roots and Windows paths", () => {
   for (const name of [
     "../escape",
@@ -430,9 +687,11 @@ test(
       const bytes = await readFile(archive);
       const environment = resolveExecutionEnvironment({ packageRoot: join(old, "app") });
       let smoked = false;
+      const events: DistributionUpdateEvent[] = [];
       let failure: "candidate" | "pointer" = "candidate";
       let prepared = await prepareDistributionUpdate(environment, manifestFor(bytes), {
         fetch: async () => new Response(new Uint8Array(bytes)),
+        onEvent: (event) => events.push(event),
         smoke: async (env) => {
           smoked = true;
           assert.equal(env.installation.version, "1.0.1");
@@ -446,6 +705,10 @@ test(
       });
       try {
         assert.equal(smoked, true);
+        assert.deepEqual(
+          events.filter((event) => event.phase !== "download").map((event) => event.phase),
+          ["verify", "extract", "check"],
+        );
         assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
         await assert.rejects(acquireDistributionLock(home), /Another Roll/);
         await assert.rejects(prepared.activate(), /Cannot activate Roll.*candidate still in use/);

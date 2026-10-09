@@ -550,7 +550,8 @@ export const CONFIG_GUIDANCE_ENTRIES = [
   {
     path: "install",
     title: "安装与更新",
-    purpose: "控制 Agent 安装和 Roll 更新时使用的 npm 软件源、重试、缓存与超时。",
+    purpose:
+      "控制 Agent 安装和 Roll 更新时使用的 npm 软件源、重试、缓存、npm 超时与独立发行包下载超时。",
     defaultBehavior: "默认使用 npm 自身的软件源，并采用 Roll 的安全网络默认值。",
     example: `install:\n  fetch-retries: ${DEFAULT_CONFIG.install.fetchRetries}\n  prefer-offline: false`,
     setupCommand: "roll config setup install",
@@ -586,6 +587,13 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.install.networkTimeoutMs}\`，即 120 秒。`,
     example: `install:\n  network-timeout-ms: ${DEFAULT_CONFIG.install.networkTimeoutMs}`,
     setupCommand: "roll config setup install",
+  },
+  {
+    path: "install.distribution-download-timeout-ms",
+    title: "独立发行包下载超时",
+    purpose: "限制脚本安装的 Roll 在升级时下载独立发行包的总时间，单位毫秒。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.install.distributionDownloadTimeoutMs}\`，即 15 分钟；不影响 npm 安装或发行清单查询。`,
+    example: `install:\n  distribution-download-timeout-ms: ${DEFAULT_CONFIG.install.distributionDownloadTimeoutMs}`,
   },
 
   // Browser
