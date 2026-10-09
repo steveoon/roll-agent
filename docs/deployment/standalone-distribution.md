@@ -74,6 +74,36 @@ CI 上传到唯一 `staging/<run-id>-<attempt>`。`finalize.sh` 在服务器取�
 
 六平台构建失败不会移动 stable。相同版本再次上传必须逐文件相同，校验一致后删除本次重复 staging；失败 staging 保留供排查。不同 commit 或工具链产生不同资产应提升 Core 版本。失败 staging 目录保留供排查，不能把不完整 staging 指向 stable。只有确认没有发布进程后，运维才可以移除遗留 `.publish-lock`；CI 不自动打破未知锁，也不清理旧发行版本。
 
+## 用户升级与慢速下载
+
+脚本安装的 Roll 通过 `roll update` 下载独立发行包。发行清单查询的时限为 30 秒，发行包下载的总时限默认 15 分钟，与安装脚本一致。下载时显示已下载大小、总大小、百分比、平均速度和预计剩余时间；终端每秒刷新，非交互日志每 5 秒输出。下载结束后分别提示校验、解压与启动验证。进度达到 100% 仅代表下载完成，全部验证通过后才进入更新维护阶段。
+
+慢速网络可以单独调整发行包下载时限，例如 30 分钟：
+
+```sh
+roll config set install.distribution-download-timeout-ms 1800000
+```
+
+对应的配置为：
+
+```yaml
+install:
+  distribution-download-timeout-ms: 1800000
+```
+
+`install.network-timeout-ms` 继续控制 npm 安装，默认 120 秒；它不再控制发行包下载或发行清单查询。正常下载失败会清理不完整包和临时目录，保留当前版本；重试会重新下载。
+
+总下载时限与连接等待时限不同：Node 内置 fetch 默认等待响应头或连续无响应体数据的时限为约 5 分钟，网络连接阶段也可能更早超时。调大总下载时限不会延长这些底层时限。连接断开或底层超时会显示已下载大小、耗时和底层原因；未收到数据时优先检查网络和代理。[Undici 超时说明](https://github.com/nodejs/undici/blob/main/docs/docs/api/Client.md)。
+
+仍在运行 0.42.3 及更早脚本安装版本的用户，应先使用旧版支持的配置跨过首次升级；已有配置文件时运行：
+
+```sh
+roll config set install.network-timeout-ms 900000
+roll update
+```
+
+未创建配置文件时，先运行 `roll config init`，或在已有 `roll.config.yaml` 的 `install` 段设置该字段。升级到修复版后，可将 `install.network-timeout-ms` 恢复为 `120000`，独立发行包仍默认允许下载 15 分钟。
+
 ## 上线验收
 
 先确认网站根路由行为不变、缺失 `/releases/...` 返回 404、脚本返回纯文本、TLS 和缓存头正确。然后在六个平台的无 Node/npm 环境从真实 HTTPS URL 安装版本 A，安装并调用真实 npm Agent。发布不同版本 B 后运行 `roll update`，核对 CLI、Agent 和已配置后台服务的实际解释器及版本。

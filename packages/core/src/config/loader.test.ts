@@ -673,6 +673,7 @@ agents:
     assert.equal(installConfig.fetchRetries, 3);
     assert.equal(installConfig.preferOffline, false);
     assert.equal(installConfig.networkTimeoutMs, 120_000);
+    assert.equal(installConfig.distributionDownloadTimeoutMs, 900_000);
   });
 
   it("loadInstallConfig should parse an explicit registry and overrides", () => {
@@ -688,6 +689,7 @@ install:
   fetch-retries: 5
   prefer-offline: false
   network-timeout-ms: 200000
+  distribution-download-timeout-ms: 1800000
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
 
@@ -696,6 +698,7 @@ install:
     assert.equal(installConfig.fetchRetries, 5);
     assert.equal(installConfig.preferOffline, false);
     assert.equal(installConfig.networkTimeoutMs, 200_000);
+    assert.equal(installConfig.distributionDownloadTimeoutMs, 1_800_000);
   });
 
   it("loadInstallConfig should resolve env var placeholders in registry", () => {
