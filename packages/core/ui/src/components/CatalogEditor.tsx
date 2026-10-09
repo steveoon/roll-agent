@@ -488,10 +488,18 @@ export function PrimitiveField({
   );
   const configuredSecret = secretPresentation.configured;
   const changed = invalidJsonDraft !== undefined || !sameConfigValue(value, baselineValue);
+  const displayValue =
+    node.kind === "enum" && typeof value === "string"
+      ? (node.optionLabels?.[value] ?? value)
+      : value;
+  const displayDefault =
+    node.kind === "enum" && typeof node.defaultValue === "string"
+      ? (node.optionLabels?.[node.defaultValue] ?? node.defaultValue)
+      : node.defaultValue;
   const state = describeFieldState({
     present,
-    value,
-    ...(node.defaultValue !== undefined ? { defaultValue: node.defaultValue } : {}),
+    value: displayValue,
+    ...(displayDefault !== undefined ? { defaultValue: displayDefault } : {}),
     configuredSecret,
     secret: secretPresentation.secret,
     required: node.persistedRequired,
@@ -799,12 +807,19 @@ function EnumControl({
   path,
   onValidityChange,
 }: PrimitiveControlProps & { readonly node: ConfigEnumCatalogNode }) {
+  const browserMode = validationPath(path) === "browser.operate.engine";
   return (
     <div className="config-value-control">
       <select
         id={id}
         name={validationPath(path)}
-        value={present && typeof value === "string" ? value : "__inherit__"}
+        value={
+          present && typeof value === "string"
+            ? value
+            : browserMode && typeof node.defaultValue === "string"
+              ? node.defaultValue
+              : "__inherit__"
+        }
         disabled={disabled}
         autoComplete="off"
         onChange={(event) => {
@@ -813,11 +828,13 @@ function EnumControl({
           else onValue(event.target.value);
         }}
       >
-        <option value="__inherit__">
-          {node.defaultValue === undefined
-            ? "未设置"
-            : `使用默认值（${node.optionLabels?.[String(node.defaultValue)] ?? String(node.defaultValue)}）`}
-        </option>
+        {!browserMode && (
+          <option value="__inherit__">
+            {node.defaultValue === undefined
+              ? "未设置"
+              : `使用默认值（${node.optionLabels?.[String(node.defaultValue)] ?? String(node.defaultValue)}）`}
+          </option>
+        )}
         {node.options.map((option) => (
           <option key={option} value={option}>
             {node.optionLabels?.[option] ?? option}
