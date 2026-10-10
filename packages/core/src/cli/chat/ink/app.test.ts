@@ -9,6 +9,7 @@ import { ChatApp } from "./app.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
+import type { ThinkingLevel } from "../../../llm/thinking-levels.ts";
 
 // A failed assertion must not leave Ink mounts/timers alive and hang the test worker.
 afterEach(() => cleanup());
@@ -1603,6 +1604,91 @@ test("ChatApp keeps the switched model in its status after /resume", async () =>
   unmount();
 });
 
+test("ChatApp preserves model-selected and manually changed efforts across resume", async () => {
+  const first = switchableFakeSession("effort-first");
+  const second = switchableFakeSession("effort-second", [
+    { role: "user", content: "恢复第二会话" },
+  ]);
+  const third = switchableFakeSession("effort-third", [{ role: "user", content: "恢复第三会话" }]);
+  let requestEffort: ThinkingLevel = "max";
+  let levels: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "subscription",
+      initialThinkingLevel: "max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      getThinkingLevels: () => levels,
+      onThinkingChange: (effort) => {
+        if (!levels.includes(effort)) throw new Error("unsupported");
+        requestEffort = effort;
+      },
+      sessionSwitching: {
+        loadItems: (id) => [
+          {
+            id: id === "effort-first" ? "effort-second" : "effort-third",
+            title: "下一会话",
+            meta: "历史",
+          },
+        ],
+        resume: async (id) => (id === "effort-second" ? second.session : third.session),
+        onRetired: () => {},
+      },
+      modelSwitching: {
+        loadItems: () => [],
+        getThinkingLevels: async () => ["low", "medium", "high"] as const,
+        switchTo: async (input, effort) => {
+          requestEffort = effort ?? requestEffort;
+          levels = ["low", "medium", "high"];
+          return {
+            id: input,
+            model: "api-target",
+            contextWindow: undefined,
+            thinkingLevel: requestEffort,
+          };
+        },
+        setAsDefault: async () => "saved",
+      },
+    }),
+  );
+  try {
+    await delay(20);
+    stdin.write("/model openai/target\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /是否设为默认/));
+    assert.equal(requestEffort, "low");
+    stdin.write("\u001b");
+    await delay(20);
+    stdin.write("/resume\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第二会话/));
+    assert.match(plain(lastFrame() ?? ""), /🧠 low/);
+    await delay(20);
+    stdin.write("/effort\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：low/));
+    assert.equal(requestEffort, "low");
+    stdin.write("\x1b[46;3u");
+    await waitFor(() => assert.equal(requestEffort, "medium"));
+    stdin.write("/resume\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第三会话/));
+    assert.match(plain(lastFrame() ?? ""), /🧠 medium/);
+    await delay(20);
+    stdin.write("/effort\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：medium/));
+    assert.match(plain(lastFrame() ?? ""), /api-target/);
+    stdin.write("/model openai/target\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /是否设为默认/));
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /请选择推理档位/);
+  } finally {
+    unmount();
+  }
+});
+
 test("ChatApp keeps current session when resume fails", async () => {
   const first = switchableFakeSession("s1");
   const { stdin, lastFrame, unmount } = render(
@@ -1754,6 +1840,96 @@ test("ChatApp rejects unsupported thinking without changing the displayed or act
   assert.deepEqual(selected, []);
   stdin.write("/think on\r");
   await waitFor(() => assert.deepEqual(selected, ["medium"]));
+  unmount();
+});
+
+test("ChatApp lists subscription efforts and accepts xhigh/max while preserving invalid changes", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const selected: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription",
+      initialThinkingLevel: "high",
+      getThinkingLevels: () => ["low", "medium", "high", "xhigh", "max"] as const,
+      onThinkingChange: (level) => {
+        selected.push(level);
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/effort\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /xhigh.*max/));
+  stdin.write("/effort xhigh\r");
+  await waitFor(() => assert.deepEqual(selected, ["xhigh"]));
+  stdin.write("/effort max\r");
+  await waitFor(() => assert.deepEqual(selected, ["xhigh", "max"]));
+  stdin.write("/effort unknown\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /用法: \/effort/));
+  assert.deepEqual(selected, ["xhigh", "max"]);
+  unmount();
+});
+
+test("ChatApp incompatible model switch requires effort selection and cancellation leaves model intact", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const switches: Array<{ input: string; effort: string | undefined }> = [];
+  let activeLevels: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription",
+      initialThinkingLevel: "max",
+      getThinkingLevels: () => activeLevels,
+      modelSwitching: {
+        loadItems: () => [],
+        getThinkingLevels: async () => ["low", "medium", "high"] as const,
+        switchTo: async (input, effort) => {
+          switches.push({ input, effort });
+          activeLevels = ["low", "medium", "high"];
+          return {
+            id: input,
+            model: "api-target",
+            contextWindow: undefined,
+            ...(effort ? { thinkingLevel: effort } : {}),
+          };
+        },
+        setAsDefault: async () => "saved",
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/model openai/target\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+  assert.deepEqual(switches, []);
+  stdin.write("\u001b");
+  await delay(30);
+  assert.deepEqual(switches, []);
+  assert.match(plain(lastFrame() ?? ""), /subscription/);
+  stdin.write("/model openai/target\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+  stdin.write("\r");
+  await waitFor(() => assert.equal(switches.length, 1));
+  assert.deepEqual(switches, [{ input: "openai/target", effort: "low" }]);
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /api-target/));
+  stdin.write("\u001b");
+  await delay(20);
+  stdin.write("/effort\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：low/));
+  stdin.write("/effort max\r");
+  await waitFor(() =>
+    assert.match(plain(lastFrame() ?? ""), /用法: \/effort low \| medium \| high/),
+  );
+  assert.equal(switches.length, 1);
   unmount();
 });
 

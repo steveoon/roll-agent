@@ -151,6 +151,49 @@ test("API-key initialization and switching retain original provider without touc
   assert.deepEqual(selected, []);
 });
 
+test("extended subscription initializes and switches with independent compaction effort", async () => {
+  const { auth } = fixture();
+  auth.models = async () => [
+    {
+      slug: "subscription-slug",
+      displayName: "Fixture",
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    },
+  ];
+  const cfg = config({
+    provider: "chatgpt",
+    model: "subscription-slug",
+    thinkingLevel: "max",
+    compaction: { thinkingLevel: "low" },
+  });
+  const resolved = await resolveInteractiveChatLlm(cfg, { auth });
+  assert.deepEqual(resolved.providerOptions, { openai: { reasoningEffort: "max" } });
+  assert.deepEqual(resolved.structuredOutputProviderOptions, {
+    openai: { reasoningEffort: "low" },
+  });
+  const switched = await resolveInteractiveChatSwitch(
+    cfg,
+    { provider: "chatgpt", model: "subscription-slug" },
+    "xhigh",
+    saved,
+    auth,
+  );
+  assert.deepEqual(switched.providerOptions, { openai: { reasoningEffort: "xhigh" } });
+  assert.deepEqual(switched.structuredOutputProviderOptions, {
+    openai: { reasoningEffort: "low" },
+  });
+  await assert.rejects(
+    resolveInteractiveChatSwitch(
+      config(),
+      { provider: "openai", model: "gpt-api" },
+      "max",
+      undefined,
+      auth,
+    ),
+    /不支持推理强度/,
+  );
+});
+
 test("subscription switch revalidates live account catalog and carries compaction options", async () => {
   const { auth, selected } = fixture();
   const switched = await resolveInteractiveChatSwitch(

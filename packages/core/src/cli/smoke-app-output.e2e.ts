@@ -14,9 +14,14 @@ import {
   cleanupSpawnedRollProcess,
 } from "./smoke.e2e-harness.ts";
 
-for (const command of ["run", "ask"] as const) {
+for (const [command, thinkingLevel] of [
+  ["run", undefined],
+  ["ask", undefined],
+  ["run", "max"],
+  ["ask", "max"],
+] as const) {
   test(
-    `CLI ${command} preserves completed execution when structured output is invalid`,
+    `CLI ${command} preserves completed execution when structured output is invalid${thinkingLevel ? " with subscription max" : ""}`,
     { timeout: 30000 },
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "roll-cli-app-output-"));
@@ -75,6 +80,9 @@ for (const command of ["run", "ask"] as const) {
                 qwen: { apiKey: "fixture-only", baseUrl: `http://127.0.0.1:${address.port}/v1` },
               },
             },
+            ...(thinkingLevel
+              ? { runtime: { provider: "chatgpt", model: "subscription-fixture", thinkingLevel } }
+              : {}),
             agents: {
               dataDir: join(dir, "agents"),
               env: {
@@ -104,6 +112,7 @@ for (const command of ["run", "ask"] as const) {
           command === "run" ? true : "success",
         );
         assert.match(process.output.stderr, /Tool execution completed/);
+        if (thinkingLevel) assert.match(process.output.stderr, /独立 API Sampling.*默认 medium/);
         assert.equal(readFileSync(join(dir, "count"), "utf8"), "1");
       } finally {
         if (process) await cleanupSpawnedRollProcess(process, "app output CLI fixture");

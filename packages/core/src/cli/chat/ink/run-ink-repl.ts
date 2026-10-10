@@ -33,6 +33,7 @@ export interface RunInkReplOptions {
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
+  readonly getThinkingLevels?: () => readonly ThinkingLevel[];
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
   readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
@@ -141,6 +142,7 @@ export async function runInkRepl(
           ? { initialThinkingDisplay: options.initialThinkingDisplay }
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
+        ...(options.getThinkingLevels ? { getThinkingLevels: options.getThinkingLevels } : {}),
         ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),

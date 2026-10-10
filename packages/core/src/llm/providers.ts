@@ -10,14 +10,18 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { wrapLanguageModel } from "ai";
-import { runtimeThinkingLevels } from "../config/schema.ts";
+import {
+  requireLegacyThinkingLevel,
+  type LegacyThinkingLevel,
+  type ThinkingLevel,
+} from "./thinking-levels.ts";
 import {
   isRootDefinitionReference,
   JSON_SCHEMA_REF_ISSUE_REASONS,
   type JsonSchemaRefIssue,
 } from "../tool-runtime/json-schema-refs.ts";
 
-export type ThinkingLevel = (typeof runtimeThinkingLevels)[number];
+export type { ThinkingLevel } from "./thinking-levels.ts";
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
 type GoogleThinkingConfig = NonNullable<GoogleGenerativeAIProviderOptions["thinkingConfig"]>;
 
@@ -105,7 +109,7 @@ function isGemini25Pro(modelName: string): boolean {
   return modelName.toLowerCase().includes("gemini-2.5-pro");
 }
 
-function googleThinkingConfig(modelName: string, level: ThinkingLevel): GoogleThinkingConfig {
+function googleThinkingConfig(modelName: string, level: LegacyThinkingLevel): GoogleThinkingConfig {
   if (isGemini3OrLater(modelName)) {
     return level === "off"
       ? { thinkingLevel: minimalGemini3ThinkingLevel(modelName) }
@@ -120,8 +124,9 @@ function googleThinkingConfig(modelName: string, level: ThinkingLevel): GoogleTh
 export function thinkingProviderOptions(
   providerName: string,
   modelName: string,
-  level: ThinkingLevel,
+  requestedLevel: ThinkingLevel,
 ): SharedV4ProviderOptions | undefined {
+  const level = requireLegacyThinkingLevel(requestedLevel, providerName);
   if (providerName === "openai") {
     if (level === "off") {
       return supportsOpenAINoneReasoningEffort(modelName)
@@ -259,14 +264,14 @@ export interface ResolvedLLMCall {
   readonly providerOptions?: SharedV4ProviderOptions;
 }
 
-function unifiedReasoningForThinkingLevel(level: ThinkingLevel): UnifiedReasoning {
+function unifiedReasoningForThinkingLevel(level: LegacyThinkingLevel): UnifiedReasoning {
   return level === "off" ? "none" : level;
 }
 
 function resolveStructuredOutputReasoning(
   providerName: string,
   modelName: string,
-  level: ThinkingLevel,
+  level: LegacyThinkingLevel,
 ): UnifiedReasoning | undefined {
   if (providerName === "openai") {
     if (!isOpenAIReasoningModel(modelName)) {
@@ -343,8 +348,9 @@ export function resolveLLMCall(
   apiKey: string,
   purpose: LLMCallPurpose,
   baseURL?: string,
-  thinkingLevel: ThinkingLevel = "medium",
+  requestedLevel: ThinkingLevel = "medium",
 ): ResolvedLLMCall {
+  const thinkingLevel = requireLegacyThinkingLevel(requestedLevel, providerName);
   const model = createProviderModel(providerName, modelName, apiKey, baseURL);
 
   if (purpose === "structured-output") {

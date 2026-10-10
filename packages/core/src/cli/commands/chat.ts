@@ -4,6 +4,7 @@ import { isCancel, select } from "@clack/prompts";
 import type { AgentSession } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { chatGptThinkingLevels, legacyThinkingLevels } from "../../llm/thinking-levels.ts";
 import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
 import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
 import { getChatGptAuthService } from "../../auth/chatgpt/service.ts";
@@ -826,6 +827,12 @@ export default defineCommand({
                 usedInk = true;
               },
               signal: signalScope.signal,
+              getThinkingLevels: () =>
+                currentProvider === "chatgpt"
+                  ? chatGptThinkingLevels(
+                      subscriptionModels.find(({ slug }) => slug === currentModel),
+                    )
+                  : legacyThinkingLevels,
               onThinkingChange: (level) => {
                 session.setProviderOptions(
                   currentProvider === "chatgpt"
@@ -857,7 +864,27 @@ export default defineCommand({
                   }
                   return chatModelPickerItems(config, subscriptionModels, current);
                 },
-                switchTo: async (input) => {
+                getThinkingLevels: async (input) => {
+                  const selected = findLlmModelChoice(
+                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
+                    input,
+                  );
+                  if (selected?.provider !== "chatgpt" && !input.startsWith("chatgpt/")) {
+                    return legacyThinkingLevels;
+                  }
+                  const choices = await loadAuthenticatedChatGptModels(
+                    getChatGptAuthService(),
+                    subscriptionAccountId,
+                  );
+                  subscriptionModels = choices.models;
+                  subscriptionAccountId = choices.accountId;
+                  const model = subscriptionModels.find(
+                    ({ slug }) => `chatgpt/${slug}` === input || slug === selected?.model,
+                  );
+                  if (!model) throw new Error(`当前账号不提供模型 "${input}"`);
+                  return chatGptThinkingLevels(model);
+                },
+                switchTo: async (input, selectedEffort) => {
                   if (input.startsWith("chatgpt/") && subscriptionModels.length === 0) {
                     const choices = await loadAuthenticatedChatGptModels(
                       getChatGptAuthService(),
@@ -877,13 +904,15 @@ export default defineCommand({
                     await resolveInteractiveChatSwitch(
                       config,
                       choice,
-                      currentThinkingLevel,
+                      selectedEffort ?? currentThinkingLevel,
                       subscriptionAccountId,
                     ),
                   );
                   currentProvider = choice.provider;
                   currentModel = choice.model;
+                  currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
                   return {
+                    thinkingLevel: currentThinkingLevel,
                     id: choice.id,
                     model: choice.model,
                     contextWindow: resolution?.window,
@@ -900,6 +929,7 @@ export default defineCommand({
                   }
                   const written = writeDefaultLlm({
                     ...choice,
+                    thinkingLevel: currentThinkingLevel,
                     ...(subscriptionAccountId ? { chatgptAccountId: subscriptionAccountId } : {}),
                   });
                   return `已将默认 LLM 设为 ${choice.id}（写入 ${written.configPath}）`;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { RollUiApi } from "../api.ts";
+import type { ChatGptModelCatalog } from "../lib/thinking-catalog.ts";
 
 type ChatGptStatus = Awaited<ReturnType<RollUiApi["getChatGptStatus"]>>;
 type ChatGptModels = Awaited<ReturnType<RollUiApi["getChatGptModels"]>>;
@@ -12,6 +13,7 @@ interface ChatGptAccountPanelProps {
   readonly enabled: boolean;
   readonly onAccount: (accountId: string) => void;
   readonly onModel: (model: string, accountId: string) => void;
+  readonly onModels?: (catalog: ChatGptModelCatalog) => void;
 }
 
 const LOGIN_LABELS = {
@@ -31,6 +33,7 @@ export function ChatGptAccountPanel({
   enabled,
   onAccount,
   onModel,
+  onModels,
 }: ChatGptAccountPanelProps) {
   const [status, setStatus] = useState<ChatGptStatus>();
   const [models, setModels] = useState<ChatGptModels>([]);
@@ -56,17 +59,32 @@ export function ChatGptAccountPanel({
         if (active) setStatus(value);
       },
       (reason: unknown) => {
-        if (active) setError(describeError(reason));
+        if (active) {
+          setError(describeError(reason));
+          onModels?.({
+            ...(accountId === undefined ? {} : { accountId }),
+            models: [],
+            status: "unavailable",
+          });
+        }
       },
     );
     return () => {
       active = false;
     };
-  }, [api, statusRevision]);
+  }, [api, statusRevision, accountId, onModels]);
 
   useEffect(() => {
     let active = true;
     setModels([]);
+    onModels?.({
+      ...(selectedId === undefined ? {} : { accountId: selectedId }),
+      models: [],
+      status:
+        status === undefined || (account?.connected === true && account.authorized === true)
+          ? "loading"
+          : "unavailable",
+    });
     setModelsLoading(false);
     if (selectedId === undefined || account?.connected !== true || account.authorized !== true) {
       return;
@@ -78,11 +96,15 @@ export function ChatGptAccountPanel({
         (value) => {
           if (active) {
             setModels(value);
+            onModels?.({ accountId: selectedId, models: value, status: "ready" });
             setError(undefined);
           }
         },
         (reason: unknown) => {
-          if (active) setError(describeError(reason));
+          if (active) {
+            setError(describeError(reason));
+            onModels?.({ accountId: selectedId, models: [], status: "unavailable" });
+          }
         },
       )
       .finally(() => {
@@ -91,7 +113,15 @@ export function ChatGptAccountPanel({
     return () => {
       active = false;
     };
-  }, [api, selectedId, account?.connected, account?.authorized, statusRevision]);
+  }, [
+    api,
+    selectedId,
+    account?.connected,
+    account?.authorized,
+    status === undefined,
+    statusRevision,
+    onModels,
+  ]);
 
   useEffect(() => {
     if (progress === undefined || !loginActive) return;

@@ -63,11 +63,17 @@ it("subscription default stays in runtime without replacing API-key defaults", (
   );
   try {
     writeDefaultLlm(
-      { provider: "chatgpt", model: "subscription-slug", chatgptAccountId: "registration-one" },
+      {
+        provider: "chatgpt",
+        model: "subscription-slug",
+        chatgptAccountId: "registration-one",
+        thinkingLevel: "max",
+      },
       { configPath },
     );
     const config = loadConfig({ cwd: dir }).config;
     assert.equal(config.runtime.provider, "chatgpt");
+    assert.equal(config.runtime.thinkingLevel, "max");
     assert.equal(config.runtime.model, "subscription-slug");
     assert.equal(config.runtime.chatgptAccountId, "registration-one");
     assert.equal(config.llm.defaultProvider, "openai");

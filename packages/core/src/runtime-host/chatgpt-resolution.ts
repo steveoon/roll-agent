@@ -2,6 +2,7 @@ import type { EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { getChatGptAuthService } from "../auth/chatgpt/service.ts";
 import { createChatGptModel } from "../llm/chatgpt-model.ts";
+import { chatGptThinkingLevels } from "../llm/thinking-levels.ts";
 import type { LlmModelChoice } from "../llm/model-choices.ts";
 import { listLlmModelChoices } from "../llm/model-choices.ts";
 import type { SessionPickerItem } from "../cli/chat/session-picker-format.ts";
@@ -90,9 +91,10 @@ export function chatGptThinkingOptions(
   model?: ChatGptModels[number],
 ) {
   const effort = level === "off" ? "none" : level;
-  if (model?.reasoningEfforts && !model.reasoningEfforts.includes(effort)) {
+  const levels = chatGptThinkingLevels(model);
+  if (!levels.includes(level)) {
     throw new Error(
-      `ChatGPT 模型 "${model.slug}" 不支持推理强度 "${level}"。支持的档位：${model.reasoningEfforts.join(", ")}；请使用 /effort low 或修改 runtime.thinkingLevel / runtime.compaction.thinkingLevel。`,
+      `ChatGPT 模型 "${model?.slug ?? "未知"}" 不支持推理强度 "${level}"。支持的档位：${levels.join(", ") || "无可用档位"}；请使用 /effort 查看选项，或修改 runtime.thinkingLevel / runtime.compaction.thinkingLevel。`,
     );
   }
   return { openai: { reasoningEffort: effort } };

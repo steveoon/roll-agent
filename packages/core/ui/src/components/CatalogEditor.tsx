@@ -12,6 +12,8 @@ import {
 } from "../lib/config-secret.ts";
 import {
   ENV_REFERENCE_TEMPLATE,
+  isEnvironmentReferenceDraft,
+  validateEnumInput,
   validateEnvironmentReference,
   validateNumberInput,
 } from "../lib/input-validation.ts";
@@ -592,7 +594,7 @@ function PrimitiveControl(props: PrimitiveControlProps) {
     typeof props.value === "string" &&
     (node.kind === "boolean" ||
       node.kind === "number" ||
-      (node.kind === "enum" && !node.options.includes(props.value)));
+      (node.kind === "enum" && isEnvironmentReferenceDraft(props.value)));
   if (rawTypedValue) return <RawTypedValueControl {...props} />;
   switch (node.kind) {
     case "boolean":
@@ -808,6 +810,13 @@ function EnumControl({
   onValidityChange,
 }: PrimitiveControlProps & { readonly node: ConfigEnumCatalogNode }) {
   const browserMode = validationPath(path) === "browser.operate.engine";
+  const unsupported = typeof value === "string" && !node.options.includes(value);
+  const error = validateEnumInput(value, node);
+  const catalogPending = node.optionsStatus === "loading" || node.optionsStatus === "unavailable";
+  useEffect(() => {
+    // Options may change asynchronously without a user edit: publish AND clear validity.
+    onValidityChange(path, error);
+  }, [error, path, onValidityChange]);
   return (
     <div className="config-value-control">
       <select
@@ -820,7 +829,9 @@ function EnumControl({
               ? node.defaultValue
               : "__inherit__"
         }
-        disabled={disabled}
+        disabled={disabled || catalogPending}
+        aria-invalid={error !== undefined}
+        aria-describedby={error === undefined ? undefined : `${id}-error`}
         autoComplete="off"
         onChange={(event) => {
           onValidityChange(path, undefined);
@@ -835,12 +846,29 @@ function EnumControl({
               : `使用默认值（${node.optionLabels?.[String(node.defaultValue)] ?? String(node.defaultValue)}）`}
           </option>
         )}
+        {unsupported && (
+          <option value={String(value)} disabled>
+            {String(value)}（{catalogPending ? "等待模型目录验证" : "当前选项不支持，请调整"}）
+          </option>
+        )}
         {node.options.map((option) => (
           <option key={option} value={option}>
             {node.optionLabels?.[option] ?? option}
           </option>
         ))}
       </select>
+      {catalogPending && (
+        <small className="field-input-note">
+          {node.optionsStatus === "loading"
+            ? "正在加载模型目录；保留当前值，尚未判断支持情况。"
+            : "模型目录不可用；保留当前值，暂无法验证支持情况。"}
+        </small>
+      )}
+      {error !== undefined && (
+        <small className="input-error" id={`${id}-error`}>
+          {error}
+        </small>
+      )}
       <button
         type="button"
         className="env-reference-button"

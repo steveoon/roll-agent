@@ -268,8 +268,9 @@ export const CONFIG_GUIDANCE_ENTRIES = [
   {
     path: "runtime.thinking-level",
     title: "推理强度",
-    purpose: "控制 Chat 与 MCP sampling 的推理强度；可选 `off`、`low`、`medium`、`high`。",
-    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.thinkingLevel}\`；具体预算由 provider 适配层映射。`,
+    purpose:
+      "控制 Chat 与 MCP sampling 的推理强度；API 使用 `off/low/medium/high`，ChatGPT 订阅按模型能力额外开放 `xhigh/max`。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.thinkingLevel}\`；各 provider 分别映射原生 effort 或预算，不支持的订阅档位会明确拒绝。`,
     example: `runtime:\n  thinking-level: ${DEFAULT_CONFIG.runtime.thinkingLevel}`,
   },
 

@@ -35,7 +35,11 @@ export type SlashEntry = SlashCommand | SlashSkillEntry;
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { kind: "command", name: "/compact", description: "压缩上下文,释放 token" },
   { kind: "command", name: "/think", description: "开关 thinking/reasoning (on | off)" },
-  { kind: "command", name: "/effort", description: "设置推理努力程度 (low | medium | high)" },
+  {
+    kind: "command",
+    name: "/effort",
+    description: "查看或设置模型支持的推理强度 (low/medium/high/xhigh/max)",
+  },
   {
     kind: "command",
     name: "/model",

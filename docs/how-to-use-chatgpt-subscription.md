@@ -31,9 +31,26 @@ CLI 参数优先于配置；未指定账号时使用认证服务当前账号。�
 订阅选择无需加入该表。
 
 订阅接入覆盖本地多轮历史、会话恢复、工具审批与执行、Sampling、上下文压缩和 scheduler。
-Roll 的推理档位由各 Provider 适配：订阅通道把 `off` 映射成 `none`，`low/medium/high` 保持对应；聊天、Sampling 和压缩使用同一映射。同时按账号模型目录的 `supported_reasoning_levels` 校验能力。不支持关闭的模型会在推理前明确拒绝 `off`，提示改用 `low`；聊天切换失败保留当前档位，配置的聊天与压缩档位在初始化时一起检查，不自动改档位。
+Roll 的推理档位由各 Provider 适配：订阅通道把 `off` 映射成 `none`，`low/medium/high/xhigh/max` 保持原生对应，不换算成固定 token 预算。按账号模型目录的 `supported_reasoning_levels` 校验能力；目录未声明能力时不开放 `xhigh/max`。API Key 模式仍使用原有四档，暂不接受 `xhigh/max`。
+
+全屏聊天输入 `/effort` 查看当前模型的可选档位，使用 `/effort xhigh` 或 `/effort max` 设置强度；快捷键仅在支持档位间移动。不支持关闭的模型拒绝 `/think off`，失败保留当前状态，不自动改档位。切模型时若当前强度不兼容，会先显示档位选择器；取消不切模型，选定后一起应用模型和强度。配置台的聊天和压缩下拉框同样按所选订阅模型筛选；不支持的已保存值保留并提示调整，不静默重写。默认模型保存会一并保存当前聊天强度。
+
+聊天、Sampling 和压缩使用同一映射，但压缩可独立配置；`/effort` 调整聊天及 Sampling，不同步修改已初始化的压缩强度。初始化和模型切换会校验聊天与压缩档位，非交互任务遇到不支持的值会明确失败。
+
+```yaml
+runtime:
+  provider: chatgpt
+  model: <账号提供且支持 xhigh/max 的模型 slug>
+  thinking-level: max
+  compaction:
+    thinking-level: low
+```
+
+默认仍为 `medium`。更高强度可能增加延迟和订阅用量，不保证每个任务效果更好；`max` 不代表固定推理 token 数。
 
 `runtime.provider/model/chatgptAccountId` 是聊天和定时任务共用的默认选择，`/model` 的“设为默认”和配置台保存都会影响后续任务。旧 `chat --server`、Runtime 服务和 Companion 暂不支持订阅，使用订阅默认值时会拒绝新请求；保存前会提示此边界。`roll ask` 独立使用 `llm.defaultProvider` 和 API Key，聊天切换到订阅不会阻断它。未支持入口和额度错误不会自动改走付费 API Key。
+
+当订阅聊天配置为 `xhigh/max` 时，独立 `ask/run` 命令仍使用原有 API 模型；其 API Sampling 明确提示使用默认 `medium`，不把订阅高档位发送给 API，也不切换授权通道。API 聊天自身配置不支持的档位仍会报错。
 
 API Key 聊天启动不访问订阅模型目录；打开 `/model` 时才获取当前账号目录，网络失败不会阻断 API Key 聊天启动。
 

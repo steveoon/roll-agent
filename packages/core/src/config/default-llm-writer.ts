@@ -4,12 +4,19 @@ import {
   type ConfigApplicationServiceOptions,
 } from "./application-service.ts";
 
+import type { ThinkingLevel } from "../llm/thinking-levels.ts";
+
 function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function writeDefaultLlm(
-  choice: { readonly provider: string; readonly model: string; readonly chatgptAccountId?: string },
+  choice: {
+    readonly provider: string;
+    readonly model: string;
+    readonly chatgptAccountId?: string;
+    readonly thinkingLevel?: ThinkingLevel;
+  },
   options: ConfigApplicationServiceOptions = {},
 ): { readonly configPath: string } {
   const service = new ConfigApplicationService(options);
@@ -17,6 +24,7 @@ export function writeDefaultLlm(
   const current = snapshot.persisted;
   const llm = isPlainRecord(current.llm) ? current.llm : {};
   const runtime = isPlainRecord(current.runtime) ? { ...current.runtime } : {};
+  if (choice.thinkingLevel !== undefined) runtime.thinkingLevel = choice.thinkingLevel;
   if (choice.provider === "chatgpt") {
     const next = {
       ...current,

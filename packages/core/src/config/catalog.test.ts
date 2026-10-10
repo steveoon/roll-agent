@@ -193,7 +193,14 @@ describe("buildRollConfigCatalog", () => {
     assert.equal(compactionThinking.persistedRequired, false);
     assert.match(compactionThinking.defaultBehavior ?? "", /继承 `runtime\.thinking-level`/u);
     if (compactionThinking.kind === "enum") {
-      assert.deepEqual(compactionThinking.options, ["off", "low", "medium", "high"]);
+      assert.deepEqual(compactionThinking.options, [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
     }
 
     const compactionOutput = findNode(catalog.root, ["runtime", "compaction", "maxOutputTokens"]);

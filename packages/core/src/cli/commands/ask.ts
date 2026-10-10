@@ -7,6 +7,7 @@ import {
 } from "../../config/helpers.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 import { resolveLLMCall, toSamplingConnectOptions } from "../../llm/providers.ts";
+import { apiSamplingThinkingLevel } from "../../llm/thinking-levels.ts";
 import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { routeWithLLM } from "../../router/llm-router.ts";
@@ -167,7 +168,7 @@ export default defineCommand({
       providerConfig.apiKey,
       "sampling",
       providerConfig.baseUrl,
-      config.runtime.thinkingLevel,
+      apiSamplingThinkingLevel(config.runtime, routerProvider, (message) => log.warn(message)),
     );
 
     const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "ask");

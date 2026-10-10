@@ -4,6 +4,7 @@ import type { ReactElement } from "react";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import type { AgentSession, ContextWindowSource } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import { isThinkingLevel, legacyThinkingLevels } from "../../../llm/thinking-levels.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../diff-display.ts";
 import { useSession } from "./use-session.ts";
@@ -59,6 +60,7 @@ export interface ChatModelSwitchResult {
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly contextWindowSource?: ContextWindowSource;
+  readonly thinkingLevel?: ThinkingLevel;
 }
 
 const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
@@ -81,7 +83,11 @@ export interface ChatModelSwitching {
   readonly loadItems: (
     currentModel: string,
   ) => readonly SessionPickerItem[] | Promise<readonly SessionPickerItem[]>;
-  readonly switchTo: (input: string) => Promise<ChatModelSwitchResult>;
+  readonly getThinkingLevels?: (input: string) => Promise<readonly ThinkingLevel[]>;
+  readonly switchTo: (
+    input: string,
+    thinkingLevel?: ThinkingLevel,
+  ) => Promise<ChatModelSwitchResult>;
   readonly setAsDefault: (id: string) => Promise<string>;
 }
 
@@ -93,6 +99,7 @@ export interface ChatAppProps {
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
+  readonly getThinkingLevels?: () => readonly ThinkingLevel[];
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
   readonly copyToClipboard?: (text: string) => Promise<boolean>;
@@ -108,7 +115,11 @@ interface SessionPickerState {
   readonly error?: string;
 }
 
-const MODEL_PICKER_STAGES = { choose: "choose", confirmDefault: "confirm-default" } as const;
+const MODEL_PICKER_STAGES = {
+  choose: "choose",
+  chooseEffort: "choose-effort",
+  confirmDefault: "confirm-default",
+} as const;
 type ModelPickerStage = (typeof MODEL_PICKER_STAGES)[keyof typeof MODEL_PICKER_STAGES];
 
 interface ModelPickerState {
@@ -144,7 +155,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onOpenPicker: () => boolean;
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
-  readonly onModelChanged: (model: string) => void;
+  readonly onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => void;
   readonly onScheduleContinue: (session: AgentSession) => void;
 }
 
@@ -162,6 +173,17 @@ function helpText(): string {
 export function ChatApp(props: ChatAppProps): ReactElement {
   const [activeSession, setActiveSession] = useState(props.session);
   const [activeModel, setActiveModel] = useState(props.model);
+  const [activeThinkingLevel, setActiveThinkingLevel] = useState<ThinkingLevel>(
+    props.initialThinkingLevel ?? "medium",
+  );
+  const changeThinking = useCallback(
+    (level: ThinkingLevel) => {
+      // Preserve both states when the provider rejects the requested effort.
+      props.onThinkingChange?.(level);
+      setActiveThinkingLevel(level);
+    },
+    [props.onThinkingChange],
+  );
   const [sessionHistory, setSessionHistory] = useState<readonly HistoryItem[] | undefined>(
     props.initialHistory,
   );
@@ -227,13 +249,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onExit: props.onExit,
     ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
     ...(props.banner !== undefined ? { banner: props.banner } : {}),
-    ...(props.initialThinkingLevel !== undefined
-      ? { initialThinkingLevel: props.initialThinkingLevel }
-      : {}),
+    initialThinkingLevel: activeThinkingLevel,
     ...(props.initialThinkingDisplay !== undefined
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
-    ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
+    onThinkingChange: changeThinking,
+    ...(props.getThinkingLevels !== undefined
+      ? { getThinkingLevels: props.getThinkingLevels }
+      : {}),
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
@@ -242,7 +265,10 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
-    onModelChanged: setActiveModel,
+    onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => {
+      setActiveModel(model);
+      setActiveThinkingLevel(thinkingLevel);
+    },
     onScheduleContinue: (next: AgentSession) => {
       retiringRef.current = activeSession;
       setSessionHistory(messagesToHistory(next.getMessages()));
@@ -320,7 +346,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       );
     return true;
   };
-  const switchModelTo = (input: string): void => {
+  const thinkingLevels = (): readonly ThinkingLevel[] =>
+    props.getThinkingLevels?.() ?? legacyThinkingLevels;
+  const switchModelTo = (input: string, chosenEffort?: ThinkingLevel): void => {
     if (!modelSwitching) {
       notice("当前界面不支持切换模型");
       return;
@@ -330,10 +358,33 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       items: current?.items ?? [],
       busy: true,
     }));
-    modelSwitching.switchTo(input).then(
+    const request = ++modelPickerRequest.current;
+    const prepare = async (): Promise<ChatModelSwitchResult | undefined> => {
+      if (chosenEffort === undefined && modelSwitching.getThinkingLevels !== undefined) {
+        const levels = await modelSwitching.getThinkingLevels(input);
+        if (request !== modelPickerRequest.current) return undefined;
+        if (!levels.includes(state.status.thinkingLevel)) {
+          if (levels.length === 0) throw new Error("目标模型没有可用推理档位");
+          setModelPicker({
+            stage: MODEL_PICKER_STAGES.chooseEffort,
+            items: levels.map((level) => ({
+              id: level,
+              title: level,
+              meta: "选择后应用模型与推理强度",
+            })),
+            chosenId: input,
+            busy: false,
+          });
+          return undefined;
+        }
+      }
+      return modelSwitching.switchTo(input, chosenEffort);
+    };
+    prepare().then(
       (result) => {
-        setModel(result.model, result.contextWindow);
-        props.onModelChanged(result.model);
+        if (result === undefined || request !== modelPickerRequest.current) return;
+        setModel(result.model, result.contextWindow, result.thinkingLevel);
+        props.onModelChanged(result.model, result.thinkingLevel ?? state.status.thinkingLevel);
         notice(
           `已切换到 ${result.id}（${formatContextWindowNotice(result.contextWindow, result.contextWindowSource)}，仅本次 roll chat 生效）`,
         );
@@ -351,6 +402,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         });
       },
       (error: unknown) => {
+        if (request !== modelPickerRequest.current) return;
         setModelPicker(undefined);
         notice(`切换模型失败：${errorText(error)}`);
       },
@@ -365,6 +417,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     const chosenId = modelPicker.chosenId;
+    if (modelPicker.stage === MODEL_PICKER_STAGES.chooseEffort) {
+      if (chosenId !== undefined && isThinkingLevel(id)) switchModelTo(chosenId, id);
+      return;
+    }
     if (id !== "set-default" || chosenId === undefined) {
       setModelPicker(undefined);
       return;
@@ -465,9 +521,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     } else if (key.tab && key.shift) {
       toggleAutoMode();
     } else if (key.meta && input === ".") {
-      setThinking(cycleThinking(state.status.thinkingLevel, 1));
+      setThinking(cycleThinking(state.status.thinkingLevel, 1, thinkingLevels()));
     } else if (key.meta && input === ",") {
-      setThinking(cycleThinking(state.status.thinkingLevel, -1));
+      setThinking(cycleThinking(state.status.thinkingLevel, -1, thinkingLevels()));
     } else if (key.ctrl && input === "t") {
       setMouseTracking((current) => !current);
     } else if (key.ctrl && input === "y") {
@@ -613,13 +669,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     if (name === "/effort") {
-      if (arg === "low" || arg === "medium" || arg === "high") {
+      const levels = thinkingLevels();
+      if (arg === "") {
+        notice(`当前推理强度：${level}；可选档位：${levels.join(" · ") || "无"}`);
+      } else if (arg !== "off" && isThinkingLevel(arg) && levels.includes(arg)) {
         setThinking(arg);
       } else {
         commitHistory({
           kind: "notice",
           id: randomUUID(),
-          text: "用法: /effort low | medium | high",
+          text: `用法: /effort ${levels.filter((item) => item !== "off").join(" | ")}；/think off 请求关闭推理`,
         });
       }
       return;
@@ -773,7 +832,13 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                       empty: "正在获取可用模型…",
                     }
                   : MODEL_PICKER_LABELS
-                : DEFAULT_CHOICE_LABELS,
+                : modelPicker.stage === MODEL_PICKER_STAGES.chooseEffort
+                  ? {
+                      ...MODEL_PICKER_LABELS,
+                      title: "目标模型不支持当前强度，请选择推理档位",
+                      select: "Enter 应用模型与强度",
+                    }
+                  : DEFAULT_CHOICE_LABELS,
             onSelect: onModelPickerSelect,
             onCancel: () => {
               modelPickerRequest.current++;

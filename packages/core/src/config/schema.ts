@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { runtimeThinkingLevels } from "../llm/thinking-levels.ts";
 import { DEFAULT_DISTRIBUTION_DOWNLOAD_TIMEOUT_MS } from "../execution-environment/distribution-progress.ts";
 
 const browserPlatforms = ["zhipin", "yupao"] as const;
@@ -7,7 +8,7 @@ const browserChannels = ["chrome", "chromium", "msedge"] as const;
 const runtimeApprovalDefaults = ["guarded", "auto", "deny"] as const;
 const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
-export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
+export { runtimeThinkingLevels } from "../llm/thinking-levels.ts";
 export const CHAT_SCREEN_MODES = ["auto", "fullscreen", "inline"] as const;
 export const CHAT_THINKING_DISPLAY_MODES = ["collapsed", "expanded"] as const;
 export const CHAT_INSTRUCTIONS_MODES = ["auto", "off"] as const;

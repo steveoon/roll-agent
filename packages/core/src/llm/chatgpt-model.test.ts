@@ -69,6 +69,37 @@ async function collect(
 }
 
 describe("ChatGPT subscription Responses adapter", () => {
+  it("preserves native xhigh/max in streaming chat and structured compaction", async () => {
+    for (const level of ["xhigh", "max"] as const) {
+      const captured: unknown[] = [];
+      const model = createChatGptModel({
+        modelId: "gpt-6.1-sol",
+        getAccessToken: async () => "fixture",
+        fetch: async (_url, init) => {
+          captured.push(JSON.parse(String(init?.body)));
+          return sse(events('{"summary":"ok"}'));
+        },
+      });
+      const providerOptions = chatGptThinkingOptions(level, {
+        slug: "gpt-6.1-sol",
+        displayName: "Fixture",
+        reasoningEfforts: ["xhigh", "max"],
+      });
+      await collect((await model.doStream({ prompt, providerOptions })).stream);
+      await generateText({
+        model,
+        prompt: "Summarize",
+        providerOptions,
+        output: Output.object({ schema: z.object({ summary: z.string() }) }),
+      });
+      assert.equal(captured.length, 2);
+      for (const request of captured) {
+        assert.ok(isRecord(request));
+        assert.ok(isRecord(request.reasoning));
+        assert.equal(request.reasoning.effort, level);
+      }
+    }
+  });
   it("serializes off as none for models supporting it in chat and structured compaction", async () => {
     const captured: unknown[] = [];
     const model = createChatGptModel({

@@ -28,6 +28,11 @@ import { isScheduleUnavailableError } from "./lib/schedule-state.ts";
 import { createConfiguredSecretPathKeys } from "./lib/config-secret.ts";
 import { cloneObject, deleteAtPath, setAtPath, getAtPath } from "./lib/config-value.ts";
 import { selectChatGptAccount, selectChatGptModel } from "./lib/chatgpt-selection.ts";
+import {
+  thinkingCatalogForDraft,
+  thinkingFieldValidity,
+  type ChatGptModelCatalog,
+} from "./lib/thinking-catalog.ts";
 import type {
   AgentRuntimeStatus,
   AgentActivationResult,
@@ -65,6 +70,10 @@ export function App() {
   const [active, setActive] = useState<NavigationTarget>({ type: "roll", key: "llm" });
   const [query, setQuery] = useState("");
   const [persistedDraft, setPersistedDraft] = useState<JsonObject>({});
+  const [subscriptionCatalog, setSubscriptionCatalog] = useState<ChatGptModelCatalog>({
+    models: [],
+    status: "loading",
+  });
   const [yamlDraft, setYamlDraft] = useState("");
   const [preview, setPreview] = useState<ConfigApplicationPreview | null>(null);
   const [issues, setIssues] = useState<readonly ConfigValidationIssue[]>([]);
@@ -115,6 +124,13 @@ export function App() {
       return { ...current, [key]: issue };
     });
   }, []);
+
+  useEffect(() => {
+    if (mode !== "form" || loadState.status !== "ready") return;
+    for (const { path, message } of thinkingFieldValidity(persistedDraft, subscriptionCatalog)) {
+      handleValidityChange(path, message);
+    }
+  }, [mode, loadState.status, persistedDraft, subscriptionCatalog, handleValidityChange]);
 
   const handleInvalidJsonDraftChange = useCallback((path: ConfigPath, draft?: string): void => {
     const key = JSON.stringify(path);
@@ -670,6 +686,7 @@ export function App() {
                       {...(typeof getAtPath(persistedDraft, ["runtime", "model"]) === "string"
                         ? { model: String(getAtPath(persistedDraft, ["runtime", "model"])) }
                         : {})}
+                      onModels={setSubscriptionCatalog}
                       onAccount={(accountId) => {
                         setPersistedDraft((current) => selectChatGptAccount(current, accountId));
                         markEdited();
@@ -683,7 +700,11 @@ export function App() {
                     />
                   )}
                   <CatalogEditor
-                    node={selectedRollNode}
+                    node={thinkingCatalogForDraft(
+                      selectedRollNode,
+                      persistedDraft,
+                      subscriptionCatalog,
+                    )}
                     path={[visibleActive.key]}
                     persisted={persistedDraft}
                     baseline={currentSnapshot.persisted}
