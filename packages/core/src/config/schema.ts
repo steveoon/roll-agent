@@ -99,6 +99,7 @@ export const runtimeShellConfigSchema = z.object({
 export const runtimeConfigSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
+  chatgptAccountId: z.string().trim().min(1).optional(),
   maxSteps: z.number().int().min(1).default(80),
   turnTimeoutMs: z.number().int().min(10_000).default(300_000),
   threadsDir: z.string().default("~/.roll-agent/threads"),

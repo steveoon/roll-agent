@@ -27,6 +27,7 @@ import {
   type RollUiServerHandle,
 } from "./server.ts";
 import { RollUiActivationInProgressError } from "./runtime-controller.ts";
+import { createRollUiChatGptController } from "./chatgpt-controller.ts";
 
 const STATIC_ASSETS: RollUiStaticAssetProvider = {
   getAsset: (pathname) =>
@@ -34,6 +35,110 @@ const STATIC_ASSETS: RollUiStaticAssetProvider = {
       ? { body: "<!doctype html><title>Roll UI</title>", contentType: "text/html; charset=utf-8" }
       : null,
 };
+
+describe("ChatGPT authentication routes", () => {
+  it("requires session, Origin, and CSRF and conceals unexpected OAuth errors", async (t) => {
+    const calls: unknown[] = [];
+    const server = await startRollUiServer({
+      controller: createController(),
+      staticAssets: STATIC_ASSETS,
+      chatGptController: {
+        status: () => ({ accounts: [] }),
+        models: (request) => {
+          calls.push(request);
+          return [];
+        },
+        login: (request) => {
+          calls.push(request);
+          return { state: "waiting" };
+        },
+        loginStatus: () => ({ state: "waiting" }),
+        cancelLogin: () => ({ state: "cancelled" }),
+        refresh: () => {
+          throw new Error("secret-access-token in OAuth URL");
+        },
+        logout: () => ({ revocationConfirmed: false }),
+      },
+      onError: (error) => {
+        calls.push(error);
+      },
+    });
+    t.after(() => server.close());
+    assert.equal((await fetch(appUrl(server, "/api/auth/chatgpt/status"))).status, 401);
+    const session = await bootstrapSession(server, readLaunchToken(server));
+    assert.equal(
+      (await mutate(server, "/api/auth/chatgpt/login", session.cookie, undefined, {})).status,
+      403,
+    );
+    const hostile = await fetch(appUrl(server, "/api/auth/chatgpt/login"), {
+      method: "POST",
+      headers: {
+        cookie: session.cookie,
+        origin: "https://hostile.example",
+        "content-type": "application/json",
+        "x-csrf-token": session.csrfToken,
+      },
+      body: "{}",
+    });
+    assert.equal(hostile.status, 403);
+    assert.equal(calls.length, 0);
+    assert.equal(
+      (
+        await mutate(server, "/api/auth/chatgpt/login", session.cookie, session.csrfToken, {
+          accountId: "profile",
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (await apiFetch(server, "/api/auth/chatgpt/models?accountId=another", session.cookie)).status,
+      200,
+    );
+    assert.deepEqual(calls, [{ accountId: "profile" }, { accountId: "another" }]);
+    const failed = await mutate(
+      server,
+      "/api/auth/chatgpt/refresh",
+      session.cookie,
+      session.csrfToken,
+      {},
+    );
+    assert.equal(failed.status, 400);
+    assert.doesNotMatch(await failed.text(), /secret-access-token|OAuth URL/);
+    assert.equal(calls.length, 2);
+  });
+
+  it("projects public schemas and rejects client credential fields", async () => {
+    const id = "25ecece0-b713-4296-8931-a2ea002f3775";
+    const publicStatus = {
+      accounts: [{ id, label: "Test", connected: true, authorized: true, accessToken: "secret" }],
+      currentAccountId: id,
+      usageUrl: "https://chatgpt.com/settings/usage",
+      refreshToken: "secret",
+    };
+    const controller = createRollUiChatGptController({
+      status: async () => publicStatus,
+      models: async () => [{ slug: "model", displayName: "Model", accessToken: "secret" }],
+      beginLogin: async () => ({
+        id,
+        state: "waiting",
+        authorizationUrl: "https://auth.openai.com/secret",
+      }),
+      loginStatus: () => ({ id, state: "waiting" }),
+      cancelLogin: () => ({ id, state: "cancelled" }),
+      refresh: async () => ({ accountId: id, refreshed: true, refreshToken: "secret" }),
+      logout: async () => ({ accountId: id, revocationConfirmed: false }),
+    });
+    const results = await Promise.all([
+      controller.status({}),
+      controller.models({}),
+      controller.login({}),
+      controller.refresh({}),
+    ]);
+    assert.doesNotMatch(JSON.stringify(results), /secret|Token|authorizationUrl/);
+    await assert.rejects(async () => controller.login({ accessToken: "untrusted" }));
+    await assert.rejects(async () => controller.status({ accountId: "" }));
+  });
+});
 
 describe("startRollUiServer", () => {
   it("binds only to an ephemeral IPv4 loopback port and serves hardened static assets", async (t) => {

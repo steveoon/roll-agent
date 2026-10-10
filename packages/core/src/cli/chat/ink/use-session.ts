@@ -280,8 +280,19 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
 
   const setThinking = useCallback(
     (level: ThinkingLevel) => {
-      dispatch({ type: "set-thinking", level });
-      onThinkingChange?.(level);
+      try {
+        onThinkingChange?.(level);
+        dispatch({ type: "set-thinking", level });
+      } catch (error) {
+        dispatch({
+          type: "commit-history",
+          item: {
+            kind: "notice",
+            id: randomUUID(),
+            text: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
     },
     [onThinkingChange],
   );

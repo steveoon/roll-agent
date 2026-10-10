@@ -61,6 +61,11 @@ export default defineCommand({
   },
   async run({ args }) {
     const { config } = loadConfig();
+    if (config.llm.defaultProvider === "chatgpt") {
+      log.error("roll ask 暂不支持 ChatGPT 订阅。请为 llm.defaultProvider 选择 API Key provider。");
+      process.exitCode = 1;
+      return;
+    }
     const store = new AgentStore(config.agents.dataDir);
     const agents = store.list();
 

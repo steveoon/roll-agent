@@ -58,6 +58,17 @@ export function inspectEnvironmentDiagnostics(
         processEnv: options.env,
         fallbackEnv: secrets.variables,
       });
+      const subscription = (config.runtime.provider ?? config.llm.defaultProvider) === "chatgpt";
+      if (subscription) {
+        issues.push({
+          code: "provider-unsupported",
+          severity: "error",
+          paths: ["runtime.provider"],
+          message: "Runtime 服务和 Companion 暂不支持 ChatGPT 订阅；聊天及定时任务可使用订阅。",
+          remedy:
+            "为 Runtime 服务和 Companion 使用 API Key provider 配置；此问题不是缺少 ChatGPT API Key。",
+        });
+      }
       const readiness = inspectLlmConfigReadiness(config, {
         provider: config.runtime.provider ?? config.llm.defaultProvider,
         model: config.runtime.model ?? config.llm.defaultModel,
@@ -73,7 +84,7 @@ export function inspectEnvironmentDiagnostics(
         });
         for (const item of selectedAudit.unresolved) selectedProviderVariables.add(item.name);
       }
-      if (!readiness.configured) {
+      if (!subscription && !readiness.configured) {
         blockingPath = `llm.providers.${readiness.provider}.api-key`;
         missingModel = readiness.status !== "unresolved-api-key";
         if (readiness.status === "missing-provider") {

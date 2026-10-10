@@ -16,6 +16,20 @@ function fixture() {
   return { cwd, configPath, secretsPath };
 }
 
+test("subscription service diagnostics identify the unsupported surface rather than a missing API key", () => {
+  const f = fixture();
+  try {
+    writeFileSync(f.configPath, "runtime:\n  provider: chatgpt\n  model: subscription-slug\n");
+    const report = inspectEnvironmentDiagnostics({ ...f, environment: "service", env: {} });
+    assert.equal(report.blocking, true);
+    assert.ok(report.issues.some((issue) => issue.code === "provider-unsupported"));
+    assert.doesNotMatch(JSON.stringify(report), /配置不完整/);
+    assert.match(JSON.stringify(report), /定时任务可使用订阅/);
+  } finally {
+    rmSync(f.cwd, { recursive: true, force: true });
+  }
+});
+
 test("service environment is explicit: shell-only values cannot make the service ready", () => {
   const f = fixture();
   try {

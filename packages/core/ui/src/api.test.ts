@@ -15,6 +15,42 @@ interface BrowserHarness {
   readonly restore: () => void;
 }
 
+describe("RollUiApi ChatGPT authentication", () => {
+  it("uses the existing CSRF session and keeps account model requests scoped", async () => {
+    const id = "25ecece0-b713-4296-8931-a2ea002f3775";
+    const browser = installBrowserHarness(
+      [
+        jsonResponse({ data: { csrfToken: "csrf" } }),
+        jsonResponse({ data: { id, state: "waiting", authorizationUrl: "secret" } }),
+        jsonResponse({ data: [{ slug: "model-a", displayName: "Model A" }] }),
+        jsonResponse({ data: { id, state: "cancelled" } }),
+      ],
+      "",
+    );
+    try {
+      const api = new RollUiApi();
+      await api.bootstrap();
+      const login = await api.beginChatGptLogin(id);
+      assert.deepEqual(login, { id, state: "waiting" });
+      assert.deepEqual(await api.getChatGptModels(id), [
+        { slug: "model-a", displayName: "Model A" },
+      ]);
+      assert.equal((await api.cancelChatGptLogin(id)).state, "cancelled");
+      const loginCall = browser.calls[1];
+      assert.equal(new Headers(loginCall?.init?.headers).get("X-CSRF-Token"), "csrf");
+      assert.equal(new Headers(loginCall?.init?.headers).get("Authorization"), null);
+      assert.equal(loginCall?.init?.body, JSON.stringify({ accountId: id }));
+      assert.match(
+        browser.calls[2]?.url ?? "",
+        new RegExp(`/api/auth/chatgpt/models\\?accountId=${id}$`),
+      );
+      assert.equal(browser.calls[3]?.init?.method, "POST");
+    } finally {
+      browser.restore();
+    }
+  });
+});
+
 describe("RollUiApi bootstrap authentication", () => {
   it("falls back to the existing cookie session when the fragment token is stale", async () => {
     const browser = installBrowserHarness([

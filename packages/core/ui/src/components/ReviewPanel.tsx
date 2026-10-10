@@ -91,6 +91,15 @@ export function ReviewPanel({
         ) : (
           <>
             <PreviewSummary preview={preview} />
+            {getAtPath(preview.snapshot.persisted, ["runtime", "provider"]) === "chatgpt" && (
+              <div className="validation-block" role="alert">
+                <strong>订阅模型生效范围</strong>
+                <p>
+                  保存后聊天及定时任务共用订阅模型。Runtime 服务和 Companion
+                  暂不支持此配置，需要使用 API Key provider。roll ask 继续使用 llm 的 API Key 配置。
+                </p>
+              </div>
+            )}
             <SemanticChangeList preview={preview} catalog={catalog} before={before} />
             <DiffView preview={preview} />
             <EffectList effects={preview.effects} />

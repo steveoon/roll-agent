@@ -9,7 +9,7 @@ function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown
 }
 
 export function writeDefaultLlm(
-  choice: { readonly provider: string; readonly model: string },
+  choice: { readonly provider: string; readonly model: string; readonly chatgptAccountId?: string },
   options: ConfigApplicationServiceOptions = {},
 ): { readonly configPath: string } {
   const service = new ConfigApplicationService(options);
@@ -17,6 +17,19 @@ export function writeDefaultLlm(
   const current = snapshot.persisted;
   const llm = isPlainRecord(current.llm) ? current.llm : {};
   const runtime = isPlainRecord(current.runtime) ? { ...current.runtime } : {};
+  if (choice.provider === "chatgpt") {
+    const next = {
+      ...current,
+      runtime: {
+        ...runtime,
+        provider: choice.provider,
+        model: choice.model,
+        ...(choice.chatgptAccountId ? { chatgptAccountId: choice.chatgptAccountId } : {}),
+      },
+    };
+    service.savePatches(createConfigPatches(current, next), snapshot.revision);
+    return { configPath: snapshot.configPath };
+  }
   delete runtime.provider;
   delete runtime.model;
   const withoutRuntime = { ...current };

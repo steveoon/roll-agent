@@ -8,6 +8,7 @@ import { createDefaultCompanionApplication } from "../../companion-host/applicat
 import { resolveConfigPath } from "../../config/loader.ts";
 import {
   createFileSystemStaticAssetProvider,
+  createRollUiChatGptController,
   createRollUiCompanionController,
   createRollUiRuntimeController,
   startRollUiServer,
@@ -72,6 +73,7 @@ export async function runRollUi(
   const scheduleController = await resolveScheduleController();
 
   const server = await startRollUiServer({
+    chatGptController: createRollUiChatGptController(),
     controller: createRollUiRuntimeController({ configPath }),
     staticAssets: createFileSystemStaticAssetProvider(assetsDirectory),
     ...(companionController !== undefined ? { companionController } : {}),

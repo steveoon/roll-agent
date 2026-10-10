@@ -78,7 +78,9 @@ export function formatContextWindowNotice(
 }
 
 export interface ChatModelSwitching {
-  readonly loadItems: (currentModel: string) => readonly SessionPickerItem[];
+  readonly loadItems: (
+    currentModel: string,
+  ) => readonly SessionPickerItem[] | Promise<readonly SessionPickerItem[]>;
   readonly switchTo: (input: string) => Promise<ChatModelSwitchResult>;
   readonly setAsDefault: (id: string) => Promise<string>;
 }
@@ -113,6 +115,7 @@ interface ModelPickerState {
   readonly stage: ModelPickerStage;
   readonly items: readonly SessionPickerItem[];
   readonly busy: boolean;
+  readonly loading?: boolean;
   readonly chosenId?: string;
 }
 
@@ -290,6 +293,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   });
 
   const [modelPicker, setModelPicker] = useState<ModelPickerState | undefined>(undefined);
+  const modelPickerRequest = useRef(0);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const modelSwitching = props.modelSwitching;
   const notice = (text: string): void => {
@@ -299,11 +303,21 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     if (!modelSwitching) {
       return false;
     }
-    setModelPicker({
-      stage: MODEL_PICKER_STAGES.choose,
-      items: modelSwitching.loadItems(state.status.model),
-      busy: false,
-    });
+    const request = ++modelPickerRequest.current;
+    setModelPicker({ stage: MODEL_PICKER_STAGES.choose, items: [], busy: true, loading: true });
+    Promise.resolve()
+      .then(() => modelSwitching.loadItems(state.status.model))
+      .then(
+        (items) => {
+          if (request !== modelPickerRequest.current) return;
+          setModelPicker({ stage: MODEL_PICKER_STAGES.choose, items, busy: false });
+        },
+        (error: unknown) => {
+          if (request !== modelPickerRequest.current) return;
+          setModelPicker(undefined);
+          notice(`加载模型失败：${errorText(error)}`);
+        },
+      );
     return true;
   };
   const switchModelTo = (input: string): void => {
@@ -325,7 +339,13 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         );
         setModelPicker({
           stage: MODEL_PICKER_STAGES.confirmDefault,
-          items: DEFAULT_CHOICE_ITEMS,
+          items: result.id.startsWith("chatgpt/")
+            ? DEFAULT_CHOICE_ITEMS.map((item) =>
+                item.id === "set-default"
+                  ? { ...item, meta: "聊天及定时任务使用订阅；Runtime 服务 / Companion 暂不可用" }
+                  : item,
+              )
+            : DEFAULT_CHOICE_ITEMS,
           busy: false,
           chosenId: result.id,
         });
@@ -741,14 +761,24 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(SessionPicker, {
             items: modelPicker.items,
             busy: modelPicker.busy,
+            cancelWhileBusy: modelPicker.loading === true,
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
             labels:
               modelPicker.stage === MODEL_PICKER_STAGES.choose
-                ? MODEL_PICKER_LABELS
+                ? modelPicker.loading
+                  ? {
+                      ...MODEL_PICKER_LABELS,
+                      busy: "加载模型… · Esc 取消",
+                      empty: "正在获取可用模型…",
+                    }
+                  : MODEL_PICKER_LABELS
                 : DEFAULT_CHOICE_LABELS,
             onSelect: onModelPickerSelect,
-            onCancel: () => setModelPicker(undefined),
+            onCancel: () => {
+              modelPickerRequest.current++;
+              setModelPicker(undefined);
+            },
           })
         : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
           ? h(ConfirmSelect, {

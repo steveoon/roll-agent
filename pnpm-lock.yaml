@@ -216,6 +216,9 @@ importers:
       is-unicode-supported:
         specifier: 2.1.0
         version: 2.1.0
+      jose:
+        specifier: 6.2.2
+        version: 6.2.2
       marked:
         specifier: 18.0.5
         version: 18.0.5

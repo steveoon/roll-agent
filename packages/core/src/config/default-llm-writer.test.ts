@@ -53,3 +53,30 @@ describe("writeDefaultLlm", () => {
     }
   });
 });
+
+it("subscription default stays in runtime without replacing API-key defaults", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-chatgpt-default-"));
+  const configPath = join(dir, "roll.config.yaml");
+  writeFileSync(
+    configPath,
+    "llm:\n  default-provider: openai\n  default-model: gpt-api\n  providers:\n    openai:\n      api-key: retained-key\n",
+  );
+  try {
+    writeDefaultLlm(
+      { provider: "chatgpt", model: "subscription-slug", chatgptAccountId: "registration-one" },
+      { configPath },
+    );
+    const config = loadConfig({ cwd: dir }).config;
+    assert.equal(config.runtime.provider, "chatgpt");
+    assert.equal(config.runtime.model, "subscription-slug");
+    assert.equal(config.runtime.chatgptAccountId, "registration-one");
+    assert.equal(config.llm.defaultProvider, "openai");
+    assert.equal(config.llm.defaultModel, "gpt-api");
+    assert.equal(config.llm.providers.openai?.apiKey, "retained-key");
+    const written = readFileSync(configPath, "utf8");
+    assert.match(written, /chatgpt-account-id: registration-one/u);
+    assert.doesNotMatch(written, /providers:\s+chatgpt/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

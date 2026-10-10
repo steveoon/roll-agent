@@ -8,6 +8,7 @@ import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
+import type { SessionPickerItem } from "../session-picker-format.ts";
 
 // A failed assertion must not leave Ink mounts/timers alive and hang the test worker.
 afterEach(() => cleanup());
@@ -1728,6 +1729,34 @@ test("ChatApp 未知命令提示后保留草稿", async () => {
   unmount();
 });
 
+test("ChatApp rejects unsupported thinking without changing the displayed or active level", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const selected: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription-model",
+      initialThinkingLevel: "medium",
+      onThinkingChange: (level) => {
+        if (level === "off") throw new Error("模型不支持 off，请使用 low");
+        selected.push(level);
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/think off\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /模型不支持 off/));
+  assert.deepEqual(selected, []);
+  stdin.write("/think on\r");
+  await waitFor(() => assert.deepEqual(selected, ["medium"]));
+  unmount();
+});
+
 test("ChatApp 输入命令参数时不渲染空弹窗", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
@@ -2016,6 +2045,91 @@ test("ChatApp switches model via /model picker and offers set-as-default", async
     assert.match(plain(lastFrame() ?? ""), /ctx 1M · 模型目录/);
   });
   unmount();
+});
+
+test("subscription model loading is deferred until /model and a cancelled load cannot reopen the picker", async () => {
+  const session = switchableFakeSession("s1");
+  let loads = 0;
+  let complete: ((items: { id: string; title: string; meta: string }[]) => void) | undefined;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "api-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => {
+          loads++;
+          return new Promise<SessionPickerItem[]>((resolve) => {
+            complete = resolve;
+          });
+        },
+        switchTo: async () => ({
+          id: "chatgpt/subscription",
+          model: "subscription",
+          contextWindow: 8192,
+        }),
+        setAsDefault: async () => "saved",
+      },
+    }),
+  );
+  try {
+    await delay(30);
+    assert.equal(loads, 0);
+    assert.match(plain(lastFrame() ?? ""), /api-model/);
+    stdin.write("/model");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.equal(loads, 1));
+    stdin.write("\x1b");
+    await delay(20);
+    complete?.([{ id: "chatgpt/subscription", title: "Subscription", meta: "fixture" }]);
+    await delay(30);
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /切换模型/);
+    assert.match(plain(lastFrame() ?? ""), /api-model/);
+  } finally {
+    unmount();
+  }
+});
+
+test("subscription default confirmation describes service limitations before saving", async () => {
+  const session = switchableFakeSession("s1");
+  let saves = 0;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "api-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [],
+        switchTo: async () => ({
+          id: "chatgpt/subscription",
+          model: "subscription",
+          contextWindow: 8192,
+        }),
+        setAsDefault: async () => {
+          saves++;
+          return "saved";
+        },
+      },
+    }),
+  );
+  try {
+    await delay(20);
+    stdin.write("/model chatgpt/subscription");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() =>
+      assert.match(plain(lastFrame() ?? ""), /Runtime 服务 \/ Companion 暂不可用/),
+    );
+    assert.equal(saves, 0);
+    stdin.write("\r");
+    await delay(20);
+    assert.equal(saves, 0);
+  } finally {
+    unmount();
+  }
 });
 
 test("ChatApp /model with an argument switches directly and reports failures", async () => {

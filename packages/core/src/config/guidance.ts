@@ -172,16 +172,27 @@ export const CONFIG_GUIDANCE_ENTRIES = [
   {
     path: "runtime.provider",
     title: "Chat 模型提供商",
-    purpose: "仅覆盖 `roll chat` 使用的模型提供商，便于让 Ask 与 Chat 使用不同服务。",
+    purpose:
+      "覆盖聊天、定时任务及宿主服务使用的模型提供商，Ask 仍独立使用 llm 配置。ChatGPT 订阅支持聊天和定时任务，暂不支持 Runtime 服务 / Companion。",
     defaultBehavior: "不配置时使用 `llm.default-provider`。",
     example: "runtime:\n  provider: openai",
   },
   {
     path: "runtime.model",
     title: "Chat 模型",
-    purpose: "仅覆盖 `roll chat` 的主模型；子 Agent 的 sampling 也复用该模型。",
+    purpose: "覆盖聊天和定时任务的主模型；子 Agent 的 sampling 也复用该模型。",
     defaultBehavior: "不配置时使用 `llm.default-model`。",
     example: "runtime:\n  model: gpt-5.5",
+  },
+  {
+    path: "runtime.chatgpt-account-id",
+    title: "ChatGPT 订阅账号",
+    purpose:
+      "实验功能：选择 roll auth chatgpt login 保存的独立注册，供普通 roll chat 和定时任务使用；两者的 Sampling 和压缩也使用此账号。",
+    defaultBehavior:
+      "CLI --account 优先；未设置时使用认证服务当前账号。模型需明确选择；无需填写 llm.providers API Key。",
+    example:
+      "runtime:\n  provider: chatgpt\n  chatgpt-account-id: <注册 ID>\n  model: <订阅模型 slug>",
   },
   {
     path: "runtime.max-steps",

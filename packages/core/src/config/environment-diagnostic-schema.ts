@@ -3,7 +3,13 @@ import { z } from "zod/v4";
 // Shared by the local host and UI. No filesystem imports or credential values.
 export const environmentIssueSchema = z
   .object({
-    code: z.enum(["env-unresolved", "secrets-unreadable", "config-invalid", "model-unconfigured"]),
+    code: z.enum([
+      "env-unresolved",
+      "secrets-unreadable",
+      "config-invalid",
+      "model-unconfigured",
+      "provider-unsupported",
+    ]),
     severity: z.enum(["error", "warning"]),
     variable: z.string().max(160).optional(),
     paths: z.array(z.string().max(160)).max(8),

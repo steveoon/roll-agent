@@ -12,6 +12,7 @@ import {
 import { AgentEnvironmentEditor } from "./components/AgentEnvironmentEditor.tsx";
 import { ApplyDialog } from "./components/ApplyDialog.tsx";
 import { CatalogEditor } from "./components/CatalogEditor.tsx";
+import { ChatGptAccountPanel } from "./components/ChatGptAccountPanel.tsx";
 import { CompanionPanel } from "./components/CompanionPanel.tsx";
 import { SchedulePanel } from "./components/SchedulePanel.tsx";
 import { Navigation } from "./components/Navigation.tsx";
@@ -25,7 +26,8 @@ import {
 import { isCompanionUnavailableError } from "./lib/companion-state.ts";
 import { isScheduleUnavailableError } from "./lib/schedule-state.ts";
 import { createConfiguredSecretPathKeys } from "./lib/config-secret.ts";
-import { cloneObject, deleteAtPath, setAtPath } from "./lib/config-value.ts";
+import { cloneObject, deleteAtPath, setAtPath, getAtPath } from "./lib/config-value.ts";
+import { selectChatGptAccount, selectChatGptModel } from "./lib/chatgpt-selection.ts";
 import type {
   AgentRuntimeStatus,
   AgentActivationResult,
@@ -652,19 +654,48 @@ export function App() {
                   没有匹配“{query}”的配置。
                 </div>
               ) : selectedRollNode !== undefined && visibleActive.type === "roll" ? (
-                <CatalogEditor
-                  node={selectedRollNode}
-                  path={[visibleActive.key]}
-                  persisted={persistedDraft}
-                  baseline={currentSnapshot.persisted}
-                  searchQuery={normalizedQuery}
-                  onSet={setConfigValue}
-                  onDelete={deleteConfigValue}
-                  onValidityChange={handleValidityChange}
-                  configuredSecretPathKeys={configuredSecretPathKeys}
-                  invalidJsonDraftsByPath={invalidJsonDraftsByPath}
-                  onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
-                />
+                <>
+                  {(visibleActive.key === "runtime" || visibleActive.key === "llm") && (
+                    <ChatGptAccountPanel
+                      api={api}
+                      enabled={getAtPath(persistedDraft, ["runtime", "provider"]) === "chatgpt"}
+                      {...(typeof getAtPath(persistedDraft, ["runtime", "chatgptAccountId"]) ===
+                      "string"
+                        ? {
+                            accountId: String(
+                              getAtPath(persistedDraft, ["runtime", "chatgptAccountId"]),
+                            ),
+                          }
+                        : {})}
+                      {...(typeof getAtPath(persistedDraft, ["runtime", "model"]) === "string"
+                        ? { model: String(getAtPath(persistedDraft, ["runtime", "model"])) }
+                        : {})}
+                      onAccount={(accountId) => {
+                        setPersistedDraft((current) => selectChatGptAccount(current, accountId));
+                        markEdited();
+                      }}
+                      onModel={(model, accountId) => {
+                        setPersistedDraft((current) =>
+                          selectChatGptModel(current, model, accountId),
+                        );
+                        markEdited();
+                      }}
+                    />
+                  )}
+                  <CatalogEditor
+                    node={selectedRollNode}
+                    path={[visibleActive.key]}
+                    persisted={persistedDraft}
+                    baseline={currentSnapshot.persisted}
+                    searchQuery={normalizedQuery}
+                    onSet={setConfigValue}
+                    onDelete={deleteConfigValue}
+                    onValidityChange={handleValidityChange}
+                    configuredSecretPathKeys={configuredSecretPathKeys}
+                    invalidJsonDraftsByPath={invalidJsonDraftsByPath}
+                    onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
+                  />
+                </>
               ) : selectedAgent !== undefined ? (
                 <AgentEnvironmentEditor
                   agent={selectedAgent}
