@@ -377,6 +377,16 @@ function applySessionEvent(
   switch (event.type) {
     case "message-start":
       return state;
+    case "step-finish":
+      return {
+        ...state,
+        status: {
+          ...state.status,
+          ...(event.usage?.inputTokens === undefined
+            ? {}
+            : { contextInputTokens: event.usage.inputTokens }),
+        },
+      };
     case "reasoning-start":
       return beginReasoning(state, id, event.reasoningId, at);
     case "reasoning-delta": {

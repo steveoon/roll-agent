@@ -676,10 +676,10 @@ export class ConversationEngine {
   ): AgentSession {
     const store = this.store;
     const derivedFrom = store?.getThread(id)?.derivedFrom;
-    const contextWindow = this.resolveContextWindowFor(
+    const contextWindowResolution = this.resolveContextWindowFor(
       this.resolveProviderName(),
       this.resolveModelName(),
-    )?.window;
+    );
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
@@ -749,13 +749,22 @@ export class ConversationEngine {
         ? { structuredOutputReasoning: this.structuredOutputReasoning }
         : {}),
       onProviderOptionsChange: (providerOptions) => this.syncProviderOptions(providerOptions),
-      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(contextWindowResolution !== undefined
+        ? {
+            contextWindow: contextWindowResolution.window,
+            contextWindowSource: contextWindowResolution.source,
+          }
+        : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
       ...(derivedFrom !== undefined ? { derivedFrom } : {}),
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {
+            onAcceptInput: (inputId, message) => store.acceptTurnInput(id, inputId, message),
+            onRecordInputSkillCheckpoint: (inputId, checkpoint) =>
+              store.recordTurnSkillCheckpoint(id, inputId, checkpoint),
+            getInputSkillCheckpoint: (sequence) => store.getTurnInputSkillCheckpoint(id, sequence),
             onPersist: (messages, options) => store.appendMessages(id, messages, options),
             onReplace: (messages) => store.replaceMessages(id, messages),
             onToolExecution: (record) => store.appendToolExecution(id, record),
@@ -793,10 +802,11 @@ export class ConversationEngine {
   switchModel(input: EngineModelSwitch): ContextWindowResolution | undefined {
     this.assertAcceptingSessions();
     const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
-    const contextWindow = resolution?.window;
     const sessionSwitch = {
       model: input.model,
-      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(resolution !== undefined
+        ? { contextWindow: resolution.window, contextWindowSource: resolution.source }
+        : {}),
       ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
       ...(input.structuredOutputProviderOptions
         ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }

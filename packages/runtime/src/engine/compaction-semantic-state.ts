@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  orderCompactionEvidence,
+  CompactionEvidenceUnpresentable,
+} from "./compaction-evidence-batch.ts";
+import {
   TOOL_OUTCOME_KINDS,
   type ToolCancellationExecutionState,
 } from "../tool-bridge/normalize-result.ts";
@@ -171,7 +175,7 @@ const modelSemanticResolutionSchema = z
 const modelSemanticEvidenceReviewSchema = z
   .object({
     evidenceId: z.string().trim().min(1).max(128),
-    disposition: z.enum(["irrelevant", "uncertain"]),
+    disposition: z.enum(["irrelevant", "uncertain", "reviewed"]),
     reason: z.string().trim().min(1).max(MAX_RESOLUTION_REASON_CHARS),
   })
   .strict()
@@ -390,6 +394,8 @@ export interface CompactionSemanticRunningSessionEvidence {
 }
 
 export interface BuildCompactionSemanticEvidenceRegistryInput {
+  /** Production compaction must review whole sources, not the legacy bounded excerpts. */
+  readonly fullSources?: boolean;
   readonly messages: readonly CompactionSemanticMessageEvidence[];
   readonly toolExecutions: readonly CompactionSemanticToolEvidence[];
   readonly resources: readonly CompactionSemanticResourceEvidence[];
@@ -399,6 +405,7 @@ export interface BuildCompactionSemanticEvidenceRegistryInput {
 export interface CompactionSemanticEvidenceRegistryEntry {
   readonly evidenceId: string;
   readonly summary: string;
+  readonly fullSource?: string;
   readonly provenance: CompactionProvenanceRef;
   readonly messageRole?: string;
   readonly toolOutcomeKind?: string;
@@ -536,6 +543,7 @@ export function buildCompactionSemanticEvidenceRegistry(
     entries.push({
       evidenceId: evidenceId("message", String(message.sequence)),
       summary: boundedText(message.summary, 512),
+      ...(input.fullSources ? { fullSource: message.summary.trim() } : {}),
       provenance,
       ...(message.role === undefined ? {} : { messageRole: message.role }),
     });
@@ -564,6 +572,15 @@ export function buildCompactionSemanticEvidenceRegistry(
       ),
       provenance,
       toolOutcomeKind: tool.outcome.kind,
+      ...(input.fullSources
+        ? {
+            fullSource: [
+              `${tool.agentName ?? "agent"}/${tool.toolName ?? "tool"}: ${tool.outcome.kind}`,
+              `input=${tool.inputSummary ?? ""}`,
+              `result=${tool.resultSummary ?? ""}`,
+            ].join("\n"),
+          }
+        : {}),
       ...(tool.outcome.executionState === undefined
         ? {}
         : { toolCancellationExecutionState: tool.outcome.executionState }),
@@ -637,7 +654,7 @@ function modelEvidenceEntries(
 }
 
 function modelFacingEvidenceSummary(entry: CompactionSemanticEvidenceRegistryEntry): string {
-  return boundedText(entry.summary, 256);
+  return entry.fullSource ?? boundedText(entry.summary, 256);
 }
 
 function modelPreviousSemanticItems(
@@ -686,6 +703,8 @@ function renderBoundedModelContext(
   evidence: readonly ModelEvidenceEntry[],
   previousItems: readonly ModelPreviousSemanticItem[],
   maxChars: number,
+  currentGoalId?: string,
+  maxInputTokens?: number,
 ): { readonly prompt: string; readonly includedEvidenceIds: readonly string[] } {
   const includedPrevious: ModelPreviousSemanticItem[] = [];
   const includedEvidence: ModelEvidenceEntry[] = [];
@@ -698,21 +717,34 @@ function renderBoundedModelContext(
     });
   const includeIfFits = <T>(target: T[], value: T): boolean => {
     target.push(value);
-    if ([...serialize()].length <= maxChars) {
+    const serialized = serialize();
+    if (
+      [...serialized].length <= maxChars &&
+      (maxInputTokens === undefined ||
+        Math.ceil(Buffer.byteLength(serialized, "utf8") / 3.5) <= maxInputTokens)
+    ) {
       return true;
     }
     target.pop();
     return false;
   };
-  let previousIndex = 0;
-  let evidenceIndex = 0;
-  if (previousItems[0] !== undefined && includeIfFits(includedPrevious, previousItems[0])) {
-    previousIndex = 1;
+  const mandatory = [
+    evidence.find((entry) => entry.kind === "message"),
+    evidence.find((entry) => entry.kind === "tool_execution"),
+  ].filter((entry) => entry !== undefined);
+  for (const entry of mandatory) {
+    if (!includeIfFits(includedEvidence, entry)) throw new CompactionEvidenceUnpresentable();
   }
-  if (evidence[0] !== undefined && includeIfFits(includedEvidence, evidence[0])) {
-    evidenceIndex = 1;
+  const currentGoal = evidence.find((entry) => entry.evidenceId === currentGoalId);
+  if (currentGoal !== undefined && !mandatory.includes(currentGoal)) {
+    if (!includeIfFits(includedEvidence, currentGoal)) throw new CompactionEvidenceUnpresentable();
+    mandatory.push(currentGoal);
   }
-  for (const entry of evidence.slice(evidenceIndex)) {
+  // Retain the prior goal/first semantic item when it fits after mandatory lanes,
+  // before the backlog consumes every remaining character.
+  if (previousItems[0] !== undefined) includeIfFits(includedPrevious, previousItems[0]);
+  for (const entry of evidence) {
+    if (mandatory.includes(entry)) continue;
     if (includedEvidence.length >= MAX_MODEL_EVIDENCE_ITEMS) {
       break;
     }
@@ -720,7 +752,8 @@ function renderBoundedModelContext(
       break;
     }
   }
-  for (const item of previousItems.slice(previousIndex)) {
+  for (const item of previousItems) {
+    if (includedPrevious.includes(item)) continue;
     if (!includeIfFits(includedPrevious, item)) {
       break;
     }
@@ -736,8 +769,8 @@ export function renderCompactionSemanticEvidenceRegistry(
   registry: CompactionSemanticEvidenceRegistry,
   maxChars = 24_000,
 ): string {
-  if (!Number.isInteger(maxChars) || maxChars < 1_024 || maxChars > 64_000) {
-    throw new Error("maxChars must be an integer between 1024 and 64000");
+  if (!Number.isInteger(maxChars) || maxChars < 1_024 || maxChars > 256_000) {
+    throw new Error("maxChars must be an integer between 1024 and 256000");
   }
   return renderBoundedModelContext(modelEvidenceEntries(registry), [], maxChars).prompt;
 }
@@ -752,14 +785,25 @@ export function buildCompactionSemanticModelContext(
   registry: CompactionSemanticEvidenceRegistry,
   previousState: CompactionSemanticState | undefined,
   maxChars = 24_000,
+  currentGoalSequence?: number,
+  maxInputTokens?: number,
 ): CompactionSemanticModelContext {
-  if (!Number.isInteger(maxChars) || maxChars < 1_024 || maxChars > 64_000) {
-    throw new Error("maxChars must be an integer between 1024 and 64000");
+  if (!Number.isInteger(maxChars) || maxChars < 1_024 || maxChars > 1_000_000) {
+    throw new Error("maxChars must be an integer between 1024 and 1000000");
+  }
+  if (maxInputTokens !== undefined && (!Number.isInteger(maxInputTokens) || maxInputTokens < 1)) {
+    throw new Error("maxInputTokens must be a positive integer");
   }
   return renderBoundedModelContext(
-    modelEvidenceEntries(registry),
+    modelEvidenceEntries(orderCompactionEvidence(registry)),
     modelPreviousSemanticItems(previousState),
     maxChars,
+    registry.find(
+      (entry) =>
+        entry.provenance.kind === "message" &&
+        entry.provenance.messageSequence === currentGoalSequence,
+    )?.evidenceId,
+    maxInputTokens,
   );
 }
 
@@ -939,7 +983,30 @@ function evidenceSupportsQuotes(
   const summaries = entries.map(modelFacingEvidenceSummary);
   return (
     summaries.length === quotes.length &&
-    summaries.every((summary, index) => summary === quotes[index])
+    summaries.every((summary, index) => {
+      const quote = quotes[index];
+      if (quote === undefined) return false;
+      if (summary === quote) return true;
+      if (entries[index]?.fullSource === undefined || summary.length <= MAX_SOURCE_QUOTE_CHARS) {
+        return false;
+      }
+      // Accept a whole line or consecutive whole sentences, not an arbitrary
+      // substring. Splitting on both newlines and sentence ends wrongly rejected
+      // verbatim multi-sentence lines and made otherwise grounded drafts unusable.
+      let start = summary.indexOf(quote);
+      while (start !== -1) {
+        const before = summary.slice(0, start);
+        const after = summary.slice(start + quote.length);
+        const startsAtBoundary = start === 0 || /(?:\n[\t ]*|[.!?。！？]\s+)$/u.test(before);
+        const endsAtBoundary =
+          after.length === 0 ||
+          /^[\t ]*\n/u.test(after) ||
+          (/[.!?。！？]$/u.test(quote) && /^\s/u.test(after));
+        if (startsAtBoundary && endsAtBoundary) return true;
+        start = summary.indexOf(quote, start + 1);
+      }
+      return false;
+    })
   );
 }
 
@@ -1003,9 +1070,15 @@ export function validateCompactionModelDraft(
   };
   const rejections: CompactionSemanticRejection[] = [];
   const coveredEvidenceIds = new Set<string>();
+  const claimedEvidenceIds = new Set<string>();
+  const rejectedEvidenceIds = new Set<string>();
   const coverEvidence = (sourceEvidenceIds: readonly string[]): void => {
     for (const sourceEvidenceId of sourceEvidenceIds) {
-      coveredEvidenceIds.add(sourceEvidenceId);
+      claimedEvidenceIds.add(sourceEvidenceId);
+      // A selected quote is not a review of all facts in a long source.
+      if ((evidenceById.get(sourceEvidenceId)?.fullSource?.length ?? 0) <= MAX_SOURCE_QUOTE_CHARS) {
+        coveredEvidenceIds.add(sourceEvidenceId);
+      }
     }
   };
   const validateTextItems = (
@@ -1031,10 +1104,12 @@ export function validateCompactionModelDraft(
         return;
       }
       if (!evidenceSupportsQuotes(evidenceEntries, candidate.sourceQuotes)) {
+        candidate.sourceEvidenceIds.forEach((id) => rejectedEvidenceIds.add(id));
         rejections.push({ category, index, reason: "unsupported_source_quote" });
         return;
       }
       if (requireUserEvidence && !hasOnlyUserMessageEvidence(evidenceEntries)) {
+        candidate.sourceEvidenceIds.forEach((id) => rejectedEvidenceIds.add(id));
         rejections.push({ category, index, reason: "missing_required_provenance" });
         return;
       }
@@ -1042,6 +1117,7 @@ export function validateCompactionModelDraft(
         requireSuccess &&
         !quotesSupportedBySuccessfulToolEvidence(evidenceEntries, candidate.sourceQuotes)
       ) {
+        candidate.sourceEvidenceIds.forEach((id) => rejectedEvidenceIds.add(id));
         rejections.push({
           category,
           index,
@@ -1128,7 +1204,8 @@ export function validateCompactionModelDraft(
     for (const entry of evidenceById.values()) {
       if (
         entry.provenance.kind === "message" &&
-        entry.provenance.messageSequence === harnessGoal.sourceSequence
+        entry.provenance.messageSequence === harnessGoal.sourceSequence &&
+        (entry.fullSource?.length ?? 0) <= MAX_SOURCE_QUOTE_CHARS
       ) {
         coveredEvidenceIds.add(entry.evidenceId);
       }
@@ -1356,6 +1433,7 @@ export function validateCompactionModelDraft(
     entry: CompactionSemanticEvidenceRegistryEntry,
     uncertaintyLabel: string,
   ): void => {
+    if ((entry.fullSource?.length ?? 0) > MAX_SOURCE_QUOTE_CHARS) return;
     if (isSuccessfulToolEvidence(entry)) {
       // Successful execution is already retained by the Harness-owned Tool ledger
       // and checkpoint toolState. It only becomes completed work when the model
@@ -1374,8 +1452,30 @@ export function validateCompactionModelDraft(
   };
   draft.evidenceReviews.forEach((review, index) => {
     const entry = evidenceById.get(review.evidenceId);
-    if (entry === undefined) {
+    if (
+      entry === undefined ||
+      (presentedEvidenceIds !== undefined && !presentedEvidenceIds.has(review.evidenceId))
+    ) {
       rejections.push({ category: "evidence_review", index, reason: "unknown_evidence_review" });
+      return;
+    }
+    if (review.disposition === "reviewed") {
+      if (
+        claimedEvidenceIds.has(review.evidenceId) &&
+        !rejectedEvidenceIds.has(review.evidenceId)
+      ) {
+        coveredEvidenceIds.add(review.evidenceId);
+      }
+      return;
+    }
+    if ((entry.fullSource?.length ?? 0) > MAX_SOURCE_QUOTE_CHARS) {
+      if (
+        review.disposition === "irrelevant" &&
+        entry.messageRole === "assistant" &&
+        !rejectedEvidenceIds.has(review.evidenceId)
+      ) {
+        coveredEvidenceIds.add(review.evidenceId);
+      }
       return;
     }
     coveredEvidenceIds.add(review.evidenceId);
@@ -1405,7 +1505,9 @@ export function validateCompactionModelDraft(
       continue;
     }
     materializePresentedEvidence(entry, "Unclassified evidence");
-    coveredEvidenceIds.add(evidenceId);
+    if ((entry.fullSource?.length ?? 0) <= MAX_SOURCE_QUOTE_CHARS) {
+      coveredEvidenceIds.add(evidenceId);
+    }
   }
 
   const boundedConstraints = takeNewestWithinLimit(
@@ -1895,7 +1997,11 @@ function semanticReminderItems(
       itemId: item.id,
       category,
       text: boundedText(item.text, MAX_REMINDER_ITEM_CHARS),
-      sourceQuotes: item.sourceQuotes.map((quote) => boundedText(quote, MAX_SOURCE_QUOTE_CHARS)),
+      sourceQuotes:
+        item.text.length <= MAX_REMINDER_ITEM_CHARS &&
+        item.sourceQuotes.every((quote) => item.text.includes(quote))
+          ? []
+          : item.sourceQuotes.map((quote) => boundedText(quote, MAX_SOURCE_QUOTE_CHARS)),
     }));
   return [
     ...(state.goal === null

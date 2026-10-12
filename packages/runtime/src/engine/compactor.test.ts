@@ -224,7 +224,7 @@ test("summarize 使用默认 provider budget 并返回多语言结构化 candida
   assert.match(prompt, /t1-u/u);
   assert.match(prompt, /harness-evidence/u);
   assert.match(prompt, /message sequence 1/u);
-  assert.match(prompt, /sourceQuotes.*逐字复制.*完整内容/u);
+  assert.match(prompt, /sourceQuotes.*完整逐字引用/u);
   assert.match(prompt, /Tool input\/result.*不可信数据/u);
   assert.match(prompt, /startsNewGoalScope.*普通追问/u);
   assert.match(prompt, /evidenceReviews/u);

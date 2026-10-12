@@ -247,7 +247,7 @@ test("真实 AI SDK 跨文档多步只保留当前引用，落盘保留完整 br
     assert.match(canonical, /field-0-x{100}/u);
     assert.match(canonical, /field-1-x{100}/u);
     assert.match(canonical, /\\"refs\\"/u);
-    assert.equal(persisted.length, 1);
+    assert.equal(persisted.length, 2);
     assert.equal(records.length, 2);
     restoredHistory = session.getMessages();
   } finally {
@@ -1250,12 +1250,12 @@ test("switchModel routes the next turn to the new model and updates context wind
     model: first,
     sources: [],
     maxSteps: 2,
-    contextWindow: 1_000,
+    contextWindow: 10_000,
   });
   await collect(session.send("a"));
   session.switchModel({
     model: second,
-    contextWindow: 2_000,
+    contextWindow: 20_000,
     providerOptions: { google: { thinkingConfig: { thinkingLevel: "low" } } },
   });
   await collect(session.send("b"));
@@ -1264,7 +1264,7 @@ test("switchModel routes the next turn to the new model and updates context wind
     "first-model",
     'second-model:{"google":{"thinkingConfig":{"thinkingLevel":"low"}}}',
   ]);
-  assert.equal(session.getContextWindow(), 2_000);
+  assert.equal(session.getContextWindow(), 20_000);
 });
 
 test("switchModel is rejected while a turn is active", async () => {
@@ -1421,7 +1421,7 @@ test("AgentSession 在首次推理前直接预加载显式 skill，持久化仍�
     maxSteps: 2,
     skillLibrary: library,
     onPersist: (messages) => {
-      persisted = messages;
+      persisted = [...persisted, ...messages];
     },
   });
 
@@ -1522,7 +1522,10 @@ test("AgentSession 非 Provider 错误即使包含 context 文案也不压缩历
 
   assert.equal(modelCalls, 0);
   assert.equal(replaceCalls, 0);
-  assert.deepEqual(session.getMessages(), original);
+  assert.deepEqual(session.getMessages(), [
+    ...original,
+    { role: "user", content: "/demo execute" },
+  ]);
   assert.equal(
     events.some((event) => event.type === "compaction-start" || event.type === "context-compacted"),
     false,
@@ -1562,7 +1565,7 @@ test("AgentSession context overflow 重放复用同一份显式 skill 快照", a
     skillLibrary: library,
     initialMessages: [
       { role: "user", content: "old-1" },
-      { role: "assistant", content: "answer-1" },
+      { role: "assistant", content: "answer-1".repeat(2000) },
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ],
@@ -2336,7 +2339,8 @@ test(
         resolverStarted.resolve();
         return neverResolves;
       },
-      onPersist: () => {
+      onPersist: (messages) => {
+        if (messages.every((message) => message.role === "user")) return;
         persistCalls += 1;
         throw new Error("disk full");
       },
@@ -2349,7 +2353,9 @@ test(
 
     assert.equal(modelCalls, 0);
     assert.equal(persistCalls, 1);
-    assert.deepEqual(session.getMessages(), []);
+    assert.deepEqual(session.getMessages(), [
+      { role: "user", content: "cancel before persistence" },
+    ]);
     const cancelled = events.find((event) => event.type === "turn-cancelled");
     assert.ok(cancelled && cancelled.type === "turn-cancelled");
     assert.match(cancelled.message, /未能保存/u);
@@ -2511,8 +2517,8 @@ test("AgentSession recovery prompt 以最新真实用户意图为最终约束", 
     }
   }
   assert.equal(calls, 0);
-  assert.equal(persisted.length, 1);
-  const restoredMessages = JSON.parse(JSON.stringify(persisted[0])) as ModelMessage[];
+  assert.equal(persisted.length, 2);
+  const restoredMessages = JSON.parse(JSON.stringify(persisted.flat())) as ModelMessage[];
 
   let latestUserPrompt: LanguageModelV4CallOptions["prompt"] | undefined;
   const latestUserSession = new AgentSession({
@@ -2630,7 +2636,7 @@ test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续
   assert.match(messages, /result-ok/);
   assert.match(messages, /已停止本轮/);
   assert.doesNotMatch(messages, /不应持久化/);
-  assert.equal(persisted.length, 1);
+  assert.equal(persisted.length, 2);
   assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
 });
 
@@ -2762,7 +2768,7 @@ test("AgentSession Esc 在工具落盘与 step 完成之间仍为下一轮保留
   assert.equal(cancelled.reason, "user");
   assert.match(cancelled.message, /已停止本轮操作/u);
   assert.doesNotMatch(cancelled.message, /session|外部副作用|tool result|Exit code/iu);
-  assert.equal(persisted.length, 1);
+  assert.equal(persisted.length, 2);
 
   const publicMessages = JSON.stringify(firstSession.getMessages());
   assert.doesNotMatch(
@@ -2771,7 +2777,7 @@ test("AgentSession Esc 在工具落盘与 step 完成之间仍为下一轮保留
   );
   assert.match(publicMessages, /已停止本轮操作/u);
 
-  const restoredMessages = JSON.parse(JSON.stringify(persisted[0])) as ModelMessage[];
+  const restoredMessages = JSON.parse(JSON.stringify(persisted.flat())) as ModelMessage[];
   let recoveryPrompt = "";
   const restoredSession = new AgentSession({
     id: "esc-ledger-step-race-restored",
@@ -2825,7 +2831,7 @@ test("AgentSession cancel 的 Tool ledger 写盘失败时仍回滚并上报取�
 
   assert.equal(started, true);
   assert.equal(ledgerCalls, 1);
-  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(session.getMessages(), [{ role: "user", content: "run slow" }]);
   assert.deepEqual(session.getToolExecutions({}, true), []);
   const cancelled = events.find((event) => event.type === "turn-cancelled");
   assert.ok(cancelled && cancelled.type === "turn-cancelled");
@@ -3441,19 +3447,19 @@ test("AgentSession.close 不被忽略 abort 的 provider 阻塞，迟到轮不�
 
   releaseStream.resolve();
   await collecting;
-  assert.deepEqual(persisted, []);
-  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, [[{ role: "user", content: "启动迟到请求" }]]);
+  assert.deepEqual(session.getMessages(), [{ role: "user", content: "启动迟到请求" }]);
 });
 
 test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace", async () => {
-  const model = sequencedModel([textStep("a"), textStep("b"), textStep("c")]);
+  const model = sequencedModel([textStep("a", 8_000), textStep("b", 8_000), textStep("c", 40)]);
   let replaced: number | undefined;
   const session = new AgentSession({
     id: "c1",
     model,
     sources: [],
     maxSteps: 2,
-    contextWindow: 1,
+    contextWindow: 10_000,
     compaction: {
       enabled: true,
       strategy: "truncate",
@@ -3475,8 +3481,8 @@ test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace",
   assert.equal(compacted.reason, "auto");
   assert.equal(compacted.strategy, "truncate");
   assert.equal(compacted.removed, 2);
-  assert.equal(compacted.beforeInputTokens, 1);
-  assert.equal(replaced, 2);
+  assert.equal(compacted.beforeInputTokens, 8_000);
+  assert.equal(replaced, 1);
   assert.equal(events.at(-1)?.type, "message-finish");
 });
 
@@ -3592,7 +3598,7 @@ test("AgentSession 自动压缩较早长轮次，不重放已完成工具", asyn
 
 test("AgentSession 从历史恢复且尚无实测 usage 时,首轮按估算触发自动压缩", async () => {
   const model = sequencedModel([textStep("after", 1)]);
-  const longAnswer = "answer-".repeat(40);
+  const longAnswer = "answer-".repeat(4000);
   const initialMessages: ModelMessage[] = [];
   for (let index = 1; index <= 6; index += 1) {
     initialMessages.push({ role: "user", content: `old-${String(index)}` });
@@ -3603,7 +3609,7 @@ test("AgentSession 从历史恢复且尚无实测 usage 时,首轮按估算触�
     model,
     sources: [],
     maxSteps: 2,
-    contextWindow: 300,
+    contextWindow: 40_000, // Six 8k-token answers force restoration; two retained answers fit.
     initialMessages,
     compaction: {
       enabled: true,
@@ -3619,13 +3625,17 @@ test("AgentSession 从历史恢复且尚无实测 usage 时,首轮按估算触�
   assert.ok(compacted && compacted.type === "context-compacted");
   assert.equal(compacted.reason, "auto");
   assert.equal(compacted.beforeInputTokens, undefined);
-  assert.ok(compacted.removed >= 8, `removed ${String(compacted.removed)}`);
+  assert.ok(compacted.removed >= 6, `removed ${String(compacted.removed)}`);
+  assert.ok(
+    session.getRequestBudgetState().last!.calibratedInputEstimate <=
+      session.getRequestBudgetState().last!.availableInputCeiling!,
+  );
   assert.equal(events.at(-1)?.type, "message-finish");
 });
 
 test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并在同一个 send 内自动续跑", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     textStep("continued", 40),
   ]);
   const session = new AgentSession({
@@ -3633,7 +3643,7 @@ test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -3672,8 +3682,8 @@ test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并�
 
 test("AgentSession 轮内多步超压时在同一 send 内压缩并续跑完成本轮", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
-    toolCallStep("echo-agent__echo", { q: "y" }, 180),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
+    toolCallStep("echo-agent__echo", { q: "y" }, 8_100),
     textStep("finished", 190),
   ]);
   const session = new AgentSession({
@@ -3681,7 +3691,7 @@ test("AgentSession 轮内多步超压时在同一 send 内压缩并续跑完成�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     compaction: {
       enabled: true,
       strategy: "truncate",
@@ -3729,15 +3739,15 @@ function bigResultSource(agentName: string, toolName: string, chars: number): Ag
 
 test("AgentSession 仅靠工具结果把压力推过线时,暂停后仍会尝试压缩再续跑", async () => {
   const model = sequencedModel([
-    toolCallStep("big-agent__read", { q: "x" }, 130),
+    toolCallStep("big-agent__read", { q: "x" }, 1_200),
     textStep("continued", 40),
   ]);
   const session = new AgentSession({
     id: "c1-tool-result-pressure",
     model,
-    sources: [bigResultSource("big-agent", "read", 5000)],
+    sources: [bigResultSource("big-agent", "read", 23_000)],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -3763,7 +3773,7 @@ test("AgentSession 仅靠工具结果把压力推过线时,暂停后仍会尝试
 });
 
 test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚,并以 error 事件收尾", async () => {
-  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 170), textStep("never", 40)];
+  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 8_000), textStep("never", 40)];
   let index = 0;
   const model = new MockLanguageModelV4({
     doStream: async () => {
@@ -3781,7 +3791,7 @@ test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -3791,6 +3801,7 @@ test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚
     compaction: {
       enabled: true,
       strategy: "summarize",
+      maxOutputTokens: 512, // Keep the summary schema and output inside this small test window.
       threshold: 0.75,
       keepRecentTurns: 1,
       keepRecentTokens: 1,
@@ -3803,8 +3814,8 @@ test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚
   const events = await collect(session.send("tool loop"));
   assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
   assert.equal(events.at(-1)?.type, "error");
-  assert.equal(persisted.length, 1);
-  const firstSegment = persisted[0] ?? [];
+  assert.equal(persisted.length, 2);
+  const firstSegment = persisted.flat();
   assert.equal(firstSegment[0]?.role, "user");
   const inMemory = session.getMessages();
   assert.equal(inMemory.length, 4 + firstSegment.length);
@@ -3813,7 +3824,7 @@ test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚
 });
 
 test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是静默结束", async () => {
-  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 170), textStep("never", 40)];
+  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 8_000), textStep("never", 40)];
   let index = 0;
   const holder: { session?: AgentSession } = {};
   const model = new MockLanguageModelV4({
@@ -3833,7 +3844,7 @@ test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     onPersist: (messages) => {
       persisted.push([...messages]);
     },
@@ -3846,6 +3857,7 @@ test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是
     compaction: {
       enabled: true,
       strategy: "summarize",
+      maxOutputTokens: 512, // Keep the summary schema and output inside this small test window.
       threshold: 0.75,
       keepRecentTurns: 1,
       keepRecentTokens: 1,
@@ -3868,7 +3880,7 @@ test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是
 
 test("AgentSession 续跑共享 runtime.max-steps 预算,不会绕过单轮步骤上限", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     toolCallStep("echo-agent__echo", { q: "y" }, 60),
     textStep("never", 60),
   ]);
@@ -3877,7 +3889,7 @@ test("AgentSession 续跑共享 runtime.max-steps 预算,不会绕过单轮步�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 2,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -3913,7 +3925,7 @@ test("AgentSession 首步就超压但没有任何可压缩内容时不暂停,同
     model,
     sources: [bigResultSource("big-agent", "read", 5000)],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000,
     compaction: {
       enabled: true,
       strategy: "truncate",
@@ -3980,7 +3992,7 @@ function countOccurrences(text: string, needle: string): number {
 
 const PRESSURE_CONTINUATION_SESSION = {
   maxSteps: 8,
-  contextWindow: 200,
+  contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
   initialMessages: [
     { role: "user", content: "old-1" },
     { role: "assistant", content: "answer-1" },
@@ -4053,22 +4065,27 @@ function assertPromptRecordsTurnOnce(
       parts.push(...message.content);
     }
   }
-  assert.equal(userTurns.length, 1, "next prompt: user");
-  assert.equal(
-    parts.filter((part) => part.type === "tool-call" && part.toolCallId === "c1").length,
-    1,
-    "next prompt: tool-call c1",
-  );
-  assert.equal(
-    parts.filter((part) => part.type === "tool-result" && part.toolCallId === "c1").length,
-    1,
-    "next prompt: tool-result c1",
-  );
+  assert.ok(userTurns.length <= 1, "next prompt: user must not duplicate");
+  if (userTurns.length === 0) {
+    assert.match(JSON.stringify(prompt), /Roll compaction checkpoint/u);
+    assert.match(JSON.stringify(prompt), /tool loop/u);
+  }
+  const calls = parts.filter(
+    (part) => part.type === "tool-call" && part.toolCallId === "c1",
+  ).length;
+  const results = parts.filter(
+    (part) => part.type === "tool-result" && part.toolCallId === "c1",
+  ).length;
+  // Early acceptance adds the new turn boundary before compaction: the earlier Tool pair may
+  // leave active history, but must remain paired or be represented by a real checkpoint.
+  assert.ok(calls <= 1, "next prompt: tool-call c1 must not duplicate");
+  assert.equal(results, calls, "next prompt: c1 pairing");
+  if (calls === 0) assert.match(JSON.stringify(prompt), /Roll compaction checkpoint/u);
 }
 
 test("AgentSession 压力续跑中模型调用失败时不会重复已落盘的 user 与工具步骤", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     streamErrorStep("ECONNRESET"),
     textStep("ok", 40),
   ]);
@@ -4104,13 +4121,14 @@ test("AgentSession 压力续跑中模型调用失败时不会重复已落盘的 
 
 test("AgentSession 压力续跑中被取消时不会重复已落盘的 user 与工具步骤", async () => {
   let calls = 0;
+  let resuming = false;
   const model = new MockLanguageModelV4({
     doStream: async (options) => {
       calls += 1;
       if (calls === 1) {
-        return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 170));
+        return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 8_000));
       }
-      if (calls === 2) {
+      if (calls === 2 && !resuming) {
         return {
           stream: new ReadableStream<LanguageModelV4StreamPart>({
             start(controller) {
@@ -4153,7 +4171,7 @@ test("AgentSession 压力续跑中被取消时不会重复已落盘的 user 与�
     }
   }
   assert.equal(events.at(-1)?.type, "turn-cancelled");
-  assert.equal(calls, 2);
+  assert.equal(calls, 1, "cancel at message-start now stops before the underlying doStream");
   assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
     user: 1,
     toolCallIds: 2,
@@ -4164,13 +4182,14 @@ test("AgentSession 压力续跑中被取消时不会重复已落盘的 user 与�
   });
   assert.equal(session.getToolExecutions().length, 1);
 
+  resuming = true;
   await collect(session.send("继续"));
   assertPromptRecordsTurnOnce(model.doStreamCalls.at(-1)?.prompt);
 });
 
 test("AgentSession 压力续跑中上下文溢出时不会重复已落盘的 user", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     streamErrorStep("context_length_exceeded"),
     streamErrorStep("context_length_exceeded"),
   ]);
@@ -4200,7 +4219,7 @@ test("AgentSession 压力续跑中上下文溢出时不会重复已落盘的 use
 
 test("AgentSession 压力续跑中溢出且在恢复压缩期间被取消时不会重复已落盘的 user", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     streamErrorStep("context_length_exceeded"),
   ]);
   const persisted: ModelMessage[][] = [];
@@ -4247,7 +4266,7 @@ test("AgentSession 压力续跑中溢出且在恢复压缩期间被取消时不�
 
 test("AgentSession 续跑中完成新工具步骤后溢出并在恢复压缩期间被取消时,新步骤只进账本与恢复证据,不写回 raw", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     multiToolCallStep([{ toolCallId: "c2", toolName: "echo-agent__echo", input: { q: "y" } }]),
     streamErrorStep("context_length_exceeded"),
     textStep("ok"),
@@ -4319,7 +4338,7 @@ test("AgentSession 续跑中完成新工具步骤后溢出并在恢复压缩期�
 
 test("AgentSession 续跑中复用同一 toolCallId 再次执行后溢出并在恢复压缩期间被取消时,第二次执行进入恢复证据", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     multiToolCallStep([{ toolCallId: "c1", toolName: "echo-agent__echo", input: { q: "again" } }]),
     streamErrorStep("context_length_exceeded"),
     textStep("ok"),
@@ -4404,7 +4423,7 @@ test("AgentSession 首段执行工具后溢出并在恢复压缩期间被取消�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 4,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     onPersist: (messages) => {
       persisted.push([...messages]);
     },
@@ -4453,11 +4472,12 @@ test("AgentSession 首段执行工具后溢出并在恢复压缩期间被取消�
 for (const interruption of ["error", "cancel"] as const) {
   test(`AgentSession 续跑中完成新工具步骤后遇到 ${interruption} 时,新步骤恰好落盘一次且不重复首段`, async () => {
     let calls = 0;
+    let resuming = false;
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         calls += 1;
         if (calls === 1) {
-          return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 170));
+          return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 8_000));
         }
         if (calls === 2) {
           return streamChunks(
@@ -4466,7 +4486,7 @@ for (const interruption of ["error", "cancel"] as const) {
             ]),
           );
         }
-        if (calls === 3) {
+        if (calls === 3 && !resuming) {
           if (interruption === "error") {
             return streamChunks(streamErrorStep("ECONNRESET"));
           }
@@ -4512,7 +4532,11 @@ for (const interruption of ["error", "cancel"] as const) {
       }
     }
     assert.equal(events.at(-1)?.type, interruption === "error" ? "error" : "turn-cancelled");
-    assert.equal(calls, 3);
+    assert.equal(
+      calls,
+      interruption === "cancel" ? 2 : 3,
+      "cancel after Tool completion blocks the next dispatch",
+    );
     for (const [label, serialized] of [
       ["durable", JSON.stringify(persisted.flat())],
       ["active", JSON.stringify(session.getMessages())],
@@ -4525,15 +4549,21 @@ for (const interruption of ["error", "cancel"] as const) {
       ["c1", "c2"],
     );
 
+    resuming = true;
     const nextEvents = await collect(session.send("继续"));
-    assert.ok(nextEvents.some((event) => event.type === "context-compacted"));
+    assert.deepEqual(
+      nextEvents.filter((event) => event.type === "error"),
+      [],
+    );
+    assert.equal(nextEvents.at(-1)?.type, "message-finish");
     const prompt = model.doStreamCalls.at(-1)?.prompt;
     assertPromptHasNoDuplicateTurnRecords(prompt, ["c1", "c2"]);
-    assert.equal(
-      countOccurrences(JSON.stringify(prompt), '"toolCallId":"c2"'),
-      2,
-      "next prompt: c2",
+    const c2Count = countOccurrences(JSON.stringify(prompt), '"toolCallId":"c2"');
+    assert.ok(
+      c2Count === 0 || c2Count === 2,
+      "next prompt: c2 paired or compacted, never duplicated",
     );
+    if (c2Count === 0) assert.match(JSON.stringify(prompt), /Roll compaction checkpoint/u);
   });
 }
 
@@ -4675,7 +4705,8 @@ test("AgentSession 上下文溢出的 pending Tool 恢复写失败时,下一轮�
       }),
     ],
     maxSteps: 4,
-    onPersist: () => {
+    onPersist: (messages) => {
+      if (messages.every((message) => message.role === "user")) return;
       persistCalls += 1;
       throw new Error("recovery store unavailable");
     },
@@ -4740,8 +4771,12 @@ test("AgentSession 上下文溢出时 Tool 账本写盘失败不落盘终态", a
   assert.equal(toolCalls, 0);
   assert.equal(ledgerCalls, 1);
   assert.deepEqual(session.getToolExecutions({}, true), []);
-  assert.deepEqual(session.getMessages(), []);
-  assert.deepEqual(persisted, [], "ledger failure must not persist a turn terminal state");
+  assert.deepEqual(session.getMessages(), [{ role: "user", content: "tool loop" }]);
+  assert.deepEqual(
+    persisted,
+    [[{ role: "user", content: "tool loop" }]],
+    "ledger failure must not persist a turn terminal state",
+  );
   assert.ok(
     events.some(
       (event) =>
@@ -4897,7 +4932,8 @@ test("AgentSession 未覆盖 Tool ledger 的恢复写入失败时阻止手动 co
       keepRecentTurns: 1,
       keepRecentTokens: 1,
     },
-    onPersist: () => {
+    onPersist: (messages) => {
+      if (messages.every((message) => message.role === "user")) return;
       persistCalls += 1;
       throw new Error("transcript unavailable");
     },
@@ -4936,13 +4972,13 @@ test("AgentSession 首次模型调用失败且没有任何已完成步骤时不�
 
   const events = await collect(session.send("hello"));
   assert.equal(events.at(-1)?.type, "error");
-  assert.deepEqual(session.getMessages(), []);
-  assert.deepEqual(persisted, []);
+  assert.deepEqual(session.getMessages(), [{ role: "user", content: "hello" }]);
+  assert.deepEqual(persisted, [[{ role: "user", content: "hello" }]]);
 });
 
 test("AgentSession 用户拒绝工具后即使压力超阈值也不会压缩续跑,本轮到此结束", async () => {
   const model = sequencedModel([
-    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "x" }, 8_000),
     textStep("BUG_CONTINUED", 40),
   ]);
   const rejectPolicy: ToolPolicy = {
@@ -4953,7 +4989,7 @@ test("AgentSession 用户拒绝工具后即使压力超阈值也不会压缩续�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 200,
+    contextWindow: 10_000, // Full SDK overhead fits; measured 8k steps still cross 75%.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -4994,7 +5030,7 @@ test("AgentSession 有 compaction checkpoint 时把 reminder 计入首轮压力�
     model,
     sources: [],
     maxSteps: 2,
-    contextWindow: 400,
+    contextWindow: 400, // Deliberately irreducible: the reminder must not bypass finalized guard.
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -5023,10 +5059,19 @@ test("AgentSession 有 compaction checkpoint 时把 reminder 计入首轮压力�
   const compactedIndex = events.findIndex((event) => event.type === "context-compacted");
   const startIndex = events.findIndex((event) => event.type === "message-start");
   assert.notEqual(compactedIndex, -1);
-  assert.ok(compactedIndex < startIndex);
+  assert.ok(
+    compactedIndex > startIndex,
+    "maintenance follows actual SDK preparation, before Provider dispatch",
+  );
   const compacted = events[compactedIndex];
   assert.equal(compacted?.type === "context-compacted" ? compacted.reason : undefined, "auto");
-  assert.equal(events.at(-1)?.type, "message-finish");
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(model.doStreamCalls.length, 0);
+  assert.ok(session.getRequestBudgetState().last!.messageTokens > remainingTokens);
+  assert.ok(
+    session.getRequestBudgetState().last!.calibratedInputEstimate >
+      session.getRequestBudgetState().last!.availableInputCeiling!,
+  );
 });
 
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
@@ -5040,7 +5085,7 @@ test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 400,
+    contextWindow: 10_000,
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -5073,7 +5118,7 @@ test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自�
 test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),
-    textStep("done", 330),
+    textStep("done", 8_000),
     textStep("after"),
   ]);
   const session = new AgentSession({
@@ -5081,7 +5126,7 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 400,
+    contextWindow: 10_000,
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -5102,8 +5147,8 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
     (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
       event.type === "message-finish",
   );
-  assert.equal(firstFinish?.totalUsage?.inputTokens, 380);
-  assert.equal(firstFinish?.contextInputTokens, 330);
+  assert.equal(firstFinish?.totalUsage?.inputTokens, 8_050);
+  assert.equal(firstFinish?.contextInputTokens, 8_000);
   assert.equal(
     first.some((event) => event.type === "context-compacted"),
     false,
@@ -5113,7 +5158,7 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
   const compacted = second.find((event) => event.type === "context-compacted");
   assert.ok(compacted && compacted.type === "context-compacted");
   assert.equal(compacted.reason, "auto");
-  assert.equal(compacted.beforeInputTokens, 330);
+  assert.equal(compacted.beforeInputTokens, 8_000);
   assert.ok(compacted.removed >= 4, `removed ${String(compacted.removed)}`);
   assert.equal(second.at(-1)?.type, "message-finish");
 });
@@ -5131,7 +5176,7 @@ test("AgentSession context 长度错误后压缩并在同一个 send 内自动�
     maxSteps: 2,
     initialMessages: [
       { role: "user", content: "old-1" },
-      { role: "assistant", content: "answer-1" },
+      { role: "assistant", content: "answer-1".repeat(2000) },
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ],
@@ -5157,9 +5202,9 @@ test("AgentSession context 长度错误后压缩并在同一个 send 内自动�
   const compacted = recovered.find((event) => event.type === "context-compacted");
   assert.ok(compacted && compacted.type === "context-compacted");
   assert.equal(compacted.reason, "auto");
-  assert.equal(compacted.removed, 2);
-  assert.equal(replaced?.length, 2);
-  assert.equal(session.getMessages().length, 4);
+  assert.equal(compacted.removed, 4);
+  assert.equal(replaced?.length, 1);
+  assert.equal(session.getMessages().length, 2);
   assert.equal(session.getMessages().at(-2)?.content, "too much");
   assert.match(JSON.stringify(session.getMessages().at(-1)?.content), /recovered/u);
 });
@@ -5182,7 +5227,7 @@ test("AgentSession Provider stream throw context 错误也压缩并重放当前 
     maxSteps: 2,
     initialMessages: [
       { role: "user", content: "old-1" },
-      { role: "assistant", content: "answer-1" },
+      { role: "assistant", content: "answer-1".repeat(2000) },
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ],
@@ -5194,7 +5239,7 @@ test("AgentSession Provider stream throw context 错误也压缩并重放当前 
       keepRecentTokens: 1,
     },
     onPersist: (messages) => {
-      persisted = messages;
+      persisted = [...persisted, ...messages];
     },
   });
 
@@ -5307,7 +5352,8 @@ test("AgentSession overflow compaction 被取消时不发起第二次 Turn 推�
       keepRecentTurns: 1,
       keepRecentTokens: 1,
     },
-    onPersist: () => {
+    onPersist: (messages) => {
+      if (messages.every((message) => message.role === "user")) return;
       throw new Error("cancel persistence failed");
     },
   });
@@ -5405,7 +5451,7 @@ test("AgentSession context 自动重放最多一次，连续 overflow 有界失�
     maxSteps: 2,
     initialMessages: [
       { role: "user", content: "old-1" },
-      { role: "assistant", content: "answer-1" },
+      { role: "assistant", content: "answer-1".repeat(2000) },
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ],
@@ -5468,14 +5514,15 @@ test("AgentSession context failure marker 持久化失败时回滚内存 Turn", 
     model: sequencedModel([streamErrorStep("context_length_exceeded")]),
     sources: [],
     maxSteps: 2,
-    onPersist: () => {
+    onPersist: (messages) => {
+      if (messages.every((message) => message.role === "user")) return;
       throw new Error("db write failed");
     },
   });
 
   const events = await collect(session.send("must remain durable"));
 
-  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(session.getMessages(), [{ role: "user", content: "must remain durable" }]);
   assert.ok(
     events.some(
       (event) =>
@@ -5517,7 +5564,7 @@ test("AgentSession 已输出文本后 context overflow 不重放", async () => {
       keepRecentTokens: 1,
     },
     onPersist: (messages) => {
-      persisted = messages;
+      persisted = [...persisted, ...messages];
     },
   });
 
@@ -5567,7 +5614,7 @@ test("AgentSession Tool 已执行后下一 Step overflow 不重放副作用", as
       keepRecentTokens: 1,
     },
     onPersist: (messages) => {
-      persisted = messages;
+      persisted = [...persisted, ...messages];
     },
   });
 
@@ -5615,6 +5662,17 @@ test("AgentSession 自动压缩重复候选后继续聊天且不重放已执行 
       }
       const draft = {
         ...createEmptyCompactionModelDraft(),
+        evidenceReviews: [
+          ...new Set(
+            [...JSON.stringify(options.prompt).matchAll(/evidence_[0-9a-f]{24}/gu)].map(
+              (match) => match[0],
+            ),
+          ),
+        ].map((evidenceId) => ({
+          evidenceId,
+          disposition: "irrelevant",
+          reason: "fixture filler reviewed",
+        })),
         constraints:
           draftCalls > 1
             ? []
@@ -5638,7 +5696,14 @@ test("AgentSession 自动压缩重复候选后继续聊天且不重放已执行 
     model,
     sources: [source("probe", "write", () => (toolExecutions += 1))],
     maxSteps: 4,
-    contextWindow: 1,
+    contextWindow: 20_000,
+    initialMessages: [
+      { role: "user", content: "不要重复执行工具" },
+      ...Array.from({ length: 15 }, (_, index) => ({
+        role: "assistant" as const,
+        content: `inspection ${index}: ${"seed".repeat(1000)}`,
+      })),
+    ],
     compaction: {
       enabled: true,
       strategy: "summarize",
@@ -5670,8 +5735,8 @@ test("AgentSession 自动压缩重复候选后继续聊天且不重放已执行 
   }
 });
 
-test("AgentSession summarize 结构化 draft 无效时降级 truncate 且不继续原始历史", async () => {
-  const steps = [textStep("a"), textStep("b"), textStep("c")];
+test("AgentSession summarize 结构化 draft 无效时保留原始历史且可继续", async () => {
+  const steps = [textStep("a", 8_000), textStep("b", 8_000), textStep("c", 40)];
   let index = 0;
   let generateCalls = 0;
   const model = new MockLanguageModelV4({
@@ -5695,10 +5760,11 @@ test("AgentSession summarize 结构化 draft 无效时降级 truncate 且不继�
     model,
     sources: [],
     maxSteps: 2,
-    contextWindow: 1,
+    contextWindow: 10_000,
     compaction: {
       enabled: true,
       strategy: "summarize",
+      maxOutputTokens: 512, // Keep the summary schema and output inside this small test window.
       threshold: 0.75,
       keepRecentTurns: 1,
       keepRecentTokens: 1,
@@ -5711,9 +5777,10 @@ test("AgentSession summarize 结构化 draft 无效时降级 truncate 且不继�
 
   const compacted = events.find((event) => event.type === "context-compacted");
   assert.ok(compacted && compacted.type === "context-compacted");
-  assert.equal(compacted.strategy, "truncate");
-  assert.equal(compacted.removed, 2);
-  assert.equal(generateCalls, 1);
+  assert.equal(compacted.strategy, "summarize");
+  assert.equal(compacted.removed, 0);
+  assert.ok(generateCalls >= 1);
+  assert.ok(session.getMessages().some((message) => message.content === "t1"));
   assert.equal(
     events.some((event) => event.type === "error"),
     false,
@@ -6124,13 +6191,14 @@ test("AgentSession V1 malformed draft 撤销旧约束时仍保留上一真实目
     compactedEvent && compactedEvent.type === "context-compacted",
     JSON.stringify(compacted),
   );
-  assert.equal(compactedEvent.strategy, "truncate");
-  assert.equal(compactedEvent.checkpointGeneration, 2);
+  assert.equal(compactedEvent.strategy, "summarize");
+  assert.equal(compactedEvent.removed, 0);
+  assert.equal(compactedEvent.checkpointGeneration, undefined);
 
   await collect(session.send("检查恢复状态"));
   const prompt = inferencePrompts.at(-1) ?? "";
   assert.match(prompt, /修复调度器，但绝对不要修改公开 API/u);
-  assert.match(prompt, /\\"constraints\\":\[\]/u);
+  assert.match(prompt, /现在允许修改公开 API/u);
   assert.doesNotMatch(prompt, /\\"category\\":\\"goal\\"[^}]*现在允许修改公开 API/u);
 });
 
@@ -6367,7 +6435,9 @@ test("AgentSession send iterator 提前关闭时只取消本轮且 session 可�
     model,
     sources: [],
     maxSteps: 2,
-    onPersist: () => cancelledTurnPersisted.resolve(),
+    onPersist: (messages) => {
+      if (messages.some((message) => message.role !== "user")) cancelledTurnPersisted.resolve();
+    },
     onClose: () => {
       closeCalls += 1;
     },
@@ -6982,7 +7052,7 @@ test("send 支持附件输入并以 parts 数组持久化用户消息", async ()
     assert.equal(fileParts[0]?.mediaType, "image/png");
 
     await collect(session.send("纯文本跟进"));
-    const followUp = persisted[1]?.find((message) => message.role === "user");
+    const followUp = persisted.flat().filter((message) => message.role === "user")[1];
     assert.equal(followUp?.content, "纯文本跟进");
   } finally {
     await session.close();
@@ -7194,7 +7264,7 @@ test("AgentSession 把工作区约定注入 system prompt，文件变化后下�
 test("AgentSession 工作区约定在自动压缩后的下一轮仍在 system prompt 中", async () => {
   const captured: string[] = [];
   let index = 0;
-  const steps = [textStep("a"), textStep("b"), textStep("c"), textStep("d")];
+  const steps = [textStep("a", 8_000), textStep("b", 8_000), textStep("c", 40), textStep("d", 40)];
   const model = new MockLanguageModelV4({
     doStream: async (options) => {
       const first = options.prompt[0];
@@ -7209,7 +7279,7 @@ test("AgentSession 工作区约定在自动压缩后的下一轮仍在 system pr
     model,
     sources: [],
     maxSteps: 2,
-    contextWindow: 1,
+    contextWindow: 10_000,
     compaction: {
       enabled: true,
       strategy: "truncate",

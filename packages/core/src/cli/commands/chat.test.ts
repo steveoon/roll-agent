@@ -599,7 +599,7 @@ test("runJsonTurn 通过真实 ConversationEngine + ThreadStore 完成一次 ove
     const threadId = store.createThread();
     store.appendMessages(threadId, [
       { role: "user", content: "json older turn" },
-      { role: "assistant", content: "json older answer" },
+      { role: "assistant", content: "json older answer".repeat(2000) }, // Recovery must reduce full request, not just change checkpoint ID.
       { role: "user", content: "json recent turn" },
       { role: "assistant", content: "json recent answer" },
     ]);

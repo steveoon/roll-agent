@@ -1832,7 +1832,7 @@ test("RuntimeServer send 复用中央 overflow 重放且仅持久化一组当前
       [
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "t1" },
-        { type: "text-delta", id: "t1", delta: "seed one" },
+        { type: "text-delta", id: "t1", delta: "seed one".repeat(2000) },
         { type: "text-end", id: "t1" },
         { type: "finish", usage: usage(), finishReason: STOP },
       ],

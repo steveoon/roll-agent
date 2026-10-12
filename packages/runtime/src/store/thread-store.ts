@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { modelMessageSchema, type ModelMessage } from "ai";
+import { modelMessageSchema, type ModelMessage, type UserModelMessage } from "ai";
 import {
   APP_OUTPUT_LIMITS,
   appOutputResultSchema,
@@ -66,7 +66,16 @@ import {
   type ThreadDerivedFrom,
 } from "./thread-origin.ts";
 
-const SCHEMA_VERSION = 7;
+import {
+  acceptedTurnInputSchema,
+  turnInputIdSchema,
+  turnInputSkillCheckpointSchema,
+  type AcceptedTurnInput,
+  type TurnInputSkillCheckpoint,
+} from "./turn-input.ts";
+import type { ExplicitSkillCheckpointV1 } from "../engine/explicit-skill-context.ts";
+
+const SCHEMA_VERSION = 8;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
@@ -179,6 +188,7 @@ export interface ForkThreadSnapshotInput {
 }
 
 export interface ThreadSnapshot {
+  readonly turnInputs?: readonly AcceptedTurnInput[];
   readonly appOutputs?: readonly {
     readonly operationId: string;
     readonly result: AppOutputResult;
@@ -689,6 +699,17 @@ export class ThreadStore {
              PRIMARY KEY (thread_id, sequence),
              FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
            );
+           CREATE TABLE IF NOT EXISTS thread_turn_inputs (
+             thread_id TEXT NOT NULL,
+             input_id TEXT NOT NULL,
+             transcript_sequence INTEGER NOT NULL,
+             skill_checkpoint_json TEXT,
+             created_at TEXT NOT NULL,
+             PRIMARY KEY (thread_id, input_id),
+             UNIQUE (thread_id, transcript_sequence),
+             FOREIGN KEY (thread_id, transcript_sequence)
+               REFERENCES transcript_messages(thread_id, sequence) ON DELETE CASCADE
+           );
            CREATE TABLE IF NOT EXISTS thread_transcript_state (
              thread_id TEXT PRIMARY KEY,
              completeness TEXT NOT NULL CHECK (completeness IN ('complete', 'legacy_snapshot')),
@@ -1092,6 +1113,7 @@ export class ThreadStore {
           : [],
         messages,
         transcript,
+        turnInputs: hasTable("thread_turn_inputs") ? this.listTurnInputs(threadId) : [],
         toolExecutions,
         checkpoints,
         toolExecutionCoverage,
@@ -1156,6 +1178,20 @@ export class ThreadStore {
           parsed.message.role,
           JSON.stringify(parsed.message),
           parsed.provenance,
+          parsed.createdAt,
+        );
+      }
+      const insertInput = this.db.prepare(
+        "INSERT INTO thread_turn_inputs (thread_id, input_id, transcript_sequence, skill_checkpoint_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const receipt of snapshot.turnInputs ?? []) {
+        const parsed = acceptedTurnInputSchema.parse(receipt);
+        // Fork carries historical metadata, never the original invocation/retry identity.
+        insertInput.run(
+          id,
+          randomUUID(),
+          parsed.transcriptSequence,
+          parsed.skillCheckpoint === undefined ? null : JSON.stringify(parsed.skillCheckpoint),
           parsed.createdAt,
         );
       }
@@ -1563,6 +1599,126 @@ export class ThreadStore {
         removed.removed_bytes ?? 0,
         threadId,
       );
+  }
+
+  /** Internal acceptance boundary; the same receipt cannot reinsert compacted active history. */
+  acceptTurnInput(threadId: string, inputId: string, message: UserModelMessage): AcceptedTurnInput {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    const id = turnInputIdSchema.parse(inputId);
+    const parsed = sanitizePersistedExplicitSkillCheckpoint(modelMessageSchema.parse(message));
+    if (parsed.role !== "user") throw new Error("Accepted turn input must be a user message");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.hasThread(threadId)) throw new Error(`Thread "${threadId}" 不存在`);
+      const previous = this.getTurnInput(threadId, id);
+      if (previous !== undefined) {
+        const raw = this.db
+          .prepare(
+            "SELECT message_json FROM transcript_messages WHERE thread_id = ? AND sequence = ?",
+          )
+          .get(threadId, previous.transcriptSequence);
+        if (raw?.message_json !== JSON.stringify(parsed)) {
+          throw new Error("Turn input identity conflict");
+        }
+        this.db.exec("COMMIT");
+        return previous;
+      }
+      const now = this.now().toISOString();
+      this.appendMessagesInTransaction(threadId, [parsed], now, undefined);
+      const row = this.db
+        .prepare("SELECT MAX(sequence) AS sequence FROM transcript_messages WHERE thread_id = ?")
+        .get(threadId);
+      const receipt = acceptedTurnInputSchema.parse({
+        inputId: id,
+        transcriptSequence: row?.sequence,
+        createdAt: now,
+      });
+      this.db
+        .prepare(
+          "INSERT INTO thread_turn_inputs (thread_id, input_id, transcript_sequence, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(threadId, id, receipt.transcriptSequence, now);
+      this.db.exec("COMMIT");
+      return receipt;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getTurnInput(threadId: string, inputId: string): AcceptedTurnInput | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT input_id, transcript_sequence, skill_checkpoint_json, created_at FROM thread_turn_inputs WHERE thread_id = ? AND input_id = ?",
+      )
+      .get(threadId, turnInputIdSchema.parse(inputId));
+    return row === undefined
+      ? undefined
+      : acceptedTurnInputSchema.parse({
+          inputId: row.input_id,
+          transcriptSequence: row.transcript_sequence,
+          createdAt: row.created_at,
+          ...(typeof row.skill_checkpoint_json === "string"
+            ? { skillCheckpoint: JSON.parse(row.skill_checkpoint_json) }
+            : {}),
+        });
+  }
+
+  listTurnInputs(threadId: string): readonly AcceptedTurnInput[] {
+    return this.db
+      .prepare(
+        "SELECT input_id FROM thread_turn_inputs WHERE thread_id = ? ORDER BY transcript_sequence",
+      )
+      .all(threadId)
+      .map((row) => {
+        const receipt = this.getTurnInput(threadId, String(row.input_id));
+        if (receipt === undefined) throw new Error("Turn input receipt disappeared");
+        return receipt;
+      });
+  }
+
+  getTurnInputSkillCheckpoint(
+    threadId: string,
+    sequence: number,
+  ): TurnInputSkillCheckpoint | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT skill_checkpoint_json FROM thread_turn_inputs WHERE thread_id = ? AND transcript_sequence = ?",
+      )
+      .get(threadId, sequence);
+    return typeof row?.skill_checkpoint_json === "string"
+      ? turnInputSkillCheckpointSchema.parse(JSON.parse(row.skill_checkpoint_json))
+      : undefined;
+  }
+
+  recordTurnSkillCheckpoint(
+    threadId: string,
+    inputId: string,
+    checkpoint: ExplicitSkillCheckpointV1,
+  ): void {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    const parsed = turnInputSkillCheckpointSchema.parse(checkpoint);
+    const serialized = JSON.stringify(parsed);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const receipt = this.getTurnInput(threadId, inputId);
+      if (receipt === undefined) throw new Error("Turn input receipt not found");
+      if (
+        receipt.skillCheckpoint !== undefined &&
+        JSON.stringify(receipt.skillCheckpoint) !== serialized
+      ) {
+        throw new Error("Turn input Skill snapshot conflict");
+      }
+      this.db
+        .prepare(
+          "UPDATE thread_turn_inputs SET skill_checkpoint_json = ? WHERE thread_id = ? AND input_id = ?",
+        )
+        .run(serialized, threadId, inputId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   appendMessages(
