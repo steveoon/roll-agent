@@ -21,7 +21,7 @@ test("packing subtracts real output schema, provider options and output reservat
   assert.ok(smaller !== undefined && smaller < budget - 999);
   assert.equal(await compactionEvidenceTokenBudget({ model: base.model }), undefined);
   await assert.rejects(
-    compactionEvidenceTokenBudget({ ...base, contextWindow: 8192 }),
+    compactionEvidenceTokenBudget({ ...base, contextWindow: 2048 }),
     /evidence_unpresentable/,
   );
 });
@@ -138,7 +138,7 @@ for (const cause of ["output reserve", "provider options"] as const) {
         strategy: "summarize",
         keepRecentTurns: 1,
         keepRecentTokens: 1,
-        contextWindow: cause === "output reserve" ? 8192 : 128000,
+        contextWindow: cause === "output reserve" ? 2048 : 128000,
         maxOutputTokens: 8192,
         ...(cause === "provider options"
           ? {

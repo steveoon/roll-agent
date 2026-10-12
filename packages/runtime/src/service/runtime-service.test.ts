@@ -648,6 +648,60 @@ for (const terminal of ["error", "cancel"] as const) {
   });
 }
 
+for (const terminal of ["finish", "error", "cancel"] as const) {
+  test(`RuntimeService pairs a stream across denied preparations and partial-text rebuilds: ${terminal}`, async () => {
+    const dir = tempDir();
+    const store = new ThreadStore(dir);
+    const fixture = createFixture(store);
+    Object.defineProperty(fixture.session, "send", {
+      value: async function* () {
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "compaction-start", reason: "auto" };
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "text-delta", delta: "before " };
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "text-delta", delta: "after" };
+        if (terminal === "finish") yield { type: "message-finish", text: "after" };
+        else if (terminal === "error") yield { type: "error", stage: "plan", message: "blocked" };
+        else yield { type: "turn-cancelled", reason: "user", message: "cancelled" };
+      },
+    });
+    const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+    const events: RuntimeEventEnvelopeV15[] = [];
+    service.onEvent((event) => events.push(event));
+    try {
+      service.initialize({
+        protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+        client: { name: "maintenance-stream", version: "1" },
+      });
+      await service.createThread(
+        runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+      );
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "continue" },
+        }),
+      );
+      await nextTick();
+      const starts = events.flatMap((e) => (e.event.type === "message.started" ? [e.event] : []));
+      const finishes = events.flatMap((e) =>
+        e.event.type === "message.completed" ? [e.event] : [],
+      );
+      assert.equal(starts.length, 1);
+      assert.equal(finishes.length, 1);
+      assert.equal(finishes[0]?.streamId, starts[0]?.streamId);
+      assert.equal(finishes[0]?.text, "before after");
+    } finally {
+      await service.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("RuntimeService isolates event listeners before starting and completing a Turn", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);

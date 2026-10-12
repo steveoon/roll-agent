@@ -229,6 +229,7 @@ import {
 } from "../tool-bridge/observation-recall-tool.ts";
 import { readObservationPage } from "./observation-readback.ts";
 import { CompactionEvidenceUnpresentable } from "./compaction-evidence-batch.ts";
+import { retainsCompactionFacts } from "./compaction-retention.ts";
 import {
   canonicalObservationOutput,
   projectObservationMessages,
@@ -1650,7 +1651,11 @@ export class AgentSession {
       }
       this.syncWorkspaceInstructions();
       let contextRecoveryAttempts = 0;
-      const softAttempted = new Set<string>();
+      let advisoryMiss: RequestBudgetSnapshot | undefined;
+      const advisoryGrowth = (): number => Math.max(1024, (this.contextWindow ?? 0) * 0.05);
+      const canRetryAdvisory = (tokens: number): boolean =>
+        advisoryMiss === undefined ||
+        tokens >= advisoryMiss.calibratedInputEstimate + advisoryGrowth();
       const providerRejected = new Set<string>();
       let rejectedBudget: RequestBudgetSnapshot | undefined;
       const invalidScheduleRetryGuard = createInvalidScheduleRetryGuard();
@@ -1675,17 +1680,6 @@ export class AgentSession {
           inputSequence,
           turnInputSkillCheckpointSchema.parse(checkpoint),
         );
-      }
-      try {
-        // The prompt is already in history. Do not count or append it again on maintenance/retry.
-        await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
-      } catch (error) {
-        if (this.isTurnAborted(activeTurn)) {
-          this.persistCancelledTurn(queue, activeTurn, this.messages.length, turnStartedAt);
-        } else {
-          queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
-        }
-        return;
       }
       turnStart = this.messages.length;
       if (this.isTurnAborted(activeTurn)) {
@@ -1827,7 +1821,12 @@ export class AgentSession {
                 this.compaction?.enabled === true &&
                 maintenanceTarget !== undefined &&
                 budget.calibratedInputEstimate >= maintenanceTarget &&
-                !softAttempted.has(budget.fingerprint) &&
+                (episode !== undefined ||
+                  canRetryAdvisory(budget.calibratedInputEstimate) ||
+                  (advisoryMiss !== undefined &&
+                    (budget.shapeFingerprint !== advisoryMiss.shapeFingerprint ||
+                      budget.rawInputEstimate >=
+                        advisoryMiss.rawInputEstimate + advisoryGrowth()))) &&
                 (episode === undefined || episode.canWork(this.maintenanceFingerprint()));
               const rejected =
                 providerRejected.has(budget.fingerprint) ||
@@ -1847,6 +1846,12 @@ export class AgentSession {
                 throw ownedPause;
               }
               if (episode !== undefined) {
+                if (
+                  budget.maintenanceTarget !== undefined &&
+                  budget.calibratedInputEstimate >= budget.maintenanceTarget
+                ) {
+                  advisoryMiss = budget;
+                }
                 this.closeMaintenance(
                   maintenanceTarget !== undefined &&
                     budget.calibratedInputEstimate >= maintenanceTarget
@@ -1890,6 +1895,7 @@ export class AgentSession {
                     buildRequest(currentStreamCanonicalMessages).messages,
                     projectedBaselineTokens,
                   ),
+                canRetryAdvisory,
               ),
             ],
             toolApproval: async ({ toolCall }) => {
@@ -2554,22 +2560,10 @@ export class AgentSession {
           continuations: activeTurn.contextPressureContinuations,
           pressureTokens: this.contextPressureTokens(),
         });
-        let progressed: boolean;
-        try {
-          progressed = await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
-        } catch (error) {
-          if (this.isTurnAborted(activeTurn)) {
-            this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
-            return;
-          }
-          queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
-          return;
-        }
         if (this.isTurnAborted(activeTurn)) {
           this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
           return;
         }
-        if (!progressed) softAttempted.clear();
         queue.push({ type: "message-start", messageId: randomUUID() });
       }
     } catch (error) {
@@ -3063,25 +3057,11 @@ export class AgentSession {
     return changed;
   }
 
-  private async runAutoCompactionPasses(
-    queue: AsyncEventQueue<SessionEvent>,
-    activeTurn: ActiveTurn,
-    turnStartedAt: number,
-    pendingContent?: UserModelMessage["content"],
-  ): Promise<boolean> {
-    // Cold/predictive paths only request a future finalized check. No shadow preparation or
-    // unmetered summary work: the actual guard starts/resumes the absolute episode.
-    this.debug(queue, "compaction", "finalized check pending", turnStartedAt, {
-      pressureTokens: this.contextPressureTokens(pendingContent),
-    });
-    if (this.isTurnAborted(activeTurn)) return false;
-    return false;
-  }
-
   private stopOnContextPressure(
     activeTurn: ActiveTurn,
     lastPreparedComparableTokens: () => number,
     predictFullRequest?: () => number | undefined,
+    canRetryAdvisory: (tokens: number) => boolean = () => true,
   ): StopCondition<ToolSet> {
     return ({ steps }) => {
       const settings = this.compaction;
@@ -3111,7 +3091,7 @@ export class AgentSession {
         (usage.inputTokens === undefined
           ? this.promptOverheadTokens() + projected
           : Math.max(0, usage.inputTokens + projected - lastPreparedComparableTokens()));
-      if (pressure / this.contextWindow < settings.threshold) {
+      if (pressure / this.contextWindow < settings.threshold || !canRetryAdvisory(pressure)) {
         return false;
       }
       activeTurn.pausedForContextPressure = true;
@@ -3546,31 +3526,11 @@ export class AgentSession {
           : { status: "skipped" };
     const reminderItems = createCheckpointSemanticReminderProjection(semanticState).items;
     const reminderItemIds = new Set(reminderItems.map((item) => item.itemId));
-    const semanticRetentionComplete =
-      Object.entries(semanticState.prunedItemCounts).every(
-        ([key, count]) =>
-          count <=
-          (evidence.previousSemanticState?.prunedItemCounts[
-            key as keyof typeof semanticState.prunedItemCounts
-          ] ?? 0),
-      ) &&
-      Object.values(validated.state.prunedItemCounts).every((count) => count === 0) &&
-      [
-        semanticState.goal,
-        ...semanticState.constraints,
-        ...semanticState.decisions,
-        ...semanticState.pendingWork,
-        ...semanticState.uncertainties,
-        ...semanticState.completedWork,
-      ].every((item) => {
-        if (item === null) return true;
-        const projected = reminderItems.find((candidate) => candidate.itemId === item.id);
-        if (projected === undefined) return false;
-        const retained = [projected.text, ...projected.sourceQuotes]
-          .join("\n")
-          .replace(/\s+/gu, " ");
-        return item.sourceQuotes.every((quote) => retained.includes(quote.replace(/\s+/gu, " ")));
-      });
+    const semanticRetentionComplete = retainsCompactionFacts(
+      evidence.previousSemanticState,
+      validated.state,
+      semanticState,
+    );
     const legacySnapshotReminderCoverageComplete =
       evidence.legacySnapshotRequiredItemIds.length === 0 ||
       evidence.legacySnapshotRequiredItemIds.every((itemId) => reminderItemIds.has(itemId));

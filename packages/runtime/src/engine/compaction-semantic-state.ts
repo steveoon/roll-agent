@@ -2094,16 +2094,24 @@ export function createCompactionSemanticReminderProjection(
   };
 
   const maxDepth = Math.max(0, ...[...byCategory.values()].map((items) => items.length));
-  for (let depth = 0; depth < maxDepth; depth += 1) {
-    for (const category of priority) {
-      const items = byCategory.get(category) ?? [];
-      const candidate = items.at(-(depth + 1));
-      if (candidate === undefined) {
-        continue;
-      }
-      selected.push(candidate);
-      if (JSON.stringify(project()).length > maxChars) {
-        selected.pop();
+  // Historical completion records must not crowd out active requirements as the
+  // checkpoint grows. Preserve fairness among active categories, then use spare room.
+  const tiers = [
+    priority.filter((category) => category !== "completed_work"),
+    ["completed_work"] as const,
+  ];
+  for (const categories of tiers) {
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+      for (const category of categories) {
+        const items = byCategory.get(category) ?? [];
+        const candidate = items.at(-(depth + 1));
+        if (candidate === undefined) {
+          continue;
+        }
+        selected.push(candidate);
+        if (JSON.stringify(project()).length > maxChars) {
+          selected.pop();
+        }
       }
     }
   }

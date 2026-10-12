@@ -1464,6 +1464,14 @@ export class RuntimeService {
       }
       this.settleTurnOwner(state);
     }
+    // A denied SDK preparation or cancellation may end an open presentation stream.
+    // Completing the message only closes that stream; the turn retains its own outcome.
+    if (projection.streamId !== undefined) {
+      this.projectSessionEvent(state, projection, {
+        type: "message-finish",
+        text: projection.text,
+      });
+    }
     this.emitTurnTerminal(state, terminalEvent);
   }
 
@@ -1505,6 +1513,9 @@ export class RuntimeService {
   ): void {
     switch (event.type) {
       case "message-start": {
+        // Internal context maintenance rebuilds the SDK stream without ending the
+        // logical message. Keep its identity and already displayed text.
+        if (projection.streamId !== undefined) return;
         const streamId = streamIdSchema.parse(randomUUID());
         projection.streamId = streamId;
         projection.text = "";
@@ -1533,11 +1544,16 @@ export class RuntimeService {
       }
       case "message-finish": {
         const streamId = projection.streamId ?? streamIdSchema.parse(randomUUID());
+        if (projection.streamId === undefined) {
+          this.emit(state.threadId, state.turnId, { type: "message.started", streamId });
+        }
         this.emit(state.threadId, state.turnId, {
           type: "message.completed",
           streamId,
-          text: redactSecretText(event.text || projection.text),
+          text: redactSecretText(projection.text || event.text),
         });
+        projection.streamId = undefined;
+        projection.text = "";
         return;
       }
       case "reasoning-delta": {

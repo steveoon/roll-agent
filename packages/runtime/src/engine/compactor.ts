@@ -108,6 +108,16 @@ const COMPACTION_DRAFT_OUTPUT = Output.object({
   schema: compactionModelDraftSchema,
 });
 
+/** maxOutputTokens is a ceiling. Keep a small window usable for schema and evidence too. */
+function compactionOutputBudget(
+  input: Pick<CompactionInput, "contextWindow" | "maxOutputTokens">,
+): number {
+  const configured = input.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS;
+  return input.contextWindow === undefined
+    ? configured
+    : Math.min(configured, Math.max(1, Math.floor(input.contextWindow / 4)));
+}
+
 /** Packing allowance; the final prepared SDK request must still pass admission. */
 export async function compactionEvidenceTokenBudget(
   input: Pick<
@@ -131,7 +141,7 @@ export async function compactionEvidenceTokenBudget(
         },
       ],
       ...(responseFormat === undefined ? {} : { responseFormat }),
-      maxOutputTokens: input.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: compactionOutputBudget(input),
       ...(input.structuredOutputReasoning ? { reasoning: input.structuredOutputReasoning } : {}),
       ...(input.structuredOutputProviderOptions
         ? { providerOptions: input.structuredOutputProviderOptions }
@@ -563,7 +573,7 @@ async function generateCompactionDraft(
         input.completeEvidence && input.semanticEvidencePrompt !== undefined
           ? `<harness-evidence>\n${input.semanticEvidencePrompt}\n</harness-evidence>`
           : buildCompactionDraftPrompt(prefix, input.semanticEvidencePrompt),
-      maxOutputTokens: input.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: compactionOutputBudget(input),
       maxRetries: 0,
       include: { responseBody: true },
       ...(input.structuredOutputReasoning ? { reasoning: input.structuredOutputReasoning } : {}),

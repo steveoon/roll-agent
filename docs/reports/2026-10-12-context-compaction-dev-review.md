@@ -1,5 +1,12 @@
 # Context compaction: final dev review
 
+**Follow-up correction:** the subsequent review reproduced cumulative checkpoint
+retention blocking compaction and repeated advisory maintenance across Tool steps.
+The original test matrix below missed those scenarios. See
+[the corrective review](./2026-10-12-context-compaction-review-followup.md) for the
+reproductions, fixes and new validation. The original conclusion is historical,
+not the final assessment of `7792a1b`.
+
 Reviewed the pending context-compaction changes on `dev` above `ece7908`, including
 input acceptance, SQLite receipts and fork/resume, finalized SDK request admission,
 maintenance limits, settled Tool persistence, semantic evidence retirement, and

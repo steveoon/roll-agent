@@ -71,6 +71,18 @@ for (const failure of [
       }),
       sources: [],
       maxSteps: 2,
+      ...(["precompact", "cancel", "timeout"].includes(failure)
+        ? {
+            contextWindow: 50000,
+            compaction: {
+              enabled: true,
+              strategy: "summarize" as const,
+              threshold: 0.01,
+              keepRecentTurns: 1,
+              keepRecentTokens: 1,
+            },
+          }
+        : {}),
       onAcceptInput: (id, input) => store.acceptTurnInput(thread, id, input),
       onRecordInputSkillCheckpoint: (id, checkpoint) => {
         if (failure === "metadata") throw new Error("metadata storage failed");
@@ -94,7 +106,7 @@ for (const failure of [
     });
     // Fault injection at the pre-inference maintenance boundary, not fake provider success.
     if (failure === "precompact") {
-      Object.defineProperty(session, "runAutoCompactionPasses", {
+      Object.defineProperty(session, "runCompaction", {
         configurable: true,
         value: async () => {
           throw new Error("precompact failed");
@@ -102,20 +114,20 @@ for (const failure of [
       });
     }
     if (failure === "cancel") {
-      Object.defineProperty(session, "runAutoCompactionPasses", {
+      Object.defineProperty(session, "runCompaction", {
         configurable: true,
         value: async () => {
           session.cancel();
-          return false;
+          return undefined;
         },
       });
     }
     if (failure === "timeout") {
-      Object.defineProperty(session, "runAutoCompactionPasses", {
+      Object.defineProperty(session, "runCompaction", {
         configurable: true,
         value: async () => {
           await new Promise((resolve) => setTimeout(resolve, 30));
-          return false;
+          return undefined;
         },
       });
     }
@@ -149,7 +161,15 @@ for (const failure of [
         [prompt],
       );
       if (["precompact", "cancel", "timeout"].includes(failure)) {
-        Object.defineProperty(session, "runAutoCompactionPasses", { value: async () => false });
+        const coverage = { messagesThroughSequence: -1, toolExecutionsThroughSequence: -1 };
+        Object.defineProperty(session, "runCompaction", {
+          value: async () => ({
+            stage: "no_commit",
+            historyChanged: false,
+            coverageBefore: coverage,
+            coverageAfter: coverage,
+          }),
+        });
       }
       if (failure === "rollback") {
         Object.defineProperty(session, "syncWorkspaceInstructions", { value: () => {} });
