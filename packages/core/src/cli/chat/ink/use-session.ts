@@ -16,6 +16,8 @@ import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly onPreparationCancelled?: () => void;
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
@@ -82,10 +84,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   const userInputDecisionRef = useRef<PendingUserInputDecision | null>(null);
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
+  const preparationRef = useRef<AbortController | undefined>(undefined);
+  const beforeSend = options.beforeSend;
+  const onPreparationCancelled = options.onPreparationCancelled;
 
   useEffect(() => {
     session.setUserInputAvailable?.(true);
     return () => {
+      preparationRef.current?.abort();
       userInputDecisionRef.current?.resolve({
         status: "cancelled",
         reason: "用户输入界面已关闭",
@@ -241,9 +247,28 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
               })),
             }
           : text;
-      drive(session.send(input)).catch(() => undefined);
+      if (!beforeSend) {
+        drive(session.send(input)).catch(() => undefined);
+        return;
+      }
+      const preparation = new AbortController();
+      preparationRef.current = preparation;
+      async function* preparedTurn(): AsyncIterable<SessionEvent> {
+        try {
+          await beforeSend?.(preparation.signal);
+          preparation.signal.throwIfAborted();
+        } catch (error) {
+          dispatch({ type: "set-draft", value: text });
+          onPreparationCancelled?.();
+          throw error;
+        } finally {
+          preparationRef.current = undefined;
+        }
+        yield* session.send(input);
+      }
+      drive(preparedTurn()).catch(() => undefined);
     },
-    [drive, session],
+    [drive, session, beforeSend, onPreparationCancelled],
   );
 
   const compact = useCallback(() => {
@@ -257,6 +282,11 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
 
   const cancel = useCallback(() => {
     if (!busyRef.current) {
+      return;
+    }
+    if (preparationRef.current) {
+      preparationRef.current.abort();
+      dispatch({ type: "cancel-requested" });
       return;
     }
     if (session.cancel()) {

@@ -1,3 +1,8 @@
+import { ConnectionNotice } from "./connection-notice.ts";
+import {
+  chatGptConnectionError,
+  type ChatConnection,
+} from "../../../runtime-host/chatgpt-connection.ts";
 import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
@@ -92,6 +97,8 @@ export interface ChatModelSwitching {
 }
 
 export interface ChatAppProps {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly session: AgentSession;
   readonly model: string;
   readonly initialHistory?: readonly HistoryItem[];
@@ -260,6 +267,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
+    ...(props.connection ? { connection: props.connection } : {}),
+    ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
     onOpenPicker: openPicker,
@@ -282,6 +291,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const windowSize = useWindowSize();
   const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
   const contextWindow = session.getContextWindow();
+  const submittedAttachments = useRef<readonly PendingChatAttachment[]>([]);
   const availableSkills = session.getSkillSummaries();
   const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
     (props.initialHistory ?? []).reduce<readonly string[]>(
@@ -308,6 +318,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     toggleAutoMode,
     commitHistory,
   } = useSession(session, {
+    ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
     ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
@@ -317,6 +329,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+
+  useEffect(() => {
+    const synchronizeWindow = () => setModel(model, session.getContextWindow());
+    synchronizeWindow();
+    return props.connection?.subscribe(synchronizeWindow);
+  }, [props.connection, session, model, setModel]);
 
   const [modelPicker, setModelPicker] = useState<ModelPickerState | undefined>(undefined);
   const modelPickerRequest = useRef(0);
@@ -639,6 +657,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
     onUserSubmit(text.length > 0 ? text : "[图片]");
+    submittedAttachments.current = attachments;
     submit(text, attachments);
     attachmentEpochRef.current += 1;
     setAttachments([]);
@@ -654,6 +673,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     const name = parts[0] ?? "";
     const arg = (parts[1] ?? "").toLowerCase();
     const level = state.status.thinkingLevel;
+    if (name === "/reconnect") {
+      if (props.connection) {
+        props.connection.retry().catch((error: unknown) => notice(chatGptConnectionError(error)));
+      } else notice("当前连接无需 ChatGPT 授权恢复。");
+      return;
+    }
     if (name === "/compact") {
       compact();
       return;
@@ -965,6 +990,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(StatusLine, { status: state.status, width: layout.columns })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
+    props.connection ? h(ConnectionNotice, { connection: props.connection }) : null,
     slashPopupActive
       ? h(SlashPopup, {
           matches,

@@ -33,6 +33,7 @@ export interface SlashSkillEntry {
 export type SlashEntry = SlashCommand | SlashSkillEntry;
 
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
+  { kind: "command", name: "/reconnect", description: "重试 ChatGPT 连接，保留会话与输入" },
   { kind: "command", name: "/compact", description: "压缩上下文,释放 token" },
   { kind: "command", name: "/think", description: "开关 thinking/reasoning (on | off)" },
   {

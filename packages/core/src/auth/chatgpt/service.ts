@@ -17,6 +17,10 @@ import {
   type ChatGptLogoutResult,
 } from "./schemas.ts";
 import { ChatGptCredentialStore } from "./storage.ts";
+import { ChatGptAuthError, isTemporaryChatGptError } from "./errors.ts";
+import { readChatGptResponse } from "./request.ts";
+import { readChatGptModelCache, writeChatGptModelCache } from "./model-cache.ts";
+export { ChatGptAuthError } from "./errors.ts";
 
 const ISSUER = "https://auth.openai.com";
 const RESOURCE = "https://api.openai.com/v1";
@@ -66,19 +70,6 @@ const modelResponseSchema = z.object({
 const jwksSchema = z.object({ keys: z.array(z.object({ kty: z.string() }).passthrough()) });
 const errorCodeSchema = z.string().regex(/^[a-zA-Z0-9_.-]{1,100}$/);
 
-export class ChatGptAuthError extends Error {
-  readonly code: string;
-  readonly status: number | undefined;
-  readonly requestId: string | undefined;
-  constructor(code: string, message: string, status?: number, requestId?: string) {
-    super(message);
-    this.name = "ChatGptAuthError";
-    this.code = code;
-    this.status = status;
-    this.requestId = requestId;
-  }
-}
-
 export type ChatGptAuthServiceOptions = {
   directory?: string;
   store?: ChatGptCredentialStore;
@@ -105,7 +96,7 @@ export class ChatGptAuthService {
   private readonly issuer: string;
   private readonly apiBaseUrl: string;
   private readonly loginTimeoutMs: number;
-  private metadataPromise: Promise<z.infer<typeof metadataSchema>> | undefined;
+  private metadataValue: z.infer<typeof metadataSchema> | undefined;
   private readonly attempts = new Map<string, LoginAttempt>();
 
   constructor(options: ChatGptAuthServiceOptions = {}) {
@@ -146,15 +137,21 @@ export class ChatGptAuthService {
     });
   }
 
-  async models(accountId?: string): Promise<ChatGptModel[]> {
-    const token = await this.getAccessToken(accountId);
-    const response = await this.fetch(`${this.apiBaseUrl}/models`, {
+  cachedModels(accountId: string): ChatGptModel[] {
+    const profile = this.store.read(accountId);
+    return profile ? readChatGptModelCache(this.store.directory, profile, this.now()) : [];
+  }
+
+  async models(accountId?: string, signal?: AbortSignal): Promise<ChatGptModel[]> {
+    const id = this.resolveAccountId(accountId);
+    const token = await this.getAccessToken(id, signal);
+    const response = await readChatGptResponse(this.fetch, `${this.apiBaseUrl}/models`, "models", {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(30_000),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) throw await this.responseError(response, "models_failed");
     const catalog = modelResponseSchema.parse(await response.json());
-    return catalog.models
+    const models = catalog.models
       .filter((model) => model.visibility === "list")
       .map((model) => ({
         slug: model.slug,
@@ -164,9 +161,12 @@ export class ChatGptAuthService {
           ? {}
           : { reasoningEfforts: model.supported_reasoning_levels.map(({ effort }) => effort) }),
       }));
+    writeChatGptModelCache(this.store.directory, this.requireRegistration(id), models, this.now());
+    return models;
   }
 
-  async getAccessToken(accountId?: string): Promise<string> {
+  async getAccessToken(accountId?: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     let profile = this.requireRegistration(this.resolveAccountId(accountId));
     let credentials = this.requireCredentials(profile);
     if (!credentials.scopes.includes(DIRECT_SCOPE)) {
@@ -177,17 +177,13 @@ export class ChatGptAuthService {
     }
     if (credentials.expiresAt <= this.now() + 60_000 && this.canRefresh(credentials)) {
       try {
-        await this.refresh(profile.id);
+        await this.refresh(profile.id, signal);
       } catch (error) {
         // A pre-expiry renewal outage must not reject a still-valid access token.
         // Re-read after the failed renewal: terminal errors may have cleared it,
         // or another process may already have persisted a replacement.
         const latest = this.requireCredentials(this.requireRegistration(profile.id));
-        const temporary =
-          error instanceof ChatGptAuthError &&
-          (error.code === "network_error" ||
-            error.code === "jwks_unavailable" ||
-            (error.status !== undefined && error.status >= 500));
+        const temporary = isTemporaryChatGptError(error);
         if (!temporary || latest.expiresAt <= this.now()) throw error;
       }
       profile = this.requireRegistration(profile.id);
@@ -347,70 +343,81 @@ export class ChatGptAuthService {
     return this.loginStatus(id);
   }
 
-  async refresh(accountId?: string): Promise<ChatGptRefreshResult> {
+  async refresh(accountId?: string, signal?: AbortSignal): Promise<ChatGptRefreshResult> {
     const id = this.resolveAccountId(accountId);
     const before = this.requireCredentials(this.requireRegistration(id));
-    return this.store.withLock(id, async () => {
-      const profile = this.requireRegistration(id);
-      const credentials = this.requireCredentials(profile);
-      if (credentials.refreshToken !== before.refreshToken) {
-        return {
-          accountId: id,
-          refreshed: false,
-          ...(credentials.earliestRefreshAt === undefined
-            ? {}
-            : { earliestRefreshAt: credentials.earliestRefreshAt }),
-        };
-      }
-      if (!this.canRefresh(credentials)) {
-        throw new ChatGptAuthError(
-          "refresh_too_early",
-          `服务端尚未允许刷新，请在 ${new Date(credentials.earliestRefreshAt ?? 0).toISOString()} 后重试。`,
-        );
-      }
-      try {
-        // Load trusted signing keys before consuming a rotating refresh token. A temporary
-        // JWKS outage must not strand a replacement token after the old one is consumed.
-        const verificationKeys = await this.identityKeys();
-        const token = await this.exchange({
-          grant_type: "refresh_token",
-          client_id: profile.clientId,
-          refresh_token: credentials.refreshToken,
-          resource: RESOURCE,
-        });
-        if (token.id_token !== undefined) {
-          await this.validateIdentity(
-            token.id_token,
-            profile.clientId,
-            undefined,
-            profile.subject,
-            verificationKeys,
-          );
+    return this.store.withLock(
+      id,
+      async () => {
+        signal?.throwIfAborted();
+        const profile = this.requireRegistration(id);
+        const credentials = this.requireCredentials(profile);
+        if (credentials.refreshToken !== before.refreshToken) {
+          return {
+            accountId: id,
+            refreshed: false,
+            ...(credentials.earliestRefreshAt === undefined
+              ? {}
+              : { earliestRefreshAt: credentials.earliestRefreshAt }),
+          };
         }
-        const replacement = this.credentials(token, credentials);
-        this.store.save({ ...profile, credentials: replacement });
-        return {
-          accountId: id,
-          refreshed: true,
-          ...(replacement.earliestRefreshAt === undefined
-            ? {}
-            : { earliestRefreshAt: replacement.earliestRefreshAt }),
-        };
-      } catch (error) {
-        if (error instanceof ChatGptAuthError && TERMINAL_REFRESH_ERRORS.has(error.code)) {
-          const retained = { ...profile };
-          delete retained.credentials;
-          this.store.save(retained);
+        if (!this.canRefresh(credentials)) {
           throw new ChatGptAuthError(
-            error.code,
-            "ChatGPT 续期凭证已失效，请使用此账号重新登录。",
-            error.status,
-            error.requestId,
+            "refresh_too_early",
+            `服务端尚未允许刷新，请在 ${new Date(credentials.earliestRefreshAt ?? 0).toISOString()} 后重试。`,
           );
         }
-        throw error;
-      }
-    });
+        try {
+          // Load trusted signing keys before consuming a rotating refresh token. A temporary
+          // JWKS outage must not strand a replacement token after the old one is consumed.
+          const verificationKeys = await this.identityKeys(signal);
+          // Cancellation is safe until dispatch. Once sent, finish receiving and saving
+          // the replacement under the account lock even if the caller stops waiting.
+          const token = await this.exchange(
+            {
+              grant_type: "refresh_token",
+              client_id: profile.clientId,
+              refresh_token: credentials.refreshToken,
+              resource: RESOURCE,
+            },
+            signal,
+            true,
+          );
+          if (token.id_token !== undefined) {
+            await this.validateIdentity(
+              token.id_token,
+              profile.clientId,
+              undefined,
+              profile.subject,
+              verificationKeys,
+            );
+          }
+          const replacement = this.credentials(token, credentials);
+          this.store.save({ ...profile, credentials: replacement });
+          return {
+            accountId: id,
+            refreshed: true,
+            ...(replacement.earliestRefreshAt === undefined
+              ? {}
+              : { earliestRefreshAt: replacement.earliestRefreshAt }),
+          };
+        } catch (error) {
+          if (error instanceof ChatGptAuthError && TERMINAL_REFRESH_ERRORS.has(error.code)) {
+            const retained = { ...profile };
+            delete retained.credentials;
+            this.store.save(retained);
+            throw new ChatGptAuthError(
+              error.code,
+              "ChatGPT 续期凭证已失效，请使用此账号重新登录。",
+              error.status,
+              error.requestId,
+            );
+          }
+          throw error;
+        }
+      },
+      signal,
+    );
   }
 
   async logout(accountId?: string): Promise<ChatGptLogoutResult> {
@@ -491,49 +498,53 @@ export class ChatGptAuthService {
     );
   }
 
-  private async metadata(): Promise<z.infer<typeof metadataSchema>> {
-    this.metadataPromise ??= (async () => {
-      const response = await this.fetch(`${this.issuer}/.well-known/openid-configuration`, {
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok) {
-        throw new ChatGptAuthError(
-          "discovery_failed",
-          "无法获取 ChatGPT 授权服务配置，请稍后重试。",
-          response.status,
-        );
+  private async metadata(signal?: AbortSignal): Promise<z.infer<typeof metadataSchema>> {
+    signal?.throwIfAborted();
+    if (this.metadataValue) return this.metadataValue;
+    const response = await readChatGptResponse(
+      this.fetch,
+      `${this.issuer}/.well-known/openid-configuration`,
+      "discovery",
+      {
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (!response.ok) {
+      throw new ChatGptAuthError(
+        "discovery_failed",
+        "无法获取 ChatGPT 授权服务配置，请稍后重试。",
+        response.status,
+      );
+    }
+    const metadata = metadataSchema.parse(await response.json());
+    if (metadata.issuer !== this.issuer) {
+      throw new ChatGptAuthError("invalid_issuer", "ChatGPT 授权服务 issuer 不匹配。");
+    }
+    for (const endpoint of [
+      metadata.authorization_endpoint,
+      metadata.token_endpoint,
+      metadata.revocation_endpoint,
+      metadata.jwks_uri,
+    ]) {
+      if (
+        endpoint !== undefined &&
+        (new URL(endpoint).origin !== new URL(this.issuer).origin ||
+          new URL(endpoint).protocol !== "https:")
+      ) {
+        throw new ChatGptAuthError("invalid_endpoint", "ChatGPT 授权服务 endpoint 不可信。");
       }
-      const metadata = metadataSchema.parse(await response.json());
-      if (metadata.issuer !== this.issuer) {
-        throw new ChatGptAuthError("invalid_issuer", "ChatGPT 授权服务 issuer 不匹配。");
-      }
-      for (const endpoint of [
-        metadata.authorization_endpoint,
-        metadata.token_endpoint,
-        metadata.revocation_endpoint,
-        metadata.jwks_uri,
-      ]) {
-        if (
-          endpoint !== undefined &&
-          (new URL(endpoint).origin !== new URL(this.issuer).origin ||
-            new URL(endpoint).protocol !== "https:")
-        ) {
-          throw new ChatGptAuthError("invalid_endpoint", "ChatGPT 授权服务 endpoint 不可信。");
-        }
-      }
-      return metadata;
-    })().catch((error: unknown) => {
-      this.metadataPromise = undefined;
-      throw error;
-    });
-    return this.metadataPromise;
+    }
+    this.metadataValue = metadata;
+    return metadata;
   }
 
   private async exchange(
     parameters: Record<string, string>,
     signal?: AbortSignal,
+    finishAfterDispatch = false,
   ): Promise<z.infer<typeof tokenResponseSchema>> {
-    const metadata = await this.metadata();
+    const metadata = await this.metadata(signal);
+    signal?.throwIfAborted();
     let response: Response;
     try {
       response = await this.fetch(metadata.token_endpoint, {
@@ -541,7 +552,7 @@ export class ChatGptAuthService {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(parameters),
         signal:
-          signal === undefined
+          signal === undefined || finishAfterDispatch
             ? AbortSignal.timeout(30_000)
             : AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
       });
@@ -565,21 +576,16 @@ export class ChatGptAuthService {
     }
   }
 
-  private async identityKeys() {
-    const metadata = await this.metadata();
-    let response: Response;
-    try {
-      response = await this.fetch(metadata.jwks_uri, { signal: AbortSignal.timeout(30_000) });
-    } catch {
-      throw new ChatGptAuthError(
-        "jwks_unavailable",
-        "无法获取 ChatGPT 身份签名密钥，请稍后重试；现有凭证已保留。",
-      );
-    }
+  private async identityKeys(signal?: AbortSignal) {
+    const metadata = await this.metadata(signal);
+    const response = await readChatGptResponse(this.fetch, metadata.jwks_uri, "jwks", {
+      ...(signal ? { signal } : {}),
+    });
     if (!response.ok) {
       throw new ChatGptAuthError(
         "jwks_unavailable",
-        "无法获取 ChatGPT 身份签名密钥，请稍后重试；现有凭证已保留。",
+        `无法获取 ChatGPT 身份签名密钥（HTTP ${response.status}），请稍后重试；现有凭证已保留。`,
+        response.status,
       );
     }
     return createLocalJWKSet(jwksSchema.parse(await response.json()));

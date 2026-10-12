@@ -115,17 +115,32 @@ export class ChatGptCredentialStore {
     });
   }
 
-  async withLock<T>(key: string, operation: () => T | Promise<T>): Promise<T> {
+  async withLock<T>(
+    key: string,
+    operation: () => T | Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     this.ensure();
     const deadline = Date.now() + 60_000;
     while (true) {
+      signal?.throwIfAborted();
       let lock;
       try {
         lock = acquireAgentLifecycleLock(this.directory, `chatgpt:${key}`);
       } catch (error) {
         if (!(error instanceof AgentLifecycleBusyError)) throw error;
         if (Date.now() >= deadline) throw new Error("ChatGPT 账号正在被其他进程操作，请稍后重试。");
-        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => {
+            clearTimeout(timer);
+            reject(signal?.reason);
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", abort);
+            resolve();
+          }, 30);
+          signal?.addEventListener("abort", abort, { once: true });
+        });
         continue;
       }
       try {

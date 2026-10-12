@@ -1,3 +1,4 @@
+import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import { createElement as h } from "react";
 import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
@@ -28,6 +29,8 @@ export interface InkReplStore {
 }
 
 export interface RunInkReplOptions {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly model: string;
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
@@ -144,6 +147,8 @@ export async function runInkRepl(
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
         ...(options.getThinkingLevels ? { getThinkingLevels: options.getThinkingLevels } : {}),
         ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
+        ...(options.connection ? { connection: options.connection } : {}),
+        ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),
       {

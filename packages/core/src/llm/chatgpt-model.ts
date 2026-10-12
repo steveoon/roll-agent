@@ -1,6 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel } from "ai";
 import { APICallError } from "@ai-sdk/provider";
+import { ChatGptAuthError } from "../auth/chatgpt/errors.ts";
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -329,7 +330,8 @@ async function aggregateStream(
 /** Every request obtains the current account token; no API-key fallback is possible. */
 export function createChatGptModel(options: {
   modelId: string;
-  getAccessToken: () => Promise<string>;
+  getAccessToken: (signal?: AbortSignal) => Promise<string>;
+  onNetworkError?: (error: ChatGptAuthError) => void;
   fetch?: typeof globalThis.fetch;
 }): LanguageModelV4 {
   const send = options.fetch ?? globalThis.fetch;
@@ -339,7 +341,10 @@ export function createChatGptModel(options: {
       throw new Error("ChatGPT token can only be sent to the official Responses endpoint.");
     }
     init?.signal?.throwIfAborted();
-    const token = await accessTokenWithAbort(options.getAccessToken, init?.signal);
+    const token = await accessTokenWithAbort(
+      () => options.getAccessToken(init?.signal ?? undefined),
+      init?.signal,
+    );
     init?.signal?.throwIfAborted();
     const headers = new Headers(init?.headers);
     headers.set("Authorization", `Bearer ${token}`);
@@ -351,7 +356,26 @@ export function createChatGptModel(options: {
     for (const field of forbiddenBodyFields) delete body[field];
     body.store = false;
     body.stream = true;
-    return send(url, { ...init, redirect: "error", headers, body: JSON.stringify(body) });
+    try {
+      return await send(url, { ...init, redirect: "error", headers, body: JSON.stringify(body) });
+    } catch (cause) {
+      init?.signal?.throwIfAborted();
+      const error = new ChatGptAuthError(
+        "network_error",
+        "ChatGPT 网络连接中断，无法确认请求是否已被接收；输入已保留，请恢复网络后重试。",
+        undefined,
+        undefined,
+        { cause },
+      );
+      options.onNetworkError?.(error);
+      throw new APICallError({
+        message: error.message,
+        url: target.toString(),
+        requestBodyValues: undefined,
+        isRetryable: false,
+        cause: error,
+      });
+    }
   };
   const openai = createOpenAI({
     // The SDK requires an API key to serialize headers. It is always replaced

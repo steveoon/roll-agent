@@ -1,3 +1,6 @@
+import { wrapLanguageModel } from "ai";
+import { ChatGptConnection } from "./chatgpt-connection.ts";
+import { ChatGptAuthError } from "../auth/chatgpt/errors.ts";
 import type { EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { getChatGptAuthService } from "../auth/chatgpt/service.ts";
@@ -16,13 +19,15 @@ import {
 export type ChatGptAuth = Pick<
   ReturnType<typeof getChatGptAuthService>,
   "status" | "models" | "getAccessToken"
->;
+> &
+  Partial<Pick<ReturnType<typeof getChatGptAuthService>, "cachedModels">>;
 export type ChatGptModels = Awaited<ReturnType<ChatGptAuth["models"]>>;
 export type InteractiveChatLlm = ReturnType<typeof resolveChatLlmCalls> & {
   readonly provider: string;
   readonly modelName: string;
   readonly accountId?: string;
   readonly models?: ChatGptModels;
+  readonly connection?: ChatGptConnection;
 };
 
 /** Subscription identity/model resolution is async; API-key resolvers remain synchronous. */
@@ -32,6 +37,8 @@ export async function resolveInteractiveChatLlm(
     readonly accountId?: string;
     readonly selectModel?: (models: ChatGptModels) => Promise<string | undefined>;
     readonly auth?: ChatGptAuth;
+    readonly deferConnection?: boolean;
+    readonly connection?: ChatGptConnection;
   } = {},
 ): Promise<InteractiveChatLlm> {
   const provider = config.runtime.provider ?? config.llm.defaultProvider;
@@ -55,6 +62,57 @@ export async function resolveInteractiveChatLlm(
   const auth = options.auth ?? getChatGptAuthService();
   const status = await auth.status();
   const accountId = options.accountId ?? config.runtime.chatgptAccountId ?? status.currentAccountId;
+  if (options.deferConnection) {
+    const models = accountId ? (auth.cachedModels?.(accountId) ?? []) : [];
+    const modelName = config.runtime.model ?? "未选择 ChatGPT 模型";
+    const connection = options.connection ?? new ChatGptConnection(auth, accountId, models);
+    const effortOptions = (level: RollConfig["runtime"]["thinkingLevel"]) => ({
+      openai: { reasoningEffort: level === "off" ? "none" : level },
+    });
+    const model = wrapLanguageModel({
+      model: createChatGptModel({
+        modelId: modelName,
+        getAccessToken: (signal) => connection.getAccessToken(signal),
+        onNetworkError: (error) => connection.failed(error),
+      }),
+      middleware: {
+        specificationVersion: "v4",
+        transformParams: async ({ params }) => {
+          await connection.ensure(params.abortSignal);
+          const live = connection.models.find(({ slug }) => slug === modelName);
+          if (!live) {
+            throw new ChatGptAuthError(
+              "model_unavailable",
+              `当前账号不提供模型 "${modelName}"；请使用 /model 选择可用模型，会话和输入已保留。`,
+            );
+          }
+          const effort = params.providerOptions?.openai?.reasoningEffort;
+          const allowed = chatGptThinkingLevels(live).map((level) =>
+            level === "off" ? "none" : level,
+          );
+          if (typeof effort === "string" && !allowed.some((value) => value === effort)) {
+            throw new ChatGptAuthError(
+              "unsupported_effort",
+              `当前模型不支持推理强度 "${effort}"；请使用 /effort 或调整压缩推理强度，会话和输入已保留。`,
+            );
+          }
+          return params;
+        },
+      },
+    });
+    return {
+      provider,
+      modelName,
+      ...(accountId ? { accountId } : {}),
+      models,
+      connection,
+      model,
+      providerOptions: effortOptions(config.runtime.thinkingLevel),
+      structuredOutputProviderOptions: effortOptions(
+        config.runtime.compaction.thinkingLevel ?? config.runtime.thinkingLevel,
+      ),
+    };
+  }
   if (!accountId) throw new Error("请先运行 roll auth chatgpt login，再选择订阅模型。");
   const models = await auth.models(accountId);
   const modelName = config.runtime.model ?? (await options.selectModel?.(models));
@@ -76,7 +134,7 @@ export async function resolveInteractiveChatLlm(
     models,
     model: createChatGptModel({
       modelId: modelName,
-      getAccessToken: () => auth.getAccessToken(accountId),
+      getAccessToken: (signal) => auth.getAccessToken(accountId, signal),
     }),
     providerOptions: chatGptThinkingOptions(config.runtime.thinkingLevel, selectedModel),
     structuredOutputProviderOptions: chatGptThinkingOptions(
@@ -106,6 +164,7 @@ export async function resolveInteractiveChatSwitch(
   thinkingLevel: RollConfig["runtime"]["thinkingLevel"],
   accountId?: string,
   auth?: ChatGptAuth,
+  connection?: ChatGptConnection,
 ): Promise<EngineModelSwitch> {
   if (choice.provider !== "chatgpt") return resolveChatLlmSwitch(config, choice, thinkingLevel);
   const resolution = await resolveInteractiveChatLlm(
@@ -113,7 +172,11 @@ export async function resolveInteractiveChatSwitch(
       ...config,
       runtime: { ...config.runtime, provider: choice.provider, model: choice.model, thinkingLevel },
     },
-    { ...(accountId !== undefined ? { accountId } : {}), ...(auth ? { auth } : {}) },
+    {
+      ...(accountId !== undefined ? { accountId } : {}),
+      ...(auth ? { auth } : {}),
+      ...(connection ? { connection, deferConnection: true } : {}),
+    },
   );
   return {
     provider: resolution.provider,

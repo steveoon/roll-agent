@@ -1,7 +1,13 @@
+import {
+  ChatGptConnection,
+  chatGptConnectionError,
+  type ChatConnection,
+} from "../../runtime-host/chatgpt-connection.ts";
+import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-session-preparation.ts";
 import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import { isCancel, select } from "@clack/prompts";
-import type { AgentSession } from "@roll-agent/runtime";
+import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
 import { chatGptThinkingLevels, legacyThinkingLevels } from "../../llm/thinking-levels.ts";
@@ -92,6 +98,8 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
+  readonly beforeSend?: (signal?: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly input: Readable;
   readonly output: Writable;
   readonly confirm?: ChatConfirm;
@@ -328,6 +336,11 @@ export async function runRepl(
   session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
+  const unsubscribeConnection = io.connection?.subscribe(() => {
+    const message = io.connection?.getSnapshot();
+    if (message) log.info(message);
+  });
+  io.connection?.start();
   let titled = !isNewSession;
   const initial = { id: session.id, isNew: isNewSession, submitted: false };
   try {
@@ -342,6 +355,13 @@ export async function runRepl(
       }
       if (input === "exit" || input === "quit") {
         break;
+      }
+      if (input === "/reconnect") {
+        if (io.connection) {
+          // Recovery never queues/replays user turns or tools.
+          io.connection.retry().catch((error: unknown) => log.warn(chatGptConnectionError(error)));
+        } else log.info("当前连接无需 ChatGPT 授权恢复。");
+        continue;
       }
       if (input === "/compact") {
         log.debug("chat.repl manual compact requested");
@@ -481,6 +501,7 @@ export async function runRepl(
         initial.submitted = true;
       }
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
+      await io.beforeSend?.(io.signal);
       for await (const event of session.send(input)) {
         await renderer.handle(event, session);
       }
@@ -490,6 +511,7 @@ export async function runRepl(
     try {
       session.setUserInputAvailable(false);
     } finally {
+      unsubscribeConnection?.();
       rl.close();
       if (
         initial.isNew &&
@@ -603,6 +625,7 @@ export default defineCommand({
     let selection: Awaited<ReturnType<typeof resolveInteractiveChatLlm>>;
     try {
       selection = await resolveInteractiveChatLlm(config, {
+        deferConnection: !args.message && !args.json,
         ...(canPrompt
           ? {
               selectModel: async (models: ChatGptModels) => {
@@ -641,6 +664,20 @@ export default defineCommand({
     let currentProvider = provider;
     let currentModel = modelName;
     let currentThinkingLevel = config.runtime.thinkingLevel;
+    const chatConnection =
+      selection.connection ??
+      new ChatGptConnection(
+        {
+          status: () => getChatGptAuthService().status(),
+          models: (account, signal) => getChatGptAuthService().models(account, signal),
+          getAccessToken: (account, signal) =>
+            getChatGptAuthService().getAccessToken(account, signal),
+        },
+        subscriptionAccountId,
+        subscriptionModels,
+      );
+    chatConnection.setEnabled(provider === "chatgpt");
+    let activeSelection: EngineModelSwitch = selection;
 
     if (args.json && !args.message) {
       log.error('--json 模式需要消息：roll chat "<message>" --json');
@@ -682,7 +719,7 @@ export default defineCommand({
     const modelCatalog = createChatGptCatalog(
       runtime,
       runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath()),
-      () => subscriptionModels,
+      () => chatConnection.models,
     );
     const catalogRefreshController = new AbortController();
     const surface = args.message
@@ -696,6 +733,7 @@ export default defineCommand({
     let engine: ConversationEngineInstance | undefined;
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
+    let sessionPreparation: ReturnType<typeof createChatGptSessionPreparation> | undefined;
     try {
       backfillScheduledThreads(config, runtime, store);
       if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
@@ -732,6 +770,15 @@ export default defineCommand({
       });
       signalScope.setEngine(engine);
       const chatEngine = engine;
+      sessionPreparation = createChatGptSessionPreparation({
+        connection: chatConnection,
+        engine: chatEngine,
+        getSession: () => sessionForCleanup,
+        getSelection: () => activeSelection,
+        ...(config.runtime.contextWindow !== undefined
+          ? { contextWindowOverride: config.runtime.contextWindow }
+          : {}),
+      });
       const scheduleBrowser = createScheduleBrowserPort({ config, runtime, engine: chatEngine });
       const resumeSession = async (threadId: string): Promise<AgentSession> => {
         if (store.getThread(threadId)?.origin.kind === "scheduled") {
@@ -769,6 +816,7 @@ export default defineCommand({
         );
       }
       sessionForCleanup = session;
+      sessionPreparation.synchronize();
 
       if (args.json && args.message) {
         const result = await runJsonTurn(session, args.message);
@@ -820,6 +868,8 @@ export default defineCommand({
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
               model: modelName,
+              connection: chatConnection,
+              beforeSend: sessionPreparation.prepare,
               banner,
               initialThinkingLevel: config.runtime.thinkingLevel,
               initialThinkingDisplay: config.chat.thinkingDisplay,
@@ -830,18 +880,19 @@ export default defineCommand({
               getThinkingLevels: () =>
                 currentProvider === "chatgpt"
                   ? chatGptThinkingLevels(
-                      subscriptionModels.find(({ slug }) => slug === currentModel),
+                      chatConnection.models.find(({ slug }) => slug === currentModel),
                     )
                   : legacyThinkingLevels,
               onThinkingChange: (level) => {
-                session.setProviderOptions(
+                const nextOptions =
                   currentProvider === "chatgpt"
                     ? chatGptThinkingOptions(
                         level,
-                        subscriptionModels.find(({ slug }) => slug === currentModel),
+                        chatConnection.models.find(({ slug }) => slug === currentModel),
                       )
-                    : thinkingProviderOptions(currentProvider, currentModel, level),
-                );
+                    : thinkingProviderOptions(currentProvider, currentModel, level);
+                session.setProviderOptions(nextOptions);
+                activeSelection = { ...activeSelection, providerOptions: nextOptions ?? {} };
                 currentThinkingLevel = level;
               },
               resumeSession,
@@ -859,6 +910,7 @@ export default defineCommand({
                     );
                     subscriptionModels = choices.models;
                     subscriptionAccountId = choices.accountId;
+                    chatConnection.updateCatalog(choices.models, choices.accountId);
                   } catch (error) {
                     log.warn(error instanceof Error ? error.message : String(error));
                   }
@@ -878,6 +930,7 @@ export default defineCommand({
                   );
                   subscriptionModels = choices.models;
                   subscriptionAccountId = choices.accountId;
+                  chatConnection.updateCatalog(choices.models, choices.accountId);
                   const model = subscriptionModels.find(
                     ({ slug }) => `chatgpt/${slug}` === input || slug === selected?.model,
                   );
@@ -892,6 +945,7 @@ export default defineCommand({
                     );
                     subscriptionModels = choices.models;
                     subscriptionAccountId = choices.accountId;
+                    chatConnection.updateCatalog(choices.models, choices.accountId);
                   }
                   const choice = findLlmModelChoice(
                     [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
@@ -900,15 +954,18 @@ export default defineCommand({
                   if (!choice) {
                     throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
                   }
-                  const resolution = chatEngine.switchModel(
-                    await resolveInteractiveChatSwitch(
-                      config,
-                      choice,
-                      selectedEffort ?? currentThinkingLevel,
-                      subscriptionAccountId,
-                    ),
+                  const nextSelection = await resolveInteractiveChatSwitch(
+                    config,
+                    choice,
+                    selectedEffort ?? currentThinkingLevel,
+                    subscriptionAccountId,
+                    undefined,
+                    chatConnection,
                   );
+                  const resolution = chatEngine.switchModel(nextSelection);
+                  activeSelection = nextSelection;
                   currentProvider = choice.provider;
+                  chatConnection.setEnabled(choice.provider === "chatgpt");
                   currentModel = choice.model;
                   currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
                   return {
@@ -953,6 +1010,8 @@ export default defineCommand({
           await runRepl(session, store, isNewSession, {
             input: process.stdin,
             output: process.stdout,
+            connection: chatConnection,
+            beforeSend: sessionPreparation.prepare,
             signal: signalScope.signal,
             resumeSession,
             scheduleBrowser,
@@ -969,6 +1028,8 @@ export default defineCommand({
         process.exitCode = 1;
       }
     } finally {
+      sessionPreparation?.dispose();
+      chatConnection.dispose();
       catalogRefreshController.abort();
       signalScope?.dispose();
       try {
