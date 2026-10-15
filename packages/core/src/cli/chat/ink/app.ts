@@ -4,7 +4,7 @@ import {
   type ChatConnection,
 } from "../../../runtime-host/chatgpt-connection.ts";
 import { randomUUID } from "node:crypto";
-import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
+import { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import type { AgentSession, ContextWindowSource } from "@roll-agent/runtime";
@@ -53,6 +53,8 @@ import { resolveChatLayout } from "./layout.ts";
 import { TranscriptViewport } from "./transcript-viewport.ts";
 import { ScheduleBrowser } from "./schedule-browser.ts";
 import type { ScheduleBrowserPort } from "../schedule-browser.ts";
+import type { TranscriptHistorySource } from "./transcript-history.ts";
+import { useTranscriptHistory } from "./use-transcript-history.ts";
 
 export interface ChatSessionSwitching {
   readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
@@ -102,6 +104,7 @@ export interface ChatAppProps {
   readonly session: AgentSession;
   readonly model: string;
   readonly initialHistory?: readonly HistoryItem[];
+  readonly historySource?: TranscriptHistorySource;
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly initialThinkingDisplay?: ChatThinkingDisplay;
@@ -233,7 +236,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       sessionSwitching.resume(threadId).then(
         (next) => {
           retiringRef.current = activeSession;
-          setSessionHistory(messagesToHistory(next.getMessages()));
+          setSessionHistory(
+            props.historySource ? undefined : messagesToHistory(next.getMessages()),
+          );
           setActiveSession(next);
           setPicker(undefined);
         },
@@ -245,7 +250,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         },
       );
     },
-    [sessionSwitching, activeSession],
+    [sessionSwitching, activeSession, props.historySource],
   );
 
   return h(ChatSessionView, {
@@ -255,6 +260,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onUserSubmit: props.onUserSubmit,
     onExit: props.onExit,
     ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
+    ...(props.historySource === undefined ? {} : { historySource: props.historySource }),
     ...(props.banner !== undefined ? { banner: props.banner } : {}),
     initialThinkingLevel: activeThinkingLevel,
     ...(props.initialThinkingDisplay !== undefined
@@ -280,7 +286,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     },
     onScheduleContinue: (next: AgentSession) => {
       retiringRef.current = activeSession;
-      setSessionHistory(messagesToHistory(next.getMessages()));
+      setSessionHistory(props.historySource ? undefined : messagesToHistory(next.getMessages()));
       setActiveSession(next);
     },
   });
@@ -293,8 +299,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const contextWindow = session.getContextWindow();
   const submittedAttachments = useRef<readonly PendingChatAttachment[]>([]);
   const availableSkills = session.getSkillSummaries();
+  const archivedHistory = useTranscriptHistory(session.id, props.historySource);
+  const initialHistory = props.historySource ? archivedHistory.items : (props.initialHistory ?? []);
   const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
-    (props.initialHistory ?? []).reduce<readonly string[]>(
+    initialHistory.reduce<readonly string[]>(
       (history, item) => (item.kind === "user" ? appendInputHistory(history, item.text) : history),
       [],
     ),
@@ -322,13 +330,19 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
-    ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
+    ...(!props.historySource && props.initialHistory
+      ? { initialHistory: props.initialHistory }
+      : {}),
     ...(props.initialThinkingLevel ? { initialThinkingLevel: props.initialThinkingLevel } : {}),
     ...(props.initialThinkingDisplay
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+  const displayHistory = useMemo(
+    () => [...archivedHistory.items, ...state.history],
+    [archivedHistory.items, state.history],
+  );
 
   useEffect(() => {
     const synchronizeWindow = () => setModel(model, session.getContextWindow());
@@ -462,7 +476,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     );
   };
 
-  const animateBanner = props.banner !== undefined && (props.initialHistory?.length ?? 0) === 0;
+  const animateBanner = props.banner !== undefined && initialHistory.length === 0;
   const [bannerSettled, setBannerSettled] = useState(!animateBanner);
   const handleBannerSettled = useCallback(() => {
     setBannerSettled(true);
@@ -480,7 +494,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const hintFlags = props.hintFlags ?? fallbackHintFlagsRef.current;
   const { stdout } = useStdout();
   const copyLastRound = (): void => {
-    const text = lastRoundCopyText(state.history);
+    const text = lastRoundCopyText(displayHistory);
     if (text === undefined) {
       commitHistory({ kind: "notice", id: randomUUID(), text: "暂无可复制的消息" });
       return;
@@ -974,7 +988,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     },
     h(TranscriptViewport, {
       width: layout.columns,
-      history: state.history,
+      history: displayHistory,
+      ...(props.historySource === undefined
+        ? {}
+        : {
+            historyNotice: archivedHistory.notice,
+            onLoadOlder:
+              archivedHistory.hasMore && !archivedHistory.loading
+                ? archivedHistory.loadOlder
+                : undefined,
+          }),
       live: state.live,
       mouseTracking,
       onWheelScroll: handleWheelScroll,

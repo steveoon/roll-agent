@@ -10,6 +10,7 @@ import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
 import type { ThinkingLevel } from "../../../llm/thinking-levels.ts";
+import type { TranscriptHistorySource } from "./transcript-history.ts";
 
 // A failed assertion must not leave Ink mounts/timers alive and hang the test worker.
 afterEach(() => cleanup());
@@ -2386,4 +2387,93 @@ test("formatContextWindowNotice renders window with its source", async () => {
   assert.equal(formatContextWindowNotice(1_000_000, "rule"), "ctx 1M · 内置规则");
   assert.equal(formatContextWindowNotice(8_000, "override"), "ctx 8k · 配置覆盖");
   assert.equal(formatContextWindowNotice(undefined, undefined), "ctx 未知");
+});
+
+test("ChatApp pages archived history, retries failures and keeps live output separate", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const session = makeSession(async function* () {
+    yield { type: "text-delta", delta: "live answer" };
+    yield { type: "message-finish", text: "live answer" };
+  }, sink);
+  let attempts = 0;
+  const source: TranscriptHistorySource = () => ({
+    legacy: false,
+    read: (before) => {
+      if (before === undefined) {
+        return {
+          items: [{ kind: "user", id: "saved-2", text: "saved latest" }],
+          nextBeforeSequence: 2,
+        };
+      }
+      attempts++;
+      if (attempts === 1) throw new Error("temporary read failure");
+      assert.equal(before, 2);
+      return {
+        items: [{ kind: "user", id: "saved-1", text: "saved earlier" }],
+        nextBeforeSequence: undefined,
+      };
+    },
+  });
+  const view = render(
+    h(ChatApp, {
+      session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      historySource: source,
+    }),
+  );
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /saved latest/));
+  await delay(60);
+  view.stdin.write("\u001b[5~");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /历史加载失败/));
+  view.stdin.write("\u001b[5~");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /saved earlier/));
+  assert.equal(attempts, 2);
+  assert.deepEqual(sink.sentInputs, undefined);
+  await submitDraft(view, sink, "new prompt");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /live answer/));
+  const frame = plain(view.lastFrame() ?? "");
+  assert.equal(frame.match(/saved latest/g)?.length, 1);
+  assert.equal(frame.match(/saved earlier/g)?.length, 1);
+  assert.deepEqual(sink.sentInputs, ["new prompt"]);
+});
+
+test("ChatApp session switching reads the selected archive instead of active context", async () => {
+  const first = switchableFakeSession("s1", [{ role: "user", content: "active-only-first" }]);
+  const second = switchableFakeSession("s2", [{ role: "user", content: "active-only-second" }]);
+  const opened: string[] = [];
+  const view = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      historySource: (id) => {
+        opened.push(id);
+        return {
+          legacy: false,
+          read: () => ({
+            items: [{ kind: "user", id: `archive-${id}`, text: `archive ${id}` }],
+            nextBeforeSequence: undefined,
+          }),
+        };
+      },
+      sessionSwitching: {
+        loadItems: () => [{ id: "s2", title: "second archive", meta: "" }],
+        resume: async () => second.session,
+        onRetired: () => {},
+      },
+    }),
+  );
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /archive s1/));
+  view.stdin.write("/resume");
+  await delay(30);
+  view.stdin.write("\r");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /second archive/));
+  view.stdin.write("\r");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /archive s2/));
+  assert.doesNotMatch(view.lastFrame() ?? "", /archive s1|active-only/);
+  assert.deepEqual(opened, ["s1", "s2"]);
+  assert.deepEqual(second.sent(), []);
 });

@@ -48,7 +48,7 @@ export type HistoryItem =
       readonly id: string;
       readonly name: string;
       readonly args: string;
-      readonly ok: boolean;
+      readonly ok: boolean | undefined;
       readonly diff?: FileChangeDiff;
     }
   | {

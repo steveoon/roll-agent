@@ -127,6 +127,7 @@ export type {
   ToolOutcomeKind,
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
+export { stripCancelledTurnRecoveryMessages } from "./engine/cancelled-turn-recovery.ts";
 export type { AcceptedTurnInput, TurnInputSkillCheckpoint } from "./store/turn-input.ts";
 export type { ThreadStoreOptions } from "./store/thread-store.ts";
 export type {

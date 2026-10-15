@@ -91,7 +91,11 @@ export function HistoryItemView({
           h(
             Text,
             null,
-            h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
+            h(
+              Text,
+              { color: item.ok === undefined ? "yellow" : item.ok ? "green" : "red" },
+              item.ok === undefined ? "? " : item.ok ? "✓ " : "✗ ",
+            ),
             h(ToolLabel, { name: item.name }),
           ),
         ),
