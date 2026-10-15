@@ -1,0 +1,16 @@
+{
+  "type": "runtime.event",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "relaySequence": 1,
+  "event": {
+    "protocolVersion": "1.0",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000501",
+    "sequence": 1,
+    "timestamp": "2026-08-04T00:00:01.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000502",
+    "turnId": "00000000-0000-4000-8000-000000000503",
+    "event": {
+      "type": "turn.completed"
+    }
+  }
+}

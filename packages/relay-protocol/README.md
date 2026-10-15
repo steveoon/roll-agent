@@ -165,3 +165,7 @@ Relay 不能为了获得 Wire Schema 而安装 `@roll-agent/companion`。
 
 Relay `requestId`、逻辑 `interactionId`、Runtime JSON-RPC `id`、Runtime mutation
 `requestId` 与 Relay `relaySequence` 是不同的类型和生命周期，不能互相复用。
+
+### Wire 1.3 context recovery
+
+Wire 1.3 adds bounded `contextRecovery` snapshots and `context.recovery.changed` timeline events. It retains 1.2 App output semantics. The 1.0/1.1/1.2 wire schemas remain frozen; downgrade maps recovery events to `capabilities.changed` while preserving Relay sequence continuity. This package does not upgrade a deployed cloud Relay service.

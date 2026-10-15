@@ -11,7 +11,12 @@ import {
   relayMessageSchemaV11,
   workspaceIdSchema,
 } from "@roll-agent/relay-protocol";
-import { CompanionRelayFrameBuffer, materializeRelayFrameV11 } from "./relay-frame-buffer.ts";
+import {
+  CompanionRelayFrameBuffer,
+  materializeRelayFrameV11,
+  materializeRelayFrameV12,
+  materializeRelayFrameV13,
+} from "./relay-frame-buffer.ts";
 
 const IDS = {
   runtime: "00000000-0000-4000-8000-000000000701",
@@ -208,4 +213,40 @@ test("invalid frame buffer bounds and replay cursors fail closed", () => {
   const buffer = new CompanionRelayFrameBuffer();
   assert.throws(() => buffer.replay(-2));
   assert.throws(() => buffer.acknowledge(-2));
+});
+
+test("buffer replays recovery entry and exit to 1.3, preserving sequence when downgrading", () => {
+  const buffer = new CompanionRelayFrameBuffer();
+  for (const required of [true, false]) {
+    const envelope = runtimeEventEnvelopeSchema.parse({
+      protocolVersion: "1.6",
+      runtimeInstanceId: IDS.runtime,
+      sequence: required ? 0 : 1,
+      timestamp: "2026-08-04T12:00:00.000Z",
+      threadId: IDS.thread,
+      durability: "durable",
+      eventId: IDS.runtimeEvent,
+      cursor: `rte1:${IDS.eventLog}:${required ? 0 : 1}:${IDS.runtimeEvent}`,
+      event: {
+        type: "context.recovery.changed",
+        contextRecovery: {
+          checkpointId: IDS.approval,
+          required,
+          unextracted: false,
+          requiredItemCount: 24,
+        },
+      },
+    });
+    const entry = buffer.appendRuntimeEvent(envelope);
+    assert.ok(entry);
+    const current = materializeRelayFrameV13(workspaceId, entry);
+    const old = materializeRelayFrameV12(workspaceId, entry);
+    assert.equal(current.type, "runtime.event");
+    assert.ok(
+      current.type === "runtime.event" && current.event.event.type === "context.recovery.changed",
+    );
+    assert.equal(current.event.event.contextRecovery?.required, required);
+    assert.ok(old.type === "runtime.event" && old.event.event.type === "capabilities.changed");
+    assert.equal(old.relaySequence, current.relaySequence);
+  }
 });

@@ -1,0 +1,12 @@
+{
+  "type": "interaction.request",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "relaySequence": 11,
+  "interactionId": "00000000-0000-4000-8000-000000000511",
+  "threadId": "00000000-0000-4000-8000-000000000502",
+  "turnId": "00000000-0000-4000-8000-000000000503",
+  "expiresAt": "2026-08-04T00:05:00.000Z",
+  "sensitivity": "normal",
+  "method": "filePicker.request",
+  "projection": {}
+}

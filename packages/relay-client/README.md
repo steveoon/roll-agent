@@ -103,3 +103,7 @@ error.
 `@roll-agent/relay-client/testing` exports `createRelayClientForTesting()` and the minimal WebSocket
 and scheduler interfaces. Inject a deterministic transport without adding Node APIs to production
 Browser code.
+
+### Context recovery and Wire 1.3
+
+`RelayThreadView.contextRecovery` carries the latest bounded recovery gate state from snapshots and `context.recovery.changed` events. It is `null` for older peers. The default session advertisement remains `["1.2", "1.1"]` for existing Relay services with strict version allowlists. After upgrading the Relay service and Companion together, pass `relayProtocolVersions: ["1.3", "1.2", "1.1"]` to `createRelayClient`. Companion's bridge accepts `protocolVersion: "1.3"`; the Core host session factory accepts `relayProtocolVersion: "1.3"`. The deployed Relay service must support 1.3 ticket negotiation and routing before enabling either option.

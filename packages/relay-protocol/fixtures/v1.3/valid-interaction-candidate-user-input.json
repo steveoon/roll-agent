@@ -1,0 +1,25 @@
+{
+  "type": "runtime.request",
+  "requestId": "00000000-0000-4000-8000-000000000509",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "method": "interaction.candidate",
+  "params": {
+    "interactionId": "00000000-0000-4000-8000-000000000511",
+    "threadId": "00000000-0000-4000-8000-000000000502",
+    "turnId": "00000000-0000-4000-8000-000000000503",
+    "method": "userInput.request",
+    "candidate": {
+      "status": "submitted",
+      "values": [
+        {
+          "id": "region",
+          "value": "north"
+        },
+        {
+          "id": "workspace",
+          "value": "target-workspace"
+        }
+      ]
+    }
+  }
+}

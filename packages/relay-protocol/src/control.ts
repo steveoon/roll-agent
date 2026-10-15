@@ -96,7 +96,14 @@ export const relaySessionReadyControlMessageSchemaV12 =
     })
     .strict()
     .readonly();
+export const relaySessionReadyControlMessageSchemaV13 =
+  relaySessionReadyControlMessageSchema.def.innerType
+    .extend({
+      relayProtocolVersion: z.literal("1.3"),
+    })
+    .readonly();
 export const relaySessionReadyControlMessageSchemaAny = z.union([
+  relaySessionReadyControlMessageSchemaV13,
   relaySessionReadyControlMessageSchema,
   relaySessionReadyControlMessageSchemaV12,
 ]);

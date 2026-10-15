@@ -1,6 +1,7 @@
 import {
   relayInteractionRequestSchemaV11,
   relayRequestMethodSchemasV12,
+  relayThreadSnapshotSchemaV13,
   type RelayInteractionRequestV11,
 } from "@roll-agent/relay-protocol";
 import { relayClientErrorCodeSchema } from "@roll-agent/relay-protocol/control";
@@ -10,7 +11,10 @@ const relayThreadIdSchema =
   relayRequestMethodSchemasV12["thread.open"].params.def.innerType.shape.threadId;
 const relayTurnIdSchema =
   relayRequestMethodSchemasV12["turn.cancel"].params.def.innerType.shape.turnId;
-const relayThreadSnapshotWireSchema = relayRequestMethodSchemasV12["thread.snapshot"].result;
+const relayThreadSnapshotWireSchema = z.union([
+  relayThreadSnapshotSchemaV13,
+  relayRequestMethodSchemasV12["thread.snapshot"].result,
+]);
 
 export const RELAY_CONNECTION_STATUSES = {
   idle: "idle",
@@ -181,6 +185,7 @@ export const relayTurnStateSchema = z.discriminatedUnion("status", [
 ]);
 
 const relayThreadViewFields = {
+  contextRecovery: relayThreadSnapshotSchemaV13.def.innerType.shape.contextRecovery.default(null),
   threadId: relayThreadIdSchema,
   liveAssistantMessages: z.array(relayLiveAssistantMessageSchema).readonly(),
   interactions: z.array(relayInteractionStateSchema).readonly(),
