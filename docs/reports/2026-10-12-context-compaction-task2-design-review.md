@@ -1,41 +1,15 @@
-# Task 2 — Codex independent design pre-review
+# Task 2：请求预算设计审查结论（2026-10-12）
 
-Date: 2026-10-12 (Asia/Singapore). Repository: nano-agent, dev@31816c3.
+> 历史结论摘要，仅适用于当时的测试快照，不代表当前代码验收。
 
-## Status and scope
+基线 `dev@31816c3`。设计及后续 SDK 修订获准实施；设计批准不等于实现验收。
 
-The existing Task 2 design is suitable for implementation, subject to the acceptance requirements below. This is a design pre-review, not implementation acceptance. Task 1 and Task 1a were independently accepted previously. Their documentation has now been updated by Roll. No Task 2 request-budget/model-request modules, tests or delivery report were present at this review.
+- 最终派发门禁以 SDK 已准备好的实际参数为权威请求结构，在推理专用 middleware 的 Provider 调用前检查；数字仍是估算，不冒称 tokenizer 精确值。
+- SDK 独占 prompt/tool/schema 的准备、动态描述解析及资源下载；不重复转换，不引入 `ai/internal` 生产依赖。
+- 维护后的完整请求测量等到下一次真实准备；取消或中断时保留“尚无 after”，不得由新回合补记。前后空间比较固定校准基准，校准失效不能伪造释放。
+- 暂停信号必须属于本请求，并覆盖 SDK error part 与结果 Promise；拒绝派发不能遗留空 batch、虚构完成步骤或执行授权。
+- 已完成工具先结算和持久化；重建流沿用原输入身份、步数和期限，不重放副作用。75% 为软目标，真实硬上限仍独立检查。
 
-The authorized Roll session is `6ae73b8d-e223-4187-97be-4eadd7315850`. Its latest user instruction is the 2026-10-12 continuation request. Only that session was read, through a read-only SQLite connection. Metalterm computer-use access was denied; no UI input, prompt insertion, cancellation or restart was attempted. Both Codex automations remain paused. No commit, push, release or changes to production source were performed by this review.
+已安装 SDK 的独立探针验证：初始拒绝时 Provider／工具／完成步骤均为 0；中途拒绝时均为 1；流保留同一 owned marker，初始 steps Promise 可能改成通用错误。该探针不是产品整体或真实订阅验收。
 
-## Evidence and design decisions
-
-- The current production request composition is in `AgentSession.runTurn`, with projected canonical step messages, explicit Skill context, reminders, tool-image relocation and `modelTools()`. The estimator must consume that production composition rather than reconstruct it independently.
-- The installed SDK's `stream-text.ts` prepares step messages/instructions/tools before `streamLanguageModelCall`; its continuation decision runs after client tool results settle. Nested continuation exceptions become stream error parts. A synchronous try/catch around `streamText()` is insufficient for the dispatch guard.
-- `wrap-language-model.ts` exposes the finalized `LanguageModelV4CallOptions` before delegation. A guard there can refuse the actual inference dispatch while preserving options. Keep this wrapper local to the inference call; the underlying model also serves compaction and must remain usable for maintenance.
-- The SDK retry predicate in `retry-with-exponential-backoff.ts` retries retryable API/Gateway errors. Use an owned internal maintenance signal rather than impersonating a retryable API failure or matching an error-message string.
-- `stream-language-model-call.ts` invokes the language-model-call start callback before `doStream`. Inspect batch-coordinator state when the guard rejects after this callback; a refused dispatch must not leave a phantom batch, completed step or execution authority.
-- Current `AgentSession` still retains the largest successful input usage in a stream, the two-pressure-continuation limit and four-pass compaction loop. These are the baseline, not evidence of the proposed changes being implemented. The whole-turn continuation policy and fair evidence batching belong to Task 3.
-
-## Required independent acceptance
-
-1. Capture actual installed-SDK mock-provider call parameters. Count system/instructions, effective filtered tool schemas, current input, Skill/checkpoint/reminders and completed tool results exactly once. Verify logical projection and finalized dispatch counts, with explicit estimates for opaque/multimodal parts and provider-specific serialization overhead.
-2. Calibrate against the latest successful request and its matching estimate. Separate occupancy, cached input, output/reasoning and cumulative billing. Test an earlier large request followed by a smaller request. A changed epoch/model or calibration reset must not manufacture net space release; maintenance comparisons use a common basis.
-3. Test the initial guard and a guard after an executed write tool through the installed SDK. Unsafe requests never reach the underlying provider. Retrieve remembered completed steps, persist canonical responses and tool ledger coverage before maintenance. Preserve exactly one write effect and original execution identity, including missing/unknown outcomes.
-4. Recognize only the owned request-bound pause signal through error parts and rejected SDK result promises. Complete stream/batch cleanup. Do not increment completed-step counters for refused dispatch, reset the turn timer, bypass rejection/approval policies or retry genuine provider errors after effects.
-5. Keep 75% as a soft maintenance target. A complete request within reserved capacity may proceed after bounded maintenance, with memoized handling of unchanged above-target states. Unknown windows and explicitly disabled compaction must remain honest; never redispatch an unchanged provider-rejected fingerprint automatically.
-6. Exercise model/tool-policy/system/Skill/checkpoint changes, schema cache invalidation, cancellation, timeout, protected oversized input and a subsequent smaller input. Provider options, subscription thinking behavior, Sampling and API provider behavior must remain unchanged.
-
-Task 2 must stop for independent implementation review before Task 3 is authorized. Task 3 must independently pass before Task 4. Final Phase 1 acceptance requires diagnostics integration, relevant complete regressions, typechecks, lint, builds, changesets and the planned Core E2E. Mock SDK/SQLite tests are not real subscription acceptance or evidence of compression efficiency.
-
-## Navigation limits
-
-GitNexus `roll-agent` is registered at the current HEAD with an index dated 2026-10-10. The previous read-only concept query did not return a useful flow and the named private compaction method did not resolve. Source and installed SDK inspection therefore remain the evidence for this pre-review; missing graph results are not interpreted as absence of callers or low risk. Shared AgentSession dispatch/recovery remains a high-risk review area. No production symbols were edited.
-
-## Installed-SDK revision acceptance
-
-Roll subsequently delivered `docs/plans/2026-10-12-context-request-budget-sdk-checkpoint.md` and stopped for review. Codex independently reproduced its SDK premise with `/tmp/codex-roll-task2-sdk-review.mjs`: initial guard 0 Provider calls/0 tools/0 completed steps; intermediate guard 1 Provider call/1 tool/1 completed step. Both preserve the identical owned marker in the stream, while the initial `steps` promise substitutes a generic error. Start callbacks run before a rejected dispatch and have no matching successful end callback. Dynamic description resolution was performed by SDK only (2 calls per prepared attempt in this fixture). The script passes its assertions with the installed SDK; it is not a production Task 2 test or real subscription acceptance.
-
-Decision: approve finalized-SDK parameters as authoritative request structure and defer finalized post-maintenance accounting until actual re-preparation, with all counts still labeled estimates. The checkpoint's section 6 records acceptance requirements for frozen calibration, absent/pending after-budget on cancellation, bounded preparation/recovery, dynamic shape invalidation, coordinator lifecycle and durable no-replay tests. No `ai/internal` production coupling or duplicate download/conversion pass is needed. Implementation acceptance remains pending.
-
-Communication status: the written decision is saved in the shared workspace. No prompt was sent to the stopped Roll session because the Metalterm access tool refuses approval. No scheduler was resumed.
+后续 [Task 2 交付结论](2026-10-12-context-compaction-task2.md) 的验收曾被 [半窗口事件](2026-10-12-context-budget-half-window-incident.md) 重新打开。
