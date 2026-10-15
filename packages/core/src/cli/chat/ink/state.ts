@@ -230,6 +230,7 @@ export function buildConfirmPrompt(
 function buildCompactionNotice(
   event: Extract<SessionEvent, { type: "context-compacted" }>,
 ): string {
+  if (event.recoveryNotice) return `${GLYPHS.compact} ${event.recoveryNotice}`;
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
   const checkpoint = event.checkpointGeneration

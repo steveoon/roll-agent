@@ -771,7 +771,7 @@ test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
       readonly user_version: number;
     };
     assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -980,7 +980,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      8,
+      9,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1926,7 +1926,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -1978,6 +1978,56 @@ test("ThreadStore 跳过损坏的最新 checkpoint，继续返回上一条有效
 
     const reopened = new ThreadStore(dir);
     assert.equal(reopened.getLatestCheckpoint(threadId)?.id, valid.id);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore schema v8 迁移跳过损坏 checkpoint 并标记来源限制", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [{ role: "user", content: "goal" }]);
+    const valid = store.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary" }],
+      ...currentCompactionGuard(store, threadId),
+      draft: checkpointDraft(),
+    });
+    store.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `INSERT INTO compaction_checkpoints
+           (id, thread_id, generation, schema_version,
+            message_from_sequence, message_through_sequence,
+            tool_from_sequence, tool_through_sequence,
+            checkpoint_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "51aabf47-369d-40cd-b409-ae4c3f3e07bb",
+        threadId,
+        2,
+        2,
+        0,
+        0,
+        -1,
+        -1,
+        JSON.stringify({ version: 2 }),
+        "2026-07-17T10:00:00.000Z",
+      );
+    database.exec("PRAGMA user_version = 8;");
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.equal(reopened.getLatestCheckpoint(threadId)?.id, valid.id);
+    assert.equal(
+      reopened.getLatestCheckpoint(threadId)?.transcript.completeness,
+      "legacy_snapshot",
+    );
     reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2459,7 +2509,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

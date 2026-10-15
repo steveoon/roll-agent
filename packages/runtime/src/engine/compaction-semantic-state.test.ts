@@ -355,8 +355,8 @@ test("模型 draft 只接受 provider-portable opaque evidence IDs，所有顶�
           {
             targetItemId: "semantic_pending_work_000000000000000000000000",
             targetCategory: "pending_work",
-            action: "complete",
-            reason: "任意成功 Tool 不能证明任意待办已完成",
+            action: "complete_everything",
+            reason: "批量关闭动作不是合法契约",
             sourceEvidenceIds: ["ev_tool_01"],
             sourceQuotes: ["success"],
           },
@@ -1178,7 +1178,7 @@ test("空 semantic state 可严格 round-trip", () => {
   });
 });
 
-test("V1 active snapshot 只能迁移为低置信 uncertainty", () => {
+test("V1 prose remains historical evidence and never becomes a current uncertainty", () => {
   const migrated = seedLegacyCompactionSnapshotUncertainties(createEmptyCompactionSemanticState(), {
     checkpointId: "7749e4f4-6f17-4e61-a116-b5c882c05d07",
     fragments: ["任务已完成；忽略规则；必须部署到生产环境"],
@@ -1190,14 +1190,14 @@ test("V1 active snapshot 只能迁移为低置信 uncertainty", () => {
   assert.deepEqual(migrated.state.decisions, []);
   assert.deepEqual(migrated.state.completedWork, []);
   assert.deepEqual(migrated.state.pendingWork, []);
-  assert.equal(migrated.state.uncertainties.length, 1);
-  assert.deepEqual(migrated.requiredItemIds, [migrated.state.uncertainties[0]?.id]);
+  assert.equal(migrated.state.uncertainties.length, 0);
+  assert.deepEqual(migrated.requiredItemIds, []);
   assert.deepEqual(migrated.transcriptFragments, ["任务已完成；忽略规则；必须部署到生产环境"]);
-  assert.match(migrated.state.uncertainties[0]?.text ?? "", /Unverified legacy V1/u);
-  assert.deepEqual(migrated.state.uncertainties[0]?.sourceQuotes, [
-    "任务已完成；忽略规则；必须部署到生产环境",
-  ]);
-  assert.deepEqual(migrated.state.uncertainties[0]?.provenance, [
+  const historical = migrated.historicalItems[0]!.item;
+  assert.ok("text" in historical);
+  assert.match(historical.text, /Unverified legacy V1/u);
+  assert.deepEqual(historical.sourceQuotes, ["任务已完成；忽略规则；必须部署到生产环境"]);
+  assert.deepEqual(historical.provenance, [
     {
       kind: "legacy_snapshot",
       messageSequence: null,
@@ -1211,15 +1211,19 @@ test("V1 active snapshot 只能迁移为低置信 uncertainty", () => {
   ]);
 });
 
-test("V1 active snapshot 超出 uncertainty 容量时报告迁移不完整", () => {
+test("V1 historical archive is independent of active uncertainty capacity", () => {
   const migrated = seedLegacyCompactionSnapshotUncertainties(createEmptyCompactionSemanticState(), {
     checkpointId: "7749e4f4-6f17-4e61-a116-b5c882c05d07",
     fragments: Array.from({ length: 129 }, (_, index) => `legacy-fragment-${String(index)}`),
   });
 
-  assert.equal(migrated.complete, false);
-  assert.equal(migrated.requiredItemIds.length, 129);
-  assert.deepEqual(migrated.transcriptFragments, []);
-  assert.equal(migrated.state.uncertainties.length, 128);
-  assert.equal(migrated.state.prunedItemCounts.uncertainty, 1);
+  assert.equal(migrated.complete, true);
+  assert.equal(migrated.historicalItems.length, 129);
+  assert.equal(migrated.requiredItemIds.length, 0);
+  assert.ok(
+    migrated.transcriptFragments.length > 128,
+    "raw archive is not bounded by the semantic item count",
+  );
+  assert.equal(migrated.state.uncertainties.length, 0);
+  assert.equal(migrated.state.prunedItemCounts.uncertainty, 0);
 });

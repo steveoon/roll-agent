@@ -10,7 +10,7 @@ import { simulateReadableStream, type ModelMessage } from "ai";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { AgentSession } from "./agent-session.ts";
 import { ThreadStore } from "../store/thread-store.ts";
-import { estimatePreparedRequest } from "./request-budget.ts";
+import { estimatePreparedRequest, RequestBudgetTracker } from "./request-budget.ts";
 import { compactMessages, compactionEvidenceTokenBudget } from "./compactor.ts";
 import {
   compactionSemanticStateSchema,
@@ -242,8 +242,41 @@ test("small-window summary reserves room for evidence instead of reserving the w
   assert.equal(calls, 1);
 });
 
-for (const growth of ["small", "material", "unsafe"] as const) {
-  test(`advisory miss backs off across tool steps, with material growth=${growth}`, async () => {
+const advisoryScenarios = [
+  ...(["small", "material", "unsafe"] as const).map((growth) => ({
+    growth,
+    metadata: "none" as const,
+  })),
+  ...(["thoughtSignature", "reasoning", "encrypted", "image", "fixed-image"] as const).map(
+    (metadata) => ({ growth: "small" as const, metadata }),
+  ),
+];
+const scenarios = [
+  ...advisoryScenarios.map((scenario) => ({ ...scenario, fixedBudget: false })),
+  ...(["none", "thoughtSignature", "reasoning", "encrypted", "image"] as const).map((metadata) => ({
+    growth: "small" as const,
+    metadata,
+    fixedBudget: true,
+  })),
+];
+for (const { growth, metadata, fixedBudget } of scenarios) {
+  test(`advisory miss backs off across tool steps, with material growth=${growth}, metadata=${metadata}, fixed budget=${fixedBudget}`, async (t) => {
+    if (fixedBudget) {
+      const prepare = RequestBudgetTracker.prototype.prepare;
+      t.mock.method(
+        RequestBudgetTracker.prototype,
+        "prepare",
+        function (
+          this: RequestBudgetTracker,
+          ...args: Parameters<RequestBudgetTracker["prepare"]>
+        ) {
+          const snapshot = prepare.apply(this, args);
+          // Keep real request fingerprints (including opaque content), while
+          // prescribing one identical admission-budget trajectory for every variant.
+          return { ...snapshot, rawInputEstimate: 100_000, calibratedInputEstimate: 100_000 };
+        },
+      );
+    }
     let summaries = 0;
     let calls = 0;
     let tools = 0;
@@ -260,6 +293,15 @@ for (const growth of ["small", "material", "unsafe"] as const) {
                   ? "G".repeat(growth === "unsafe" ? 120000 : 30000)
                   : "done",
             },
+            ...(metadata === "image" || metadata === "fixed-image"
+              ? [
+                  {
+                    type: "image",
+                    mimeType: "image/png",
+                    data: Buffer.from([metadata === "image" ? tools : 0]).toString("base64"),
+                  },
+                ]
+              : []),
           ],
         };
       },
@@ -272,12 +314,29 @@ for (const growth of ["small", "material", "unsafe"] as const) {
       doStream: async (params) => {
         calls += 1;
         const chunks: LanguageModelV4StreamPart[] = [{ type: "stream-start", warnings: [] }];
+        if (metadata === "reasoning") {
+          chunks.push(
+            {
+              type: "reasoning-start",
+              id: `r-${calls}`,
+              providerMetadata: { anthropic: { signature: `sig-${calls}` } },
+            },
+            { type: "reasoning-delta", id: `r-${calls}`, delta: "inspect" },
+            { type: "reasoning-end", id: `r-${calls}` },
+          );
+        }
         if (calls <= 4) {
           chunks.push({
             type: "tool-call",
             toolCallId: `call-${calls}`,
             toolName: "fixture__read",
             input: "{}",
+            ...(metadata === "thoughtSignature"
+              ? { providerMetadata: { google: { thoughtSignature: `sig-${calls}` } } }
+              : {}),
+            ...(metadata === "encrypted"
+              ? { providerMetadata: { openai: { encryptedContent: `encrypted-${calls}` } } }
+              : {}),
           });
         } else {
           chunks.push(
@@ -344,10 +403,26 @@ for (const growth of ["small", "material", "unsafe"] as const) {
       assert.equal(calls, 5);
       assert.equal(tools, 4);
       const episodes = session.getMaintenanceEpisodes();
-      assert.equal(episodes.length, growth === "material" ? 2 : 1);
-      assert.equal(summaries, growth === "material" ? 2 : 1);
+      assert.equal(
+        episodes.length,
+        !fixedBudget &&
+          (growth === "material" || metadata === "image" || metadata === "fixed-image")
+          ? 2
+          : 1,
+      );
+      assert.equal(
+        summaries,
+        !fixedBudget &&
+          (growth === "material" || metadata === "image" || metadata === "fixed-image")
+          ? 2
+          : 1,
+      );
       assert.ok(
-        session.getRequestBudgetState().preparedAttempts <= (growth === "material" ? 11 : 8),
+        session.getRequestBudgetState().preparedAttempts <=
+          (!fixedBudget &&
+          (growth === "material" || metadata === "image" || metadata === "fixed-image")
+            ? 11
+            : 8),
       );
     } finally {
       await session.close();

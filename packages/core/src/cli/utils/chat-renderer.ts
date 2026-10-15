@@ -269,9 +269,10 @@ export class ChatRenderer {
           ? `，精简 ${String(event.truncatedTools)} 个工具结果`
           : "";
         const text =
-          event.removed === 0 && !event.truncatedTools
+          event.recoveryNotice ??
+          (event.removed === 0 && !event.truncatedTools
             ? `${GLYPHS.compact} ${label}：未减少上下文（保留策略或安全检查限制了裁剪）`
-            : `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+            : `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`);
         process.stderr.write(`${chalk.gray(text)}\n`);
         break;
       }

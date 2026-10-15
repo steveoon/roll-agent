@@ -145,7 +145,8 @@ test("soft 75% target never becomes a hard rejection or repeated unchanged prepa
   }
 });
 
-test("expired summary allowance still verifies and admits a fitting request above the advisory target", async () => {
+test("expired summary allowance still verifies and admits a fitting request above the advisory target", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: new Date() });
   let calls = 0;
   let drafts = 0;
   const model = new MockLanguageModelV4({
@@ -156,13 +157,8 @@ test("expired summary allowance still verifies and admits a fitting request abov
     doGenerate: async ({ abortSignal }) => {
       drafts += 1;
       assert.ok(abortSignal);
-      await new Promise<void>((_resolve, reject) => {
-        if (abortSignal.aborted) reject(abortSignal.reason);
-        else {
-          abortSignal.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
-        }
-      });
-      throw new Error("unreachable");
+      t.mock.timers.tick(1001);
+      throw new DOMException("Summary deadline expired", "TimeoutError");
     },
   });
   const initialMessages = Array.from({ length: 20 }, () => [
@@ -181,7 +177,7 @@ test("expired summary allowance still verifies and admits a fitting request abov
     maxSteps: 1,
     initialMessages,
     contextWindow: Math.ceil(raw / 0.8),
-    compaction: { ...compaction, strategy: "summarize", timeoutMs: 20, maxOutputTokens: 512 },
+    compaction: { ...compaction, strategy: "summarize", timeoutMs: 1000, maxOutputTokens: 512 },
   });
   try {
     const events = await drain(session, "new goal");

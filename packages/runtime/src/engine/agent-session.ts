@@ -1,3 +1,31 @@
+import {
+  ContextRecoveryGate,
+  CONTEXT_TOOL_ID,
+  omitEarlierContextReads,
+  type ContextStore,
+} from "../tool-bridge/context-tool.ts";
+import { CONTEXT_READ_CHUNK_CHARS, RECOVERY_RESERVED_STEPS } from "../store/semantic-ledger.ts";
+import {
+  listSemanticArchiveItems,
+  semanticTextItemSchema,
+  type SemanticResolutionTarget,
+  type SemanticArchiveItem,
+  type CompactionSemanticResolution,
+  buildCompactionSemanticModelContext,
+  buildCompactionSemanticEvidenceRegistry,
+  CompactionSemanticCandidateError,
+  mergeCompactionSemanticState,
+  replaceCompactionSemanticConstraints,
+  replaceCompactionSemanticGoal,
+  renderCompactionSemanticSummary,
+  seedCompactionSemanticConstraints,
+  seedLegacyCompactionSnapshotUncertainties,
+  validateCompactionModelDraft,
+  type CompactionModelDraft,
+  type CompactionSemanticEvidenceRegistry,
+  type CompactionSemanticItemId,
+  type CompactionSemanticState,
+} from "./compaction-semantic-state.ts";
 import { describeAppOutput } from "@roll-agent/protocol";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -146,7 +174,6 @@ import {
   type CompactionPassResult,
   type MaintenanceObservation,
 } from "./compaction-recovery.ts";
-import { requestDigest } from "./request-budget.ts";
 import {
   projectTurnInputSkillCheckpoint,
   turnInputSkillCheckpointSchema,
@@ -191,7 +218,7 @@ import {
   COMPACTION_CHECKPOINT_VERSION,
   createCompactionCheckpoint,
   createCompactionSummary,
-  createCheckpointSemanticReminderProjection,
+  projectCompactionCheckpointReminder,
   findLatestRealUserGoal,
   resolveActiveCompactionConstraints,
   TRANSCRIPT_MESSAGE_PROVENANCES,
@@ -204,22 +231,6 @@ import {
   type CompactionSummary,
 } from "./compaction-checkpoint.ts";
 import {
-  buildCompactionSemanticModelContext,
-  buildCompactionSemanticEvidenceRegistry,
-  CompactionSemanticCandidateError,
-  mergeCompactionSemanticState,
-  replaceCompactionSemanticConstraints,
-  replaceCompactionSemanticGoal,
-  renderCompactionSemanticSummary,
-  seedCompactionSemanticConstraints,
-  seedLegacyCompactionSnapshotUncertainties,
-  validateCompactionModelDraft,
-  type CompactionModelDraft,
-  type CompactionSemanticEvidenceRegistry,
-  type CompactionSemanticItemId,
-  type CompactionSemanticState,
-} from "./compaction-semantic-state.ts";
-import {
   ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS,
   repairActiveToolProtocol,
 } from "./tool-protocol-repair.ts";
@@ -231,6 +242,7 @@ import {
 import { readObservationPage } from "./observation-readback.ts";
 import { CompactionEvidenceUnpresentable } from "./compaction-evidence-batch.ts";
 import { retainsCompactionFacts } from "./compaction-retention.ts";
+import { maintenanceDigest } from "./maintenance-fingerprint.ts";
 import {
   canonicalObservationOutput,
   projectObservationMessages,
@@ -304,6 +316,7 @@ export interface AgentSessionOptions {
   ) => readonly ArchivedTranscriptMessage[];
   readonly commitCompaction?: (input: CommitCompactionInput) => CompactionCheckpoint;
   readonly readCheckpointTranscript?: TranscriptReader;
+  readonly contextStore?: ContextStore;
   readonly contextWindow?: number;
   readonly contextWindowSource?: ContextWindowSource;
   readonly compaction?: SessionCompactionSettings;
@@ -423,6 +436,8 @@ interface TurnCancellationActivity {
 interface CompactionDraftSnapshot {
   readonly draft: CompactionCheckpointDraftInput;
   readonly semanticState: CompactionSemanticState;
+  readonly semanticArchiveItems: readonly SemanticArchiveItem[];
+  readonly semanticResolutions: readonly CompactionSemanticResolution[];
   readonly semanticSummaryText: string | undefined;
   readonly semanticRejectionCount: number;
   readonly legacySnapshotReminderCoverageComplete: boolean;
@@ -435,6 +450,7 @@ interface CompactionDraftSnapshot {
 }
 
 interface CompactionEvidenceSnapshot {
+  readonly historicalSemanticArchiveItems: readonly SemanticArchiveItem[];
   readonly transcript: readonly ArchivedTranscriptMessage[];
   readonly toolExecutions: readonly SequencedToolExecutionRecord[];
   readonly resources: readonly CompactionResource[];
@@ -451,6 +467,7 @@ interface CompactionEvidenceSnapshot {
   readonly previousSemanticEvidenceWatermarks: CompactionSemanticEvidenceWatermarks;
   /** Derived legacy archive rows are already represented by semantic legacy_snapshot items. */
   readonly autoCoveredMessageSequences: ReadonlySet<number>;
+  readonly autoCoveredToolSequences: ReadonlySet<number>;
   readonly legacySnapshotMigrationComplete: boolean;
   readonly legacySnapshotRequiredItemIds: readonly CompactionSemanticItemId[];
   readonly legacySnapshotTranscriptFragments: readonly string[];
@@ -990,6 +1007,8 @@ export class AgentSession {
   private readonly onRecordInputSkillCheckpoint: AgentSessionOptions["onRecordInputSkillCheckpoint"];
   private readonly getInputSkillCheckpoint: AgentSessionOptions["getInputSkillCheckpoint"];
   private readonly inputSkillCheckpoints = new Map<number, TurnInputSkillCheckpoint>();
+  private readonly contextStore: ContextStore | undefined;
+  private readonly contextRecovery: ContextRecoveryGate | undefined;
   private readonly toolCoordinator = new ToolExecutionCoordinator();
   private tools: ToolSet;
   private readonly registry: ToolRegistry;
@@ -1025,7 +1044,7 @@ export class AgentSession {
     ];
   }
   private maintenanceFingerprint(): string {
-    return requestDigest({
+    return maintenanceDigest({
       messages: this.projectModelMessages(this.messages),
       semantic:
         this.compactionCheckpoint?.version === 2
@@ -1138,6 +1157,12 @@ export class AgentSession {
     this.toolSourceAgentNames = new Set(options.sources.map((source) => source.agentName));
     this.toolSchemaPolicy = options.toolSchemaPolicy;
     this.onToolExcluded = options.onToolExcluded;
+    this.contextStore = options.contextStore;
+    this.contextRecovery = options.contextStore
+      ? new ContextRecoveryGate(options.contextStore, (state) =>
+          this.emit?.({ type: "context-recovery", state }),
+        )
+      : undefined;
     const registry = new ToolRegistry();
     const toolRoles: Record<string, CapabilityToolRole> = {};
     const userInputTool = buildUserInputTool(
@@ -1160,6 +1185,8 @@ export class AgentSession {
           `thread:${this.id}:transcript`,
         )
       : {};
+    const contextTools = this.contextRecovery?.tools(registry) ?? {};
+    markToolRole(toolRoles, contextTools, CAPABILITY_TOOL_ROLES.contextRead);
     markToolRole(toolRoles, transcriptTools, CAPABILITY_TOOL_ROLES.transcriptRead);
     const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     markToolRole(toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
@@ -1273,6 +1300,7 @@ export class AgentSession {
     this.observationRecallToolId = Object.keys(observationRecallTools)[0];
     markToolRole(toolRoles, observationRecallTools, CAPABILITY_TOOL_ROLES.observationRead);
     this.tools = {
+      ...contextTools,
       ...transcriptTools,
       ...observationRecallTools,
       ...skillTools,
@@ -1652,6 +1680,7 @@ export class AgentSession {
       }
       this.syncWorkspaceInstructions();
       let contextRecoveryAttempts = 0;
+      this.contextRecovery?.beginTurn();
       let advisoryMiss: RequestBudgetSnapshot | undefined;
       const advisoryGrowth = (): number => Math.max(1024, (this.contextWindow ?? 0) * 0.05);
       const canRetryAdvisory = (tokens: number): boolean =>
@@ -1731,6 +1760,7 @@ export class AgentSession {
         const checkpointReminder = this.currentCheckpointReminder(transcriptToolId);
         const reminderTokens =
           checkpointReminder === undefined ? 0 : estimateTextTokens(checkpointReminder);
+        const recoveringStream = this.contextRecovery?.required === true;
         const streamTools = this.modelTools();
         const buildRequest = (completedMessages: readonly ModelMessage[] = []) =>
           buildSessionModelRequest({
@@ -1785,7 +1815,7 @@ export class AgentSession {
               );
               // Include resolved request configuration but exclude checkpoint UUID/time.
               // Stable checkpoint content and coverage are included by maintenanceFingerprint.
-              this.maintenanceShape = requestDigest({
+              this.maintenanceShape = maintenanceDigest({
                 system: params.prompt.filter((message) => message.role === "system"),
                 tools: params.tools,
                 options: params.providerOptions,
@@ -1819,15 +1849,14 @@ export class AgentSession {
                 budget.availableInputCeiling !== undefined &&
                 budget.calibratedInputEstimate > budget.availableInputCeiling;
               const soft =
+                !this.contextRecovery?.required &&
                 this.compaction?.enabled === true &&
                 maintenanceTarget !== undefined &&
                 budget.calibratedInputEstimate >= maintenanceTarget &&
                 (episode !== undefined ||
                   canRetryAdvisory(budget.calibratedInputEstimate) ||
                   (advisoryMiss !== undefined &&
-                    (budget.shapeFingerprint !== advisoryMiss.shapeFingerprint ||
-                      budget.rawInputEstimate >=
-                        advisoryMiss.rawInputEstimate + advisoryGrowth()))) &&
+                    budget.rawInputEstimate >= advisoryMiss.rawInputEstimate + advisoryGrowth())) &&
                 (episode === undefined || episode.canWork(this.maintenanceFingerprint()));
               const rejected =
                 providerRejected.has(budget.fingerprint) ||
@@ -1888,6 +1917,11 @@ export class AgentSession {
               stepCountIs(Math.max(1, this.maxSteps - activeTurn.completedStepCount)),
               stopOnUserRejected(),
               invalidScheduleRetryGuard.stop,
+              ({ steps }) => {
+                if (!recoveringStream || !steps.at(-1)?.toolCalls.length) return false;
+                activeTurn.pausedForContextPressure = true;
+                return true;
+              },
               this.stopOnContextPressure(
                 activeTurn,
                 () => lastPreparedComparableTokens,
@@ -2319,12 +2353,38 @@ export class AgentSession {
             queue.push({ type: "message-start", messageId: randomUUID() });
             continue;
           }
+          if (this.contextRecovery?.required) {
+            // Recovery is read-only and bounded. Never recursively summarize readback evidence.
+            if (this.archiveContextForRecovery(queue, activeTurn)) {
+              this.closeMaintenance("recovery_projection_archived", activeTurn.inputId);
+              queue.push({ type: "message-start", messageId: randomUUID() });
+              continue;
+            }
+            queue.push({
+              type: "error",
+              stage: "plan",
+              message:
+                "context_recovery_request_too_large：最小系统提示与回查工具仍无法通过预算检查；已归档内容和恢复状态已保留，请缩小系统提示或使用更大窗口。",
+            });
+            return;
+          }
           const episode = this.ensureMaintenance(activeTurn, pause.budget);
           const fingerprint = this.maintenanceFingerprint();
           if (
             (pause.reason !== "shape_changed" && this.compaction?.enabled !== true) ||
             !episode.canWork(fingerprint)
           ) {
+            if (
+              this.compaction?.enabled &&
+              pause.reason !== "shape_changed" &&
+              pause.budget.availableInputCeiling !== undefined &&
+              pause.budget.calibratedInputEstimate > pause.budget.availableInputCeiling &&
+              this.archiveContextForRecovery(queue, activeTurn)
+            ) {
+              this.closeMaintenance("archived_for_recovery", activeTurn.inputId);
+              queue.push({ type: "message-start", messageId: randomUUID() });
+              continue;
+            }
             this.closeMaintenance(
               episode.workBlockReason(fingerprint) ?? "compaction_disabled",
               activeTurn.inputId,
@@ -2332,7 +2392,7 @@ export class AgentSession {
             queue.push({
               type: "error",
               stage: "plan",
-              message: `context_request_budget_unrecoverable：输入和已完成操作已保留；当前请求未通过预算检查（${pause.reason}，估算输入 ${Math.ceil(pause.budget.calibratedInputEstimate)}，输入上限 ${pause.budget.availableInputCeiling ?? "未知"}，最近实测 ${pause.budget.latestMeasuredInput ?? "未知"}）。可继续发送较小的新要求或手动压缩。`,
+              message: `${this.contextRecovery?.required ? "context_recovery_request_too_large：最小恢复请求（系统提示与回查工具）仍超过窗口；" : ""}context_request_budget_unrecoverable：输入和已完成操作已保留；当前请求未通过预算检查（${pause.reason}，估算输入 ${Math.ceil(pause.budget.calibratedInputEstimate)}，输入上限 ${pause.budget.availableInputCeiling ?? "未知"}，最近实测 ${pause.budget.latestMeasuredInput ?? "未知"}）。可继续发送较小的新要求或手动压缩。`,
             });
             return;
           }
@@ -2368,6 +2428,12 @@ export class AgentSession {
                 // Keeping an oversized source is not itself a capacity failure.
                 // The next finalized SDK preparation still decides admission.
                 episode.stopWork("evidence_unpresentable");
+              } else if (
+                error instanceof Error &&
+                error.name === "TimeoutError" &&
+                this.archiveContextForRecovery(queue, activeTurn, "auto")
+              ) {
+                episode.stopWork("summary_timeout");
               } else {
                 if (
                   this.isTurnAborted(activeTurn) ||
@@ -2547,6 +2613,25 @@ export class AgentSession {
         });
         this.persistMessages(this.messages.slice(turnStart), "raw_transcript");
         markTurnSegmentPersisted(activeTurn);
+        if (recoveringStream && this.onReplace !== undefined) {
+          const latestInput = this.messages.findLast((message) => message.role === "user");
+          const readHistory: ModelMessage[] = [];
+          const readBudget = Math.min(24000, Math.max(6000, (this.contextWindow ?? 16000) * 1.5));
+          let chars = 0;
+          for (const message of [...this.messages].reverse()) {
+            if (message.role === "user") continue;
+            const size = JSON.stringify(message).length;
+            if (chars + size > readBudget) break;
+            chars += size;
+            readHistory.unshift(message);
+          }
+          const recent = repairActiveToolProtocol([
+            ...(latestInput && JSON.stringify(latestInput).length <= 4000 ? [latestInput] : []),
+            ...readHistory,
+          ]).messages;
+          this.onReplace(recent);
+          this.messages.splice(0, this.messages.length, ...recent);
+        }
         turnStart = this.messages.length;
         this.debug(queue, "persist", "messages persisted", turnStartedAt, {
           totalMessages: this.messages.length,
@@ -2575,6 +2660,13 @@ export class AgentSession {
           ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
           ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
         });
+        if (
+          recoveringStream &&
+          (this.contextRecovery?.coverageRemaining() ?? 0) > 0 &&
+          activeTurn.completedStepCount >= Math.max(1, this.maxSteps - RECOVERY_RESERVED_STEPS)
+        ) {
+          return;
+        }
         if (
           !activeTurn.pausedForContextPressure ||
           lastStepFinishReason !== "tool-calls" ||
@@ -3043,6 +3135,11 @@ export class AgentSession {
   }
 
   private modelTools(): ToolSet {
+    if (this.contextRecovery?.required) {
+      return Object.fromEntries(
+        Object.entries(this.tools).filter(([id]) => id === CONTEXT_TOOL_ID),
+      );
+    }
     if (this.excludedToolIds.size === 0) {
       return this.tools;
     }
@@ -3092,6 +3189,7 @@ export class AgentSession {
     canRetryAdvisory: (tokens: number) => boolean = () => true,
   ): StopCondition<ToolSet> {
     return ({ steps }) => {
+      if (this.contextRecovery?.required) return false;
       const settings = this.compaction;
       const last = steps.at(-1);
       if (
@@ -3174,11 +3272,15 @@ export class AgentSession {
   }
 
   private projectModelMessages(messages: readonly ModelMessage[]): ModelMessage[] {
-    return projectObservationMessages(messages, {
+    const projected = projectObservationMessages(messages, {
       declarations: this.observationRetentionByToolId,
       resultId: (toolCallId) => this.observationResultId(toolCallId),
       ...(this.observationRecallToolId ? { recallToolId: this.observationRecallToolId } : {}),
     });
+    // Derived context pages stay in the ledger. Dropping earlier pages here is projection
+    // only: it must not open a checkpoint. Keep doing it after ready, or the stored read
+    // bodies make the next request look oversized and a timeout archive wipes coverage.
+    return omitEarlierContextReads(projected, this.contextRecovery?.retainedReadContext());
   }
 
   private promptOverheadTokens(): number {
@@ -3189,13 +3291,17 @@ export class AgentSession {
   }
 
   private currentCheckpointReminder(transcriptToolId: string | undefined): string | undefined {
+    const recovery = this.contextRecovery?.reminder();
+    if (this.contextRecovery?.required) return recovery;
     return this.compactionCheckpoint
       ? buildCompactionCheckpointReminder(
           this.compactionCheckpoint,
           this.sessionManagerInstanceId,
           transcriptToolId,
+          this.contextStore ? "roll__context" : undefined,
+          recovery,
         )
-      : undefined;
+      : recovery;
   }
 
   private persistPausedTurnCancellation(
@@ -3373,6 +3479,7 @@ export class AgentSession {
     const legacySnapshotMigration = !legacySnapshotRequired
       ? {
           state: seededSemanticState,
+          historicalItems: [],
           requiredItemIds: [],
           transcriptFragments: [],
           complete: true,
@@ -3380,6 +3487,7 @@ export class AgentSession {
       : !legacySnapshotMatches || this.legacyV1ActiveSnapshot === undefined
         ? {
             state: seededSemanticState,
+            historicalItems: [],
             requiredItemIds: [],
             transcriptFragments: [],
             complete: false,
@@ -3395,12 +3503,30 @@ export class AgentSession {
     const previousMessageWatermark = previousSemanticEvidenceWatermarks.messagesThroughSequence;
     const previousToolWatermark = previousSemanticEvidenceWatermarks.toolExecutionsThroughSequence;
     const newTranscript = transcript.filter((entry) => entry.sequence > previousMessageWatermark);
+    // Context reads and ready acknowledgements are derived Harness output, not
+    // new facts. Summarizing full read batches again would create an evidence loop.
+    const recoveryExecutions = toolExecutions.filter(
+      (record) => record.agentName === "roll" && record.toolName === "context",
+    );
+    const recoveryCallIds = new Set(recoveryExecutions.map((record) => record.toolCallId));
+    const isRecoveryCopy = (message: ModelMessage): boolean =>
+      (message.role === "tool" || message.role === "assistant") &&
+      Array.isArray(message.content) &&
+      message.content.length > 0 &&
+      message.content.every(
+        (part) =>
+          (part.type === "tool-call" || part.type === "tool-result") &&
+          part.toolName === CONTEXT_TOOL_ID &&
+          recoveryCallIds.has(part.toolCallId),
+      );
+    const autoCoveredToolSequences = new Set(recoveryExecutions.map((record) => record.sequence));
     const autoCoveredMessageSequences = new Set(
       newTranscript
         .filter(
           (entry) =>
-            entry.provenance === TRANSCRIPT_MESSAGE_PROVENANCES[1] &&
-            isDerivedCompactionReminderMessage(entry.message),
+            (entry.provenance === TRANSCRIPT_MESSAGE_PROVENANCES[1] &&
+              isDerivedCompactionReminderMessage(entry.message)) ||
+            isRecoveryCopy(entry.message),
         )
         .map((entry) => entry.sequence),
     );
@@ -3419,7 +3545,11 @@ export class AgentSession {
         summary: renderCompactionMessageEvidence(entry, this.compaction?.strategy === "summarize"),
       })),
       toolExecutions: toolExecutions
-        .filter((record) => record.sequence > previousToolWatermark)
+        .filter(
+          (record) =>
+            record.sequence > previousToolWatermark &&
+            !autoCoveredToolSequences.has(record.sequence),
+        )
         .map((record) => compactionToolEvidence(record, this.compaction?.strategy === "summarize")),
       resources: resources
         .slice()
@@ -3456,7 +3586,9 @@ export class AgentSession {
       expectedLatestCheckpointId: this.compactionCheckpoint?.id,
       previousSemanticEvidenceWatermarks,
       autoCoveredMessageSequences,
+      autoCoveredToolSequences,
       legacySnapshotMigrationComplete: legacySnapshotMigration.complete,
+      historicalSemanticArchiveItems: legacySnapshotMigration.historicalItems,
       legacySnapshotRequiredItemIds: legacySnapshotMigration.requiredItemIds,
       legacySnapshotTranscriptFragments: legacySnapshotMigration.transcriptFragments,
       legacySnapshotRemovableRawMessageCount:
@@ -3476,6 +3608,66 @@ export class AgentSession {
     };
   }
 
+  private durableReadSegments(evidence: CompactionEvidenceSnapshot) {
+    const checkpointId = this.compactionCheckpoint?.id;
+    const store = this.contextStore;
+    if (!store || checkpointId === undefined) return [];
+    const rows = store.rows();
+    const segments = store.segments(checkpointId);
+    return segments
+      .filter((segment) => segment.offset === 0)
+      .flatMap((first) => {
+        const provenance =
+          first.kind === "semantic"
+            ? rows
+                .filter((row) => row.item_id === first.itemId && row.generation === first.version)
+                .flatMap((row) => {
+                  const item = semanticTextItemSchema.safeParse(JSON.parse(row.item_json));
+                  return item.success ? item.data.provenance : [];
+                })
+            : evidence.registry
+                .filter(
+                  (entry) =>
+                    first.version === 0 &&
+                    (first.kind === "message"
+                      ? entry.provenance.messageSequence === Number(first.itemId)
+                      : entry.provenance.toolExecutionId ===
+                        evidence.toolExecutions.find(
+                          (record) => record.sequence === Number(first.itemId),
+                        )?.id),
+                )
+                .map((entry) => entry.provenance);
+        if (provenance.length === 0) return [];
+        let content = "";
+        for (let offset = 0; ; offset += CONTEXT_READ_CHUNK_CHARS) {
+          if (
+            !segments.some(
+              (segment) =>
+                segment.kind === first.kind &&
+                segment.itemId === first.itemId &&
+                segment.version === first.version &&
+                segment.offset === offset,
+            )
+          ) {
+            break;
+          }
+          const page = store.read({
+            checkpointId,
+            kind: first.kind,
+            itemId: first.itemId,
+            ...(first.kind === "semantic" ? { version: first.version } : {}),
+            offset,
+            limit: 1,
+          });
+          const entry = page.entries[0];
+          if (!entry || entry.version !== first.version) break;
+          content += entry.content;
+          if (page.nextOffset === undefined) break;
+        }
+        return provenance.map((ref) => ({ provenance: ref, content }));
+      });
+  }
+
   private buildCompactionDraft(
     evidence: CompactionEvidenceSnapshot,
     semanticDraft: CompactionModelDraft | undefined,
@@ -3484,6 +3676,51 @@ export class AgentSession {
   ): CompactionDraftSnapshot {
     const validated = validateCompactionModelDraft({
       draft: semanticDraft ?? EMPTY_COMPACTION_MODEL_DRAFT,
+      ...(this.contextStore
+        ? {
+            toolSequences: new Map(
+              evidence.toolExecutions.map((record) => [record.id, record.sequence]),
+            ),
+            resolutionTargets: this.contextStore
+              .rows()
+              .flatMap((row): SemanticResolutionTarget[] => {
+                if (
+                  row.category !== "constraint" &&
+                  row.category !== "decision" &&
+                  row.category !== "pending_work" &&
+                  row.category !== "uncertainty" &&
+                  row.category !== "completed_work"
+                ) {
+                  return [];
+                }
+                return [
+                  {
+                    category: row.category,
+                    item: semanticTextItemSchema.parse(JSON.parse(row.item_json)),
+                    firstToolSequence: row.first_tool_sequence,
+                    status: row.status,
+                  },
+                ];
+              }),
+            ...(semanticDraft?.resolutions.length
+              ? { durableReadSegments: this.durableReadSegments(evidence) }
+              : {}),
+            harnessKeys: new Set(
+              this.contextStore
+                .rows()
+                .filter((row) => row.status === "active")
+                .flatMap((row) => {
+                  const entry: unknown = JSON.parse(row.item_json);
+                  return typeof entry === "object" &&
+                    entry !== null &&
+                    "harnessKey" in entry &&
+                    typeof entry.harnessKey === "string"
+                    ? [entry.harnessKey]
+                    : [];
+                }),
+            ),
+          }
+        : {}),
       evidenceRegistry: evidence.registry,
       presentedEvidenceIds: evidence.presentedEvidenceIds,
       ...(evidence.previousSemanticState !== undefined
@@ -3552,45 +3789,80 @@ export class AgentSession {
         : summaryFailureReason !== undefined
           ? { status: "fallback", reason: summaryFailureReason }
           : { status: "skipped" };
-    const reminderItems = createCheckpointSemanticReminderProjection(semanticState).items;
-    const reminderItemIds = new Set(reminderItems.map((item) => item.itemId));
-    const semanticRetentionComplete = retainsCompactionFacts(
-      evidence.previousSemanticState,
-      validated.state,
-      semanticState,
-    );
-    const legacySnapshotReminderCoverageComplete =
-      evidence.legacySnapshotRequiredItemIds.length === 0 ||
-      evidence.legacySnapshotRequiredItemIds.every((itemId) => reminderItemIds.has(itemId));
     const toolState = buildCompactionToolState(
       evidence.transcript.map((entry) => entry.message),
       evidence.toolExecutions,
       32,
       evidence.completeness,
     );
-    return {
-      draft: {
-        ...(checkpointGoal ? { goal: checkpointGoal } : {}),
-        constraints: [...constraints],
-        resources: [...evidence.resources],
-        toolState,
-        runningWork: [...evidence.runningWork],
-        context: {
-          cwd: this.capabilityManifest.dynamicContext.cwd,
-          stableRuleIds: [...this.capabilityManifest.stableContext.rules],
-          systemPromptSha256: createHash("sha256").update(this.systemPrompt).digest("hex"),
-          skills: this.capabilityManifest.skills.map((skill) => ({
-            name: skill.name,
-            source: skill.source,
-          })),
-          explicitSkillNames: [
-            ...this.latestExplicitSkillNames(evidence.transcript, effectiveNewGoalSourceSequence),
-          ],
-        },
-        summary,
+    const draft: CompactionCheckpointDraftInput = {
+      ...(checkpointGoal ? { goal: checkpointGoal } : {}),
+      constraints: [...constraints],
+      resources: [...evidence.resources],
+      toolState,
+      runningWork: [...evidence.runningWork],
+      context: {
+        cwd: this.capabilityManifest.dynamicContext.cwd,
+        stableRuleIds: [...this.capabilityManifest.stableContext.rules],
+        systemPromptSha256: createHash("sha256").update(this.systemPrompt).digest("hex"),
+        skills: this.capabilityManifest.skills.map((skill) => ({
+          name: skill.name,
+          source: skill.source,
+        })),
+        explicitSkillNames: [
+          ...this.latestExplicitSkillNames(evidence.transcript, effectiveNewGoalSourceSequence),
+        ],
       },
+      summary,
+    };
+    // Use the same complete prompt envelope as the next actual dispatch. A
+    // standalone 8k semantic projection can hide omissions caused by metadata.
+    const preview = createCompactionCheckpoint({
+      generation: (this.compactionCheckpoint?.generation ?? 0) + 1,
+      ...(this.compactionCheckpoint ? { previousCheckpointId: this.compactionCheckpoint.id } : {}),
+      draft,
+      semanticState,
+      semanticEvidence: this.advanceCompactionSemanticEvidenceWatermarks(
+        evidence,
+        validated.coveredEvidenceIds,
+      ),
+      transcript: {
+        messages: {
+          fromSequenceExclusive:
+            this.compactionCheckpoint?.transcript.messages.throughSequence ?? -1,
+          throughSequence: evidence.evidenceWatermarks.transcriptMessagesThroughSequence,
+        },
+        toolExecutions: {
+          fromSequenceExclusive:
+            this.compactionCheckpoint?.transcript.toolExecutions.throughSequence ?? -1,
+          throughSequence: evidence.evidenceWatermarks.toolExecutionsThroughSequence,
+        },
+        completeness: evidence.completeness,
+      },
+    });
+    const projection = projectCompactionCheckpointReminder(
+      preview,
+      this.sessionManagerInstanceId,
+      findCapabilityToolId(this.capabilityManifest, CAPABILITY_TOOL_ROLES.transcriptRead),
+      this.contextStore ? "roll__context" : undefined,
+    ).semanticProjection!;
+    const reminderItemIds = new Set(projection.items.map((item) => item.itemId));
+    const semanticRetentionComplete =
+      retainsCompactionFacts(evidence.previousSemanticState, validated.state, semanticState) &&
+      projection.omittedCounts.goal === 0 &&
+      projection.omittedCounts.constraint === 0;
+    const legacySnapshotReminderCoverageComplete = evidence.legacySnapshotRequiredItemIds.every(
+      (itemId) => reminderItemIds.has(itemId),
+    );
+    return {
+      draft,
       semanticState,
       semanticSummaryText,
+      semanticArchiveItems: [
+        ...listSemanticArchiveItems(semanticState),
+        ...(validated.archiveItems ?? listSemanticArchiveItems(validated.state)),
+      ],
+      semanticResolutions: validated.resolutions,
       semanticRejectionCount: validated.rejections.length,
       legacySnapshotReminderCoverageComplete,
       coveredEvidenceIds: validated.coveredEvidenceIds,
@@ -3609,9 +3881,42 @@ export class AgentSession {
   ): Promise<void> {
     try {
       this.reconcileUncoveredToolExecutionContext();
-      await this.runCompaction(queue, reason, activeTurn, true, this.compactionTargetTokens());
+      if (this.contextRecovery?.required) {
+        if (this.archiveContextForRecovery(queue, activeTurn, reason)) return;
+        queue.push({
+          type: "context-compacted",
+          reason,
+          strategy: "summarize",
+          removed: 0,
+          kept: this.messages.length,
+          recoveryNotice: "历史已归档；继续对话后将先回查目标与约束，再恢复执行。",
+        });
+        return;
+      }
+      const result = await this.runCompaction(
+        queue,
+        reason,
+        activeTurn,
+        true,
+        this.compactionTargetTokens(),
+      );
+      if (!result.historyChanged && reason !== "manual") {
+        this.archiveContextForRecovery(queue, activeTurn, reason);
+      }
     } catch (error) {
-      queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+      const budget = this.requestBudgets.view().last;
+      const overCeiling =
+        budget?.availableInputCeiling !== undefined &&
+        budget.calibratedInputEstimate > budget.availableInputCeiling;
+      const summaryTimedOut = error instanceof Error && error.name === "TimeoutError";
+      if (
+        !(
+          (overCeiling || summaryTimedOut) &&
+          this.archiveContextForRecovery(queue, activeTurn, reason)
+        )
+      ) {
+        queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+      }
     } finally {
       if (this.activeTurn === activeTurn) {
         this.activeTurn = undefined;
@@ -3625,9 +3930,6 @@ export class AgentSession {
     coveredEvidenceIds: readonly string[],
   ): CompactionSemanticEvidenceWatermarks {
     const previous = evidence.previousSemanticEvidenceWatermarks;
-    if (coveredEvidenceIds.length === 0) {
-      return previous;
-    }
     const eligibleEvidenceIds = new Set(
       coveredEvidenceIds.filter((evidenceId) => evidence.presentedEvidenceIds.includes(evidenceId)),
     );
@@ -3662,6 +3964,10 @@ export class AgentSession {
     );
     let toolExecutionsThroughSequence = previous.toolExecutionsThroughSequence;
     for (let sequence = previous.toolExecutionsThroughSequence + 1; ; sequence += 1) {
+      if (evidence.autoCoveredToolSequences.has(sequence)) {
+        toolExecutionsThroughSequence = sequence;
+        continue;
+      }
       const record = toolExecutionsBySequence.get(sequence);
       if (record === undefined) {
         break;
@@ -3909,7 +4215,13 @@ export class AgentSession {
           maxRemovedTranscriptMessages,
           ...(targetTokens !== undefined ? { targetTokens } : {}),
           ...(this.maintenanceEpisode !== undefined
-            ? { timeoutMs: Math.max(1, this.maintenanceEpisode.remainingMs()) }
+            ? {
+                timeoutMs: Math.max(
+                  1,
+                  this.maintenanceEpisode.remainingMs() -
+                    Math.min(10_000, (settings.timeoutMs ?? 120_000) / 10),
+                ),
+              }
             : settings.timeoutMs !== undefined
               ? { timeoutMs: settings.timeoutMs }
               : {}),
@@ -3924,6 +4236,28 @@ export class AgentSession {
             : {}),
           ...(abortSignal ? { abortSignal } : {}),
         });
+      } catch (error) {
+        const budget = this.requestBudgets.view().last;
+        if (
+          !this.isTurnAborted(activeTurn) &&
+          budget?.availableInputCeiling !== undefined &&
+          budget.calibratedInputEstimate > budget.availableInputCeiling &&
+          this.archiveContextForRecovery(queue, activeTurn)
+        ) {
+          return {
+            stage: "installed",
+            historyChanged: true,
+            coverageBefore,
+            coverageAfter: coverageBefore,
+            ...(this.compactionCheckpoint
+              ? {
+                  checkpointId: this.compactionCheckpoint.id,
+                  checkpointGeneration: this.compactionCheckpoint.generation,
+                }
+              : {}),
+          };
+        }
+        throw error;
       } finally {
         this.debug(queue, "compaction", "draft generation finished", draftStartedAt, {
           strategy,
@@ -3959,7 +4293,12 @@ export class AgentSession {
       return noCommit();
     }
 
-    if (strategy === "summarize" && snapshot !== undefined && !snapshot.semanticRetentionComplete) {
+    if (
+      strategy === "summarize" &&
+      snapshot !== undefined &&
+      !snapshot.semanticRetentionComplete &&
+      !this.contextStore
+    ) {
       this.debug(
         queue,
         "compaction",
@@ -3967,6 +4306,25 @@ export class AgentSession {
         startedAt,
       );
       return retainSources();
+    }
+    if (
+      reason === "manual" &&
+      strategy === "summarize" &&
+      snapshot !== undefined &&
+      !snapshot.semanticRetentionComplete
+    ) {
+      this.debug(queue, "compaction", "manual coverage unproven; history unchanged", startedAt, {
+        wouldRemove: result.removed,
+      });
+      queue.push({
+        type: "context-compacted",
+        reason,
+        strategy,
+        removed: 0,
+        kept: this.messages.length,
+        recoveryNotice: "语义覆盖不足，未提交历史或覆盖变更。",
+      });
+      return noCommit();
     }
     const fullyReviewedRemoval =
       strategy !== "summarize" ||
@@ -3979,7 +4337,11 @@ export class AgentSession {
         count: snapshot.semanticRejectionCount,
       });
     }
-    if (snapshot !== undefined && !snapshot.legacySnapshotReminderCoverageComplete) {
+    if (
+      snapshot !== undefined &&
+      !snapshot.legacySnapshotReminderCoverageComplete &&
+      !this.contextStore
+    ) {
       this.debug(queue, "compaction", "legacy V1 snapshot exceeds reminder projection", startedAt);
       queue.push({
         type: "context-compacted",
@@ -4047,6 +4409,20 @@ export class AgentSession {
           expectedLatestCheckpointId: snapshot.expectedLatestCheckpointId,
           draft: snapshot.draft,
           semanticState: snapshot.semanticState,
+          semanticArchiveItems: snapshot.semanticArchiveItems,
+          historicalSemanticArchiveItems: evidence.historicalSemanticArchiveItems,
+          semanticResolutions: snapshot.semanticResolutions,
+          ...(this.contextStore && !snapshot.semanticRetentionComplete
+            ? {
+                contextRecovery: {
+                  unextracted:
+                    semanticEvidenceWatermarks.messagesThroughSequence <
+                      snapshot.evidenceWatermarks.transcriptMessagesThroughSequence ||
+                    semanticEvidenceWatermarks.toolExecutionsThroughSequence <
+                      snapshot.evidenceWatermarks.toolExecutionsThroughSequence,
+                },
+              }
+            : {}),
           semanticEvidenceWatermarks,
           evidenceWatermarks: snapshot.evidenceWatermarks,
           ...(snapshot.legacySnapshotTranscriptFragments.length > 0
@@ -4089,6 +4465,7 @@ export class AgentSession {
       this.messages.splice(0, this.messages.length, ...activeMessages);
       if (checkpoint !== undefined) {
         this.compactionCheckpoint = checkpoint;
+        this.contextRecovery?.refresh();
       }
       this.lastInputTokens = undefined;
       this.measuredProjectedTokens = undefined;
@@ -4100,6 +4477,14 @@ export class AgentSession {
       strategy,
       removed: historyChanged ? result.removed : 0,
       kept: activeMessages.length,
+      ...(this.contextRecovery?.required
+        ? {
+            recoveryNotice:
+              "部分事实未进入提示，已保存至语义账本；正在通过 roll__context 回查后继续。",
+          }
+        : reason === "manual" && !historyChanged
+          ? { recoveryNotice: "当前内容无需压缩。" }
+          : {}),
       ...(historyChanged && result.truncatedTools > 0
         ? { truncatedTools: result.truncatedTools }
         : {}),
@@ -4132,6 +4517,77 @@ export class AgentSession {
             checkpointGeneration: checkpoint.generation,
           }),
     };
+  }
+
+  private archiveContextForRecovery(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn?: ActiveTurn,
+    reason: ContextCompactionReason = "auto",
+  ): boolean {
+    if (
+      !this.contextStore ||
+      !this.commitPersistedCompaction ||
+      this.isTurnAborted(activeTurn) ||
+      this.messages.length === 0
+    ) {
+      return false;
+    }
+    const evidence = this.captureCompactionEvidence();
+    if (
+      !evidence.legacySnapshotMigrationComplete &&
+      evidence.legacySnapshotTranscriptFragments.length === 0
+    ) {
+      throw new Error(
+        "context_recovery_archive_incomplete：旧快照与当前历史不匹配，无法证明原文完整归档；已保留原状态。",
+      );
+    }
+    const snapshot = this.buildCompactionDraft(
+      evidence,
+      undefined,
+      false,
+      "Archived for context recovery; semantic extraction incomplete",
+    );
+    const latestUser = this.messages.findLast((message) => message.role === "user");
+    const messages: ModelMessage[] =
+      latestUser && JSON.stringify(latestUser).length <= 4000 ? [latestUser] : [];
+    if (JSON.stringify(messages).length >= JSON.stringify(this.messages).length) return false;
+    const removed = this.messages.length - messages.length;
+    const checkpoint = this.commitPersistedCompaction({
+      messages,
+      expectedActiveMessages: evidence.expectedActiveMessages,
+      expectedLatestCheckpointId: evidence.expectedLatestCheckpointId,
+      draft: snapshot.draft,
+      semanticState: snapshot.semanticState,
+      semanticArchiveItems: [
+        ...listSemanticArchiveItems(evidence.previousSemanticState ?? snapshot.semanticState),
+        ...snapshot.semanticArchiveItems,
+      ],
+      historicalSemanticArchiveItems: evidence.historicalSemanticArchiveItems,
+      semanticEvidenceWatermarks: evidence.previousSemanticEvidenceWatermarks,
+      evidenceWatermarks: evidence.evidenceWatermarks,
+      contextRecovery: { unextracted: true },
+      ...(snapshot.legacySnapshotTranscriptFragments.length
+        ? { legacySnapshotTranscriptFragments: snapshot.legacySnapshotTranscriptFragments }
+        : {}),
+    });
+    this.messages.splice(0, this.messages.length, ...messages);
+    this.compactionCheckpoint = checkpoint;
+    this.contextRecovery?.refresh();
+    this.lastInputTokens = undefined;
+    this.measuredProjectedTokens = undefined;
+    queue.push({
+      type: "context-compacted",
+      reason,
+      strategy: this.compaction?.strategy ?? "summarize",
+      removed,
+      kept: messages.length,
+      checkpointId: checkpoint.id,
+      checkpointGeneration: checkpoint.generation,
+      checkpointSummaryStatus: checkpoint.summary.status,
+      recoveryNotice:
+        "历史已完整归档，部分事实尚未提取；正在通过 roll__context 回查目标与约束，完成后继续执行。",
+    });
+    return true;
   }
 
   private async recoverFromContextError(

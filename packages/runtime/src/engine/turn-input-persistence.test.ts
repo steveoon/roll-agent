@@ -52,7 +52,10 @@ for (const failure of [
   "rollback",
   "metadata",
 ] as const) {
-  test(`accepted input survives ${failure} exactly once; subsequent send works`, async () => {
+  test(`accepted input survives ${failure} exactly once; subsequent send works`, async (t) => {
+    if (failure === "timeout") {
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: new Date() });
+    }
     const dir = mkdtempSync(join(tmpdir(), "roll-accept-session-"));
     const store = new ThreadStore(dir);
     const thread = store.createThread();
@@ -102,7 +105,7 @@ for (const failure of [
             },
           }
         : {}),
-      ...(failure === "timeout" ? { turnTimeoutMs: 10 } : {}),
+      ...(failure === "timeout" ? { turnTimeoutMs: 1000 } : {}),
     });
     // Fault injection at the pre-inference maintenance boundary, not fake provider success.
     if (failure === "precompact") {
@@ -126,7 +129,7 @@ for (const failure of [
       Object.defineProperty(session, "runCompaction", {
         configurable: true,
         value: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 30));
+          t.mock.timers.tick(1001);
           return undefined;
         },
       });

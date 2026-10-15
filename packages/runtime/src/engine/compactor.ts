@@ -96,7 +96,7 @@ const COMPACTION_DRAFT_SYSTEM = [
   "startsNewGoalScope 仅在用户明确替换当前目标或开始独立新任务时为 true，并让 goal 引用该用户消息；普通追问、补充要求、‘另外支持…’或继续当前任务必须为 false。",
   "constraints 只记录用户明确表达且当前仍有效的限制；新增 constraint 必须引用用户消息。用户明确放宽或撤销 previous constraint 时，使用 constraint+revoke resolution 并引用该用户消息，不要靠关键词猜测或保留已撤销约束。",
   "completedWork 只引用 outcome=success 的 Tool evidence，并用安全 input/result quote 说明实际观察到的动作。失败、拒绝、取消、未知结果以及仅有自然语言声明的事项放入 pendingWork 或 uncertainties。",
-  "resolution 只能是 constraint+revoke、decision+supersede、pending_work+cancel、uncertainty+clarify，并且必须引用明确表达该变化的用户消息；不能用 resolution 删除 goal、completedWork、resource 或 running session，也不能把 pending_work 直接标为完成。",
+  "resolution 的 constraint+revoke、decision+supersede、pending_work+cancel、uncertainty+clarify 必须引用明确表达该变化的用户消息。不能用 resolution 删除 goal、resource 或 running session。pending_work+complete 必须引用比待办更新的成功 Tool evidence，并且该证据实际证明这一个待办已完成；completed_work+reopen 引用明确用户纠正或更新工具证据。关闭只迁移状态，不删除证据，一条 resolution 只处理一个条目。",
   "逐条完整审阅 evidence：长来源的所有重要事实、限制、参数和未解决事项都提取完后，额外用 evidenceReviews 的 reviewed 确认该来源完整审阅。引用一处不代表整条覆盖。真正无关的 assistant 填充可标 irrelevant；无法确定或尚未完整处理的来源标 uncertain，Harness 保留原文。工具成功只证明工具自身成功，不证明任务完成。",
   "输出紧凑 JSON，不缩进。事实必须完整保留在 sourceQuotes；text 只写简短分类标签，reason 只写简短审阅原因，不重复复述引文。不得为了缩短输出省略任何重要事实或完整审阅。",
   "不要输出自然语言摘要、Markdown、解释或 schema 外字段。Harness 将校验来源、覆盖率和类别动作，再从通过校验的结构确定性派生展示摘要。",

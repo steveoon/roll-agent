@@ -15,9 +15,13 @@ export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V14 = [
   "1.4",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13,
 ] as const;
-export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V15 = [
   "1.5",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V14,
+] as const;
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+  "1.6",
+  ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V15,
 ] as const;
 export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS)[number];
 export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
@@ -110,6 +114,13 @@ export interface RuntimeProtocolCapabilities {
 }
 
 export const RUNTIME_PROTOCOL_CAPABILITIES = {
+  "1.6": {
+    serverRequests: true,
+    serverRequestCapabilityNegotiation: true,
+    approvalResolvedEvents: true,
+    clientApprovalResponses: false,
+    requiredServerRequestMethods: [],
+  },
   "1.5": {
     serverRequests: true,
     serverRequestCapabilityNegotiation: true,
@@ -155,6 +166,7 @@ export const RUNTIME_PROTOCOL_CAPABILITIES = {
 } as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolCapabilities>>;
 
 export const REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION = {
+  "1.6": RUNTIME_PROTOCOL_CAPABILITIES["1.6"].requiredServerRequestMethods,
   "1.5": RUNTIME_PROTOCOL_CAPABILITIES["1.5"].requiredServerRequestMethods,
   "1.4": RUNTIME_PROTOCOL_CAPABILITIES["1.4"].requiredServerRequestMethods,
   "1.3": RUNTIME_PROTOCOL_CAPABILITIES["1.3"].requiredServerRequestMethods,
@@ -235,7 +247,8 @@ export const RUNTIME_FEATURES_V13 = [
 export const RUNTIME_FEATURES_V14 = [...RUNTIME_FEATURES_V13, "attachments"] as const;
 
 export const RUNTIME_FEATURES_V15 = [...RUNTIME_FEATURES_V14, "app-output"] as const;
-export const RUNTIME_FEATURES = RUNTIME_FEATURES_V15;
+export const RUNTIME_FEATURES_V16 = [...RUNTIME_FEATURES_V15, "context-recovery"] as const;
+export const RUNTIME_FEATURES = RUNTIME_FEATURES_V16;
 
 export const RUNTIME_ERROR_CODES_V11 = {
   protocolVersionUnsupported: "PROTOCOL_VERSION_UNSUPPORTED",
@@ -560,8 +573,16 @@ export const initializeResultV15Schema = z
   .strict()
   .readonly();
 
+export const initializeResultV16Schema = initializeResultV15Schema.def.innerType
+  .extend({
+    protocolVersion: z.literal("1.6"),
+    features: z.array(z.enum(RUNTIME_FEATURES_V16)),
+  })
+  .readonly();
+
 /** Any currently supported Runtime Protocol initialize result. */
 export const initializeResultSchema = z.union([
+  initializeResultV16Schema,
   initializeResultV15Schema,
   initializeResultV14Schema,
   initializeResultV13Schema,
@@ -1151,7 +1172,32 @@ export const threadSnapshotV15Schema = z.union([
   threadSnapshotV15FullSchema,
   threadRecoverySnapshotV13Schema,
 ]);
-export const threadSnapshotSchema = threadSnapshotV15Schema;
+/** Bounded Harness state only; no model-authored recovery notes or fact contents cross the wire. */
+export const contextRecoveryViewSchema = z
+  .object({
+    checkpointId: z.string().uuid(),
+    required: z.boolean(),
+    unextracted: z.boolean(),
+    requiredItemCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .readonly();
+export type ContextRecoveryView = z.infer<typeof contextRecoveryViewSchema>;
+export const threadSnapshotV16FullSchema = threadSnapshotV15FullSchema.def.innerType
+  .extend({
+    contextRecovery: contextRecoveryViewSchema.nullable(),
+  })
+  .readonly();
+export const threadRecoverySnapshotV16Schema = threadRecoverySnapshotV13Schema.def.innerType
+  .extend({
+    contextRecovery: contextRecoveryViewSchema.nullable(),
+  })
+  .readonly();
+export const threadSnapshotV16Schema = z.union([
+  threadSnapshotV16FullSchema,
+  threadRecoverySnapshotV16Schema,
+]);
+export const threadSnapshotSchema = threadSnapshotV16Schema;
 
 const pageSizeSchema = z.number().int().min(1).max(500).default(100);
 const requestFields = { requestId: requestIdSchema } as const;
@@ -1760,8 +1806,23 @@ export const runtimeEventV15Schema = z.union([
   runtimeDurableEventV15Schema,
   runtimeEphemeralEventV13Schema,
 ]);
+export const contextRecoveryChangedEventSchema = z
+  .object({
+    type: z.literal("context.recovery.changed"),
+    contextRecovery: contextRecoveryViewSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+export const runtimeDurableEventV16Schema = z.discriminatedUnion("type", [
+  ...runtimeDurableEventV15Schema.options,
+  contextRecoveryChangedEventSchema,
+]);
+export const runtimeEventV16Schema = z.union([
+  runtimeDurableEventV16Schema,
+  runtimeEphemeralEventV13Schema,
+]);
 /** Latest Runtime Protocol event payloads. */
-export const runtimeEventSchema = runtimeEventV15Schema;
+export const runtimeEventSchema = runtimeEventV16Schema;
 
 const runtimeEventEnvelopeFields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
@@ -1900,7 +1961,26 @@ export const runtimeEventEnvelopeV15Schema = z.discriminatedUnion("durability", 
 ]);
 
 /** Any currently supported Runtime Event envelope. */
+export const runtimeDurableEventEnvelopeV16Schema =
+  runtimeDurableEventEnvelopeV15Schema.def.innerType
+    .extend({
+      protocolVersion: z.literal("1.6"),
+      event: runtimeDurableEventV16Schema,
+    })
+    .readonly();
+export const runtimeEphemeralEventEnvelopeV16Schema =
+  runtimeEphemeralEventEnvelopeV15Schema.def.innerType
+    .extend({
+      protocolVersion: z.literal("1.6"),
+    })
+    .readonly();
+export const runtimeEventEnvelopeV16Schema = z.discriminatedUnion("durability", [
+  runtimeDurableEventEnvelopeV16Schema,
+  runtimeEphemeralEventEnvelopeV16Schema,
+]);
+
 export const runtimeEventEnvelopeSchema = z.union([
+  runtimeEventEnvelopeV16Schema,
   runtimeEventEnvelopeV15Schema,
   runtimeEventEnvelopeV14Schema,
   runtimeEventEnvelopeV13Schema,
@@ -2101,7 +2181,19 @@ export const runtimeMethodSchemasV15 = {
     result: operationResultGetResultSchema,
   },
 } as const;
-export const runtimeMethodSchemas = runtimeMethodSchemasV15;
+export const runtimeMethodSchemasV16 = {
+  ...runtimeMethodSchemasV15,
+  [RUNTIME_METHODS.initialize]: {
+    params: initializeParamsSchema,
+    result: initializeResultV16Schema,
+  },
+  [RUNTIME_METHODS.threadOpen]: { params: threadOpenParamsSchema, result: threadSnapshotV16Schema },
+  [RUNTIME_METHODS.threadSnapshot]: {
+    params: threadSnapshotParamsV13Schema,
+    result: threadSnapshotV16Schema,
+  },
+} as const;
+export const runtimeMethodSchemas = runtimeMethodSchemasV16;
 
 export const runtimeServerRequestSchemasV10 = {} as const;
 
@@ -2143,6 +2235,14 @@ export interface RuntimeProtocolRegistry {
 }
 
 export const RUNTIME_PROTOCOL_REGISTRY = {
+  "1.6": {
+    methods: runtimeMethodSchemasV16,
+    serverRequests: runtimeServerRequestSchemasV13,
+    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+    serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV12Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV16Schema,
+    errorDataSchema: runtimeProtocolErrorDataV14Schema,
+  },
   "1.5": {
     methods: runtimeMethodSchemasV15,
     serverRequests: runtimeServerRequestSchemasV13,
@@ -2384,15 +2484,17 @@ export type RuntimeEphemeralEventEnvelopeV14 = z.infer<
 >;
 export type RuntimeEventEnvelopeV14 = z.infer<typeof runtimeEventEnvelopeV14Schema>;
 export type RuntimeEventEnvelopeForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.5"
-    ? RuntimeEventEnvelopeV15
-    : TVersion extends "1.4"
-      ? RuntimeEventEnvelopeV14
-      : TVersion extends "1.3"
-        ? RuntimeEventEnvelopeV13
-        : TVersion extends "1.2"
-          ? RuntimeEventEnvelopeV12
-          : RuntimeEventEnvelopeV11;
+  TVersion extends "1.6"
+    ? RuntimeEventEnvelopeV16
+    : TVersion extends "1.5"
+      ? RuntimeEventEnvelopeV15
+      : TVersion extends "1.4"
+        ? RuntimeEventEnvelopeV14
+        : TVersion extends "1.3"
+          ? RuntimeEventEnvelopeV13
+          : TVersion extends "1.2"
+            ? RuntimeEventEnvelopeV12
+            : RuntimeEventEnvelopeV11;
 export type RuntimeProtocolErrorData = z.infer<typeof runtimeProtocolErrorDataSchema>;
 export type RuntimeProtocolErrorDataV12 = z.infer<typeof runtimeProtocolErrorDataV12Schema>;
 export type RuntimeProtocolErrorDataV13 = z.infer<typeof runtimeProtocolErrorDataV13Schema>;
@@ -2411,15 +2513,17 @@ export type ThreadSnapshotV13 = z.infer<typeof threadSnapshotV13Schema>;
 export type ThreadSnapshotV14Full = z.infer<typeof threadSnapshotV14FullSchema>;
 export type ThreadSnapshotV14 = z.infer<typeof threadSnapshotV14Schema>;
 export type ThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.5"
-    ? ThreadSnapshotV15
-    : TVersion extends "1.4"
-      ? ThreadSnapshotV14
-      : TVersion extends "1.3"
-        ? ThreadSnapshotV13
-        : TVersion extends "1.2"
-          ? ThreadSnapshotV12
-          : ThreadSnapshotV11;
+  TVersion extends "1.6"
+    ? ThreadSnapshotV16
+    : TVersion extends "1.5"
+      ? ThreadSnapshotV15
+      : TVersion extends "1.4"
+        ? ThreadSnapshotV14
+        : TVersion extends "1.3"
+          ? ThreadSnapshotV13
+          : TVersion extends "1.2"
+            ? ThreadSnapshotV12
+            : ThreadSnapshotV11;
 export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type UiMessageV14 = z.infer<typeof uiMessageV14Schema>;
 export type UiMessagePartV14 = z.infer<typeof uiMessagePartV14Schema>;
@@ -2859,7 +2963,7 @@ export function projectOperationViewForVersion(
   value: unknown,
 ): OperationView | OperationViewV15 {
   const current = operationViewV15Schema.safeParse(value);
-  if (version === "1.5") {
+  if (version === "1.5" || version === "1.6") {
     return current.success
       ? current.data
       : operationViewV15Schema.parse({
@@ -2876,6 +2980,14 @@ export function projectThreadSnapshotForVersion<TVersion extends RuntimeProtocol
   version: TVersion,
   value: unknown,
 ): ThreadSnapshotForVersion<TVersion> {
+  if (version === "1.6") {
+    return threadSnapshotV16Schema.parse(value) as ThreadSnapshotForVersion<TVersion>;
+  }
+  const latestV16 = threadSnapshotV16Schema.safeParse(value);
+  if (latestV16.success) {
+    const { contextRecovery: _contextRecovery, ...legacy } = latestV16.data;
+    value = legacy;
+  }
   const latestV15 = threadSnapshotV15Schema.safeParse(value);
   if (version === "1.5") {
     return threadSnapshotV15Schema.parse(value) as ThreadSnapshotForVersion<TVersion>;
@@ -2949,7 +3061,18 @@ export function projectRuntimeEventEnvelopeForVersion<TVersion extends RuntimePr
   version: TVersion,
   value: unknown,
 ): RuntimeEventEnvelopeForVersion<TVersion> {
-  const parsedSource = runtimeEventEnvelopeSchema.parse(value);
+  const latest = runtimeEventEnvelopeSchema.parse(value);
+  if (version === "1.6") {
+    return runtimeEventEnvelopeV16Schema.parse({
+      ...latest,
+      protocolVersion: version,
+    }) as RuntimeEventEnvelopeForVersion<TVersion>;
+  }
+  // Preserve durable cursor continuity for old clients; the available tool set changed.
+  const parsedSource =
+    latest.event.type === "context.recovery.changed"
+      ? { ...latest, event: { type: "capabilities.changed" as const } }
+      : latest;
   if (version === "1.5") {
     return runtimeEventEnvelopeV15Schema.parse({
       ...parsedSource,
@@ -3150,3 +3273,8 @@ export {
   observationRetentionDeclarationSchema,
   type ObservationRetentionDeclaration,
 } from "./observation-retention.ts";
+
+export type RuntimeEventEnvelopeV16 = z.infer<typeof runtimeEventEnvelopeV16Schema>;
+export type RuntimeDurableEventV16 = z.infer<typeof runtimeDurableEventV16Schema>;
+export type ThreadSnapshotV16Full = z.infer<typeof threadSnapshotV16FullSchema>;
+export type ThreadSnapshotV16 = z.infer<typeof threadSnapshotV16Schema>;

@@ -31,7 +31,8 @@
       "types": "./src/observation-retention.ts",
       "default": "./src/observation-retention.ts"
     },
-    "./schema/1.5": "./dist/schema/roll-runtime-protocol-v1.5.schema.json"
+    "./schema/1.5": "./dist/schema/roll-runtime-protocol-v1.5.schema.json",
+    "./schema/1.6": "./dist/schema/roll-runtime-protocol-v1.6.schema.json"
   },
   "publishConfig": {
     "access": "public",
@@ -56,7 +57,8 @@
         "types": "./dist/observation-retention.d.ts",
         "default": "./dist/observation-retention.js"
       },
-      "./schema/1.5": "./dist/schema/roll-runtime-protocol-v1.5.schema.json"
+      "./schema/1.5": "./dist/schema/roll-runtime-protocol-v1.5.schema.json",
+      "./schema/1.6": "./dist/schema/roll-runtime-protocol-v1.6.schema.json"
     }
   },
   "files": [

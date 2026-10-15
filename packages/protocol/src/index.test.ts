@@ -80,7 +80,7 @@ import {
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
   runtimeEventEnvelopeV13Schema,
-  runtimeEventEnvelopeV15Schema,
+  runtimeEventEnvelopeV16Schema,
   runtimeEventCursorDistance,
   runtimeEventCursorSchema,
   runtimeEventIdSchema,
@@ -225,14 +225,14 @@ function userInputRequestParams(controls: UserInputForm["controls"]): UserInputR
   });
 }
 
-test("initialize advertises v1.5 first without changing the strict request shape", () => {
+test("initialize advertises v1.6 first without changing the strict request shape", () => {
   const input = {
     protocolVersions: [...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS],
     client: { name: "fixture-client", version: "1.0.0" },
   } as const;
   const parsed = initializeParamsSchema.parse(input);
-  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.5");
-  assert.deepEqual(parsed.protocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.6");
+  assert.deepEqual(parsed.protocolVersions, ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13, ["1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11, ["1.1", "1.0"]);
@@ -551,11 +551,11 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
       delta: "hello",
     },
   } as const;
-  const parsed = runtimeEventEnvelopeV15Schema.parse(input);
+  const parsed = runtimeEventEnvelopeV16Schema.parse(input);
   assert.equal(parsed.sequence, 7);
   assert.equal(parsed.event.type, "message.delta");
   assert.throws(() =>
-    runtimeEventEnvelopeV15Schema.parse({
+    runtimeEventEnvelopeV16Schema.parse({
       ...input,
       durability: "durable",
       eventId: IDS.event,
@@ -1241,6 +1241,7 @@ test("approval explanation stays inside preview for v1.0/v1.1 wire compatibility
   }
 
   const snapshot = threadSnapshotSchema.parse({
+    contextRecovery: null,
     thread: {
       id: IDS.thread,
       title: "shell approval",
@@ -1471,6 +1472,7 @@ test("v1.3 recovery Snapshot is explicit, byte-bounded and stripped from frozen 
   );
 
   const recovery = {
+    contextRecovery: null,
     thread: {
       id: IDS.thread,
       title: "bounded recovery",
@@ -1659,6 +1661,7 @@ test("v1.2 active Turn adds waiting-for-user while legacy snapshots map it to ru
 
 test("thread snapshot never exposes raw Tool evidence fields", () => {
   const snapshot = threadSnapshotSchema.parse({
+    contextRecovery: null,
     thread: {
       id: IDS.thread,
       title: "demo",

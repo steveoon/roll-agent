@@ -43,6 +43,8 @@ const COMPACTION_RECOVERY_PRIORITY = [
 const SEMANTIC_ITEM_ID_PATTERN =
   /^semantic_(?:goal|constraint|decision|completed_work|pending_work|resource|running_session|uncertainty)_[0-9a-f]{24}$/u;
 const MAX_ITEM_TEXT_CHARS = 1_024;
+/** Page size for roll__context item reads. Segment coverage uses the same grid. */
+export const CONTEXT_READ_CHUNK_CHARS = 6_000;
 const MAX_RESOLUTION_REASON_CHARS = 1_024;
 const MAX_PROVENANCE_REFS = 8;
 const MAX_SOURCE_QUOTES = 8;
@@ -64,7 +66,6 @@ const MAX_MODEL_EVIDENCE_ITEMS = 32;
 
 export const legacyCompactionTranscriptFragmentsSchema = z
   .array(z.string().trim().min(1).max(MAX_SOURCE_QUOTE_CHARS))
-  .max(MAX_UNCERTAINTIES)
   .readonly();
 
 export type LegacyCompactionTranscriptFragments = z.infer<
@@ -160,8 +161,14 @@ const modelSemanticRunningSessionSchema = z
 const modelSemanticResolutionSchema = z
   .object({
     targetItemId: z.string().trim().min(1).max(128),
-    targetCategory: z.enum(["constraint", "decision", "pending_work", "uncertainty"]),
-    action: z.enum(["cancel", "supersede", "clarify", "revoke"]),
+    targetCategory: z.enum([
+      "constraint",
+      "decision",
+      "pending_work",
+      "uncertainty",
+      "completed_work",
+    ]),
+    action: z.enum(["cancel", "supersede", "clarify", "revoke", "complete", "reopen"]),
     reason: z.string().trim().min(1).max(MAX_RESOLUTION_REASON_CHARS),
     sourceEvidenceIds: z.array(z.string().trim().min(1).max(128)).min(1).max(MAX_PROVENANCE_REFS),
     sourceQuotes: z
@@ -222,6 +229,8 @@ export function createEmptyCompactionModelDraft(): CompactionModelDraft {
 
 const semanticTextItemShape = {
   id: compactionSemanticItemIdSchema,
+  harnessKey: z.string().max(128).optional(),
+  relatedItemId: compactionSemanticItemIdSchema.optional(),
   text: z.string().trim().min(1).max(MAX_ITEM_TEXT_CHARS),
   provenance: z.array(compactionProvenanceRefSchema).min(1).max(MAX_PROVENANCE_REFS),
   sourceQuotes: z
@@ -229,20 +238,23 @@ const semanticTextItemShape = {
     .max(MAX_SOURCE_QUOTES)
     .default([]),
 } satisfies z.ZodRawShape;
-const semanticTextItemSchema = z.object(semanticTextItemShape).strict().readonly();
+export const semanticTextItemSchema = z.object(semanticTextItemShape).strict().readonly();
 const semanticResourceShape = {
   id: compactionSemanticItemIdSchema,
   resourceKey: z.string().trim().min(1).max(MAX_ITEM_TEXT_CHARS),
   provenance: z.array(compactionProvenanceRefSchema).min(1).max(MAX_PROVENANCE_REFS),
 } satisfies z.ZodRawShape;
-const semanticResourceSchema = z.object(semanticResourceShape).strict().readonly();
+export const semanticResourceSchema = z.object(semanticResourceShape).strict().readonly();
 const semanticRunningSessionShape = {
   id: compactionSemanticItemIdSchema,
   managerInstanceId: z.string().uuid(),
   sessionId: z.number().int().nonnegative(),
   provenance: z.array(compactionProvenanceRefSchema).min(1).max(MAX_PROVENANCE_REFS),
 } satisfies z.ZodRawShape;
-const semanticRunningSessionSchema = z.object(semanticRunningSessionShape).strict().readonly();
+export const semanticRunningSessionSchema = z
+  .object(semanticRunningSessionShape)
+  .strict()
+  .readonly();
 
 const compactionSemanticPrunedCountsSchema = z
   .object({
@@ -270,6 +282,7 @@ const EMPTY_SEMANTIC_PRUNED_COUNTS = Object.freeze({
 export const compactionSemanticStateSchema = z
   .object({
     version: z.literal(COMPACTION_SEMANTIC_STATE_VERSION),
+    scopeId: z.string().max(128).optional(),
     goal: semanticTextItemSchema.nullable(),
     constraints: z.array(semanticTextItemSchema).max(MAX_CONSTRAINTS).default([]),
     decisions: z.array(semanticTextItemSchema).max(MAX_DECISIONS),
@@ -354,12 +367,21 @@ export const compactionSemanticReminderProjectionSchema = z
 export type CompactionSemanticReminderProjection = z.infer<
   typeof compactionSemanticReminderProjectionSchema
 >;
-export interface CompactionSemanticResolution {
-  readonly targetItemId: CompactionSemanticItemId;
-  readonly targetCategory: "constraint" | "decision" | "pending_work" | "uncertainty";
-  readonly action: "cancel" | "supersede" | "clarify" | "revoke";
-  readonly reason: string;
-  readonly provenance: readonly CompactionProvenanceRef[];
+export const compactionSemanticResolutionSchema = modelSemanticResolutionSchema
+  .unwrap()
+  .omit({ sourceEvidenceIds: true })
+  .extend({
+    targetItemId: compactionSemanticItemIdSchema,
+    provenance: z.array(compactionProvenanceRefSchema).min(1).max(MAX_PROVENANCE_REFS).readonly(),
+    sourceQuotes: z.array(z.string()).readonly().optional(),
+  })
+  .readonly();
+export type CompactionSemanticResolution = z.infer<typeof compactionSemanticResolutionSchema>;
+export interface SemanticResolutionTarget {
+  readonly category: CompactionSemanticResolution["targetCategory"];
+  readonly item: CompactionSemanticTextItem;
+  readonly firstToolSequence: number;
+  readonly status: string;
 }
 
 export interface CompactionSemanticMessageEvidence {
@@ -414,11 +436,24 @@ export interface CompactionSemanticEvidenceRegistryEntry {
 
 export type CompactionSemanticEvidenceRegistry = readonly CompactionSemanticEvidenceRegistryEntry[];
 
+export interface DurableReadSegmentSpan {
+  readonly provenance: CompactionProvenanceRef;
+  /** Contiguous, actually read JSON text from this exact source/version. */
+  readonly content: string;
+}
 export interface ValidateCompactionModelDraftInput {
   readonly draft: unknown;
   readonly evidenceRegistry: CompactionSemanticEvidenceRegistry;
   readonly presentedEvidenceIds?: readonly string[];
   readonly previousState?: CompactionSemanticState;
+  readonly harnessKeys?: ReadonlySet<string>;
+  readonly resolutionTargets?: readonly SemanticResolutionTarget[];
+  readonly toolSequences?: ReadonlyMap<string, number>;
+  /**
+   * Completed roll__context pages for sources the model may cite.
+   * A missing page rejects only that resolution; stored pages are not deleted.
+   */
+  readonly durableReadSegments?: readonly DurableReadSegmentSpan[];
   readonly harnessGoal?: {
     readonly verbatimRequest: string;
     readonly sourceSequence: number;
@@ -440,6 +475,7 @@ export const COMPACTION_SEMANTIC_REJECTION_REASONS = [
   "resolution_target_category_mismatch",
   "invalid_resolution_action",
   "unsupported_source_quote",
+  "incomplete_read_segment",
   "unknown_evidence_review",
 ] as const;
 
@@ -461,10 +497,32 @@ export interface CompactionSemanticRejection {
 
 export interface ValidatedCompactionSemanticCandidate {
   readonly state: CompactionSemanticState;
+  readonly archiveItems?: readonly SemanticArchiveItem[];
   readonly resolutions: readonly CompactionSemanticResolution[];
   readonly rejections: readonly CompactionSemanticRejection[];
   readonly coveredEvidenceIds: readonly string[];
   readonly startsNewGoalScope: boolean;
+}
+
+export const semanticArchiveItemSchema = z
+  .object({
+    category: z.enum(COMPACTION_SEMANTIC_ITEM_KINDS),
+    item: z.union([semanticTextItemSchema, semanticResourceSchema, semanticRunningSessionSchema]),
+  })
+  .strict();
+export type SemanticArchiveItem = z.infer<typeof semanticArchiveItemSchema>;
+
+export function listSemanticArchiveItems(state: CompactionSemanticState): SemanticArchiveItem[] {
+  return [
+    ...(state.goal ? [{ category: "goal" as const, item: state.goal }] : []),
+    ...state.constraints.map((item) => ({ category: "constraint" as const, item })),
+    ...state.decisions.map((item) => ({ category: "decision" as const, item })),
+    ...state.completedWork.map((item) => ({ category: "completed_work" as const, item })),
+    ...state.pendingWork.map((item) => ({ category: "pending_work" as const, item })),
+    ...state.uncertainties.map((item) => ({ category: "uncertainty" as const, item })),
+    ...state.resources.map((item) => ({ category: "resource" as const, item })),
+    ...state.runningSessions.map((item) => ({ category: "running_session" as const, item })),
+  ];
 }
 
 function normalizedText(value: string): string {
@@ -863,7 +921,7 @@ function hasSuccessfulToolEvidence(
   entries: readonly CompactionSemanticEvidenceRegistryEntry[],
 ): boolean {
   return (
-    entries.length === 1 &&
+    new Set(entries.map((entry) => entry.evidenceId)).size === 1 &&
     entries[0]?.provenance.kind === "tool_execution" &&
     entries[0].toolOutcomeKind === TOOL_OUTCOME_KINDS.success
   );
@@ -873,7 +931,7 @@ function hasOnlyUserMessageEvidence(
   entries: readonly CompactionSemanticEvidenceRegistryEntry[],
 ): boolean {
   return (
-    entries.length === 1 &&
+    new Set(entries.map((entry) => entry.evidenceId)).size === 1 &&
     entries.every((entry) => entry.provenance.kind === "message" && entry.messageRole === "user")
   );
 }
@@ -976,36 +1034,57 @@ export function normalizeCompactionSemanticItems<T extends CompactionSemanticIte
   return [...unique.values()];
 }
 
+function citedReadSegmentMissing(
+  entries: readonly CompactionSemanticEvidenceRegistryEntry[],
+  quotes: readonly string[],
+  coverage: readonly DurableReadSegmentSpan[] | undefined,
+): boolean {
+  if (coverage === undefined || coverage.length === 0) return false;
+  return quotes.some((quote, index) => {
+    const entry = entries[index];
+    if (entry === undefined) return true;
+    const related = coverage.filter(
+      (span) => provenanceIdentity(span.provenance) === provenanceIdentity(entry.provenance),
+    );
+    if (related.length === 0) return false;
+    // readContext returns JSON, whose escaping and field layout differ from the
+    // summarizer's fullSource. Never reuse semantic text offsets in that source.
+    const encoded = JSON.stringify(quote).slice(1, -1);
+    return !related.some((span) => span.content.includes(encoded));
+  });
+}
+
+function quoteSupportedByEntry(
+  entry: CompactionSemanticEvidenceRegistryEntry,
+  quote: string,
+): boolean {
+  const summary = modelFacingEvidenceSummary(entry);
+  if (summary === quote) return true;
+  if (entry.fullSource === undefined || summary.length <= MAX_SOURCE_QUOTE_CHARS) return false;
+  let start = summary.indexOf(quote);
+  while (start !== -1) {
+    const before = summary.slice(0, start);
+    const after = summary.slice(start + quote.length);
+    const startsAtBoundary = start === 0 || /(?:\n[\t ]*|[.!?。！？]\s+)$/u.test(before);
+    const endsAtBoundary =
+      after.length === 0 ||
+      /^[\t ]*\n/u.test(after) ||
+      (/[.!?。！？]$/u.test(quote) && /^\s/u.test(after));
+    if (startsAtBoundary && endsAtBoundary) return true;
+    start = summary.indexOf(quote, start + 1);
+  }
+  return false;
+}
+
 function evidenceSupportsQuotes(
   entries: readonly CompactionSemanticEvidenceRegistryEntry[],
   quotes: readonly string[],
 ): boolean {
-  const summaries = entries.map(modelFacingEvidenceSummary);
   return (
-    summaries.length === quotes.length &&
-    summaries.every((summary, index) => {
-      const quote = quotes[index];
-      if (quote === undefined) return false;
-      if (summary === quote) return true;
-      if (entries[index]?.fullSource === undefined || summary.length <= MAX_SOURCE_QUOTE_CHARS) {
-        return false;
-      }
-      // Accept a whole line or consecutive whole sentences, not an arbitrary
-      // substring. Splitting on both newlines and sentence ends wrongly rejected
-      // verbatim multi-sentence lines and made otherwise grounded drafts unusable.
-      let start = summary.indexOf(quote);
-      while (start !== -1) {
-        const before = summary.slice(0, start);
-        const after = summary.slice(start + quote.length);
-        const startsAtBoundary = start === 0 || /(?:\n[\t ]*|[.!?。！？]\s+)$/u.test(before);
-        const endsAtBoundary =
-          after.length === 0 ||
-          /^[\t ]*\n/u.test(after) ||
-          (/[.!?。！？]$/u.test(quote) && /^\s/u.test(after));
-        if (startsAtBoundary && endsAtBoundary) return true;
-        start = summary.indexOf(quote, start + 1);
-      }
-      return false;
+    entries.length === quotes.length &&
+    quotes.every((quote, index) => {
+      const entry = entries[index];
+      return entry !== undefined && quoteSupportedByEntry(entry, quote);
     })
   );
 }
@@ -1032,6 +1111,7 @@ export function validateCompactionModelDraft(
     ...(previous?.decisions.map((item) => [item.id, "decision"] as const) ?? []),
     ...(previous?.pendingWork.map((item) => [item.id, "pending_work"] as const) ?? []),
     ...(previous?.uncertainties.map((item) => [item.id, "uncertainty"] as const) ?? []),
+    ...(input.resolutionTargets?.map((target) => [target.item.id, target.category] as const) ?? []),
   ]);
   const previousCompletedById = new Map(
     (previous?.completedWork ?? []).map((item) => [item.id, item]),
@@ -1051,22 +1131,23 @@ export function validateCompactionModelDraft(
     input.presentedEvidenceIds === undefined ? undefined : new Set(input.presentedEvidenceIds);
   const resolveEvidence = (
     sourceEvidenceIds: readonly string[],
-  ): readonly CompactionSemanticEvidenceRegistryEntry[] | undefined => {
-    if (new Set(sourceEvidenceIds).size !== sourceEvidenceIds.length) {
-      return undefined;
-    }
+  ):
+    | {
+        readonly entries: readonly CompactionSemanticEvidenceRegistryEntry[];
+      }
+    | undefined => {
     const entries: CompactionSemanticEvidenceRegistryEntry[] = [];
     for (const sourceEvidenceId of sourceEvidenceIds) {
       if (presentedEvidenceIds !== undefined && !presentedEvidenceIds.has(sourceEvidenceId)) {
         return undefined;
       }
       const entry = evidenceById.get(sourceEvidenceId);
-      if (entry === undefined) {
-        return undefined;
-      }
+      if (entry === undefined) return undefined;
       entries.push(entry);
     }
-    return entries;
+    // Preserve the positional relation of every quote and its source. Duplicate
+    // references are harmless; provenance is deduplicated only after validation.
+    return { entries };
   };
   const rejections: CompactionSemanticRejection[] = [];
   const coveredEvidenceIds = new Set<string>();
@@ -1098,11 +1179,12 @@ export function validateCompactionModelDraft(
         accepted.push(priorCompleted);
         return;
       }
-      const evidenceEntries = resolveEvidence(candidate.sourceEvidenceIds);
-      if (evidenceEntries === undefined) {
+      const resolved = resolveEvidence(candidate.sourceEvidenceIds);
+      if (resolved === undefined) {
         rejections.push({ category, index, reason: "unknown_provenance" });
         return;
       }
+      const evidenceEntries = resolved.entries;
       if (!evidenceSupportsQuotes(evidenceEntries, candidate.sourceQuotes)) {
         candidate.sourceEvidenceIds.forEach((id) => rejectedEvidenceIds.add(id));
         rejections.push({ category, index, reason: "unsupported_source_quote" });
@@ -1149,8 +1231,9 @@ export function validateCompactionModelDraft(
 
   let modelGoal: CompactionSemanticState["goal"] = null;
   if (draft.goal !== null) {
-    const evidenceEntries = resolveEvidence(draft.goal.sourceEvidenceIds);
-    if (evidenceEntries === undefined) {
+    const resolvedGoal = resolveEvidence(draft.goal.sourceEvidenceIds);
+    const evidenceEntries = resolvedGoal?.entries;
+    if (resolvedGoal === undefined || evidenceEntries === undefined) {
       rejections.push({ category: "goal", index: 0, reason: "unknown_provenance" });
     } else if (!hasOnlyUserMessageEvidence(evidenceEntries)) {
       rejections.push({ category: "goal", index: 0, reason: "missing_required_provenance" });
@@ -1222,11 +1305,12 @@ export function validateCompactionModelDraft(
 
   const resources: CompactionSemanticResource[] = [];
   draft.resources.forEach((candidate, index) => {
-    const evidenceEntries = resolveEvidence(candidate.sourceEvidenceIds);
-    if (evidenceEntries === undefined) {
+    const resolvedResource = resolveEvidence(candidate.sourceEvidenceIds);
+    if (resolvedResource === undefined) {
       rejections.push({ category: "resource", index, reason: "unknown_provenance" });
       return;
     }
+    const evidenceEntries = resolvedResource.entries;
     const resourceEntries = evidenceEntries.filter((entry) => entry.provenance.kind === "resource");
     const resourceKey = resourceEntries[0]?.provenance.resourceKey;
     if (resourceEntries.length !== 1 || resourceKey === null || resourceKey === undefined) {
@@ -1274,11 +1358,12 @@ export function validateCompactionModelDraft(
 
   const runningSessions: CompactionSemanticRunningSession[] = [];
   draft.runningSessions.forEach((candidate, index) => {
-    const evidenceEntries = resolveEvidence(candidate.sourceEvidenceIds);
-    if (evidenceEntries === undefined) {
+    const resolvedSession = resolveEvidence(candidate.sourceEvidenceIds);
+    if (resolvedSession === undefined) {
       rejections.push({ category: "running_session", index, reason: "unknown_provenance" });
       return;
     }
+    const evidenceEntries = resolvedSession.entries;
     const sessionEntries = evidenceEntries.filter(
       (entry) => entry.provenance.kind === "running_session",
     );
@@ -1342,6 +1427,7 @@ export function validateCompactionModelDraft(
   }
 
   const resolutions: CompactionSemanticResolution[] = [];
+  const lifecycleItems: SemanticArchiveItem[] = [];
   draft.resolutions.forEach((resolution, index) => {
     const actualCategory = previousResolutionCategories.get(resolution.targetItemId);
     if (actualCategory === undefined) {
@@ -1364,21 +1450,47 @@ export function validateCompactionModelDraft(
       (actualCategory === "constraint" && resolution.action === "revoke") ||
       (actualCategory === "decision" && resolution.action === "supersede") ||
       (actualCategory === "pending_work" && resolution.action === "cancel") ||
-      (actualCategory === "uncertainty" && resolution.action === "clarify");
+      (actualCategory === "uncertainty" && resolution.action === "clarify") ||
+      (actualCategory === "pending_work" && resolution.action === "complete") ||
+      (actualCategory === "completed_work" && resolution.action === "reopen");
     if (!validAction) {
       rejections.push({ category: "resolution", index, reason: "invalid_resolution_action" });
       return;
     }
-    const evidenceEntries = resolveEvidence(resolution.sourceEvidenceIds);
-    if (evidenceEntries === undefined) {
+    const resolvedResolution = resolveEvidence(resolution.sourceEvidenceIds);
+    if (resolvedResolution === undefined) {
       rejections.push({ category: "resolution", index, reason: "unknown_provenance" });
       return;
     }
+    const evidenceEntries = resolvedResolution.entries;
     if (!evidenceSupportsQuotes(evidenceEntries, resolution.sourceQuotes)) {
       rejections.push({ category: "resolution", index, reason: "unsupported_source_quote" });
       return;
     }
-    const hasRequiredEvidence = hasOnlyUserMessageEvidence(evidenceEntries);
+    if (
+      citedReadSegmentMissing(evidenceEntries, resolution.sourceQuotes, input.durableReadSegments)
+    ) {
+      rejections.push({ category: "resolution", index, reason: "incomplete_read_segment" });
+      return;
+    }
+    const target = input.resolutionTargets?.find(
+      (target) => target.item.id === resolution.targetItemId,
+    );
+    const newerTools =
+      target !== undefined &&
+      evidenceEntries.every((entry) => {
+        const id = entry.provenance.toolExecutionId;
+        return id !== null && (input.toolSequences?.get(id) ?? -1) > target.firstToolSequence;
+      });
+    const hasRequiredEvidence =
+      resolution.action === "complete"
+        ? target?.status === "active" &&
+          newerTools &&
+          evidenceEntries.every(isSuccessfulToolEvidence)
+        : resolution.action === "reopen"
+          ? target?.status === "completed" &&
+            (hasOnlyUserMessageEvidence(evidenceEntries) || newerTools)
+          : hasOnlyUserMessageEvidence(evidenceEntries);
     if (!hasRequiredEvidence) {
       rejections.push({
         category: "resolution",
@@ -1387,13 +1499,28 @@ export function validateCompactionModelDraft(
       });
       return;
     }
+    if (resolutions.some((prior) => prior.targetItemId === resolution.targetItemId)) return;
     coverEvidence(resolution.sourceEvidenceIds);
     const provenance = uniqueProvenance(evidenceEntries);
+    if (target && (resolution.action === "complete" || resolution.action === "reopen")) {
+      const category = resolution.action === "complete" ? "completed_work" : "pending_work";
+      lifecycleItems.push({
+        category,
+        item: semanticTextItemSchema.parse({
+          id: stableSemanticItemId(category, target.item.id, provenance),
+          relatedItemId: target.item.id,
+          text: target.item.text,
+          sourceQuotes: resolution.sourceQuotes,
+          provenance,
+        }),
+      });
+    }
     resolutions.push({
       targetItemId: compactionSemanticItemIdSchema.parse(resolution.targetItemId),
       targetCategory: resolution.targetCategory,
       action: resolution.action,
       reason: normalizedText(resolution.reason),
+      sourceQuotes: resolution.sourceQuotes,
       provenance,
     });
   });
@@ -1429,6 +1556,67 @@ export function validateCompactionModelDraft(
   );
 
   const reviewedUncertainties: CompactionSemanticTextItem[] = [];
+  // Scope follows the accepted goal, not each continuation message's sequence.
+  const scopeId = startsNewGoalScope
+    ? (goal?.id ?? "initial")
+    : (previous?.scopeId ?? previous?.goal?.id ?? goal?.id ?? "initial");
+  const automaticKey = (entry: CompactionSemanticEvidenceRegistryEntry): string => {
+    const sourceText = (entry.fullSource ?? entry.summary)
+      .trim()
+      .replace(/\r\n?/gu, "\n")
+      .replace(/^message \d+ (?:user|assistant):\s*/u, "");
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          scopeId,
+          entry.provenance.kind,
+          entry.messageRole ?? "tool",
+          entry.toolOutcomeKind,
+          entry.toolCancellationExecutionState,
+          sourceText,
+        ]),
+      )
+      .digest("hex");
+  };
+  const harnessKeys = new Set(input.harnessKeys ?? []);
+  for (const resolution of resolutions) {
+    const key = input.resolutionTargets?.find(
+      (target) => target.item.id === resolution.targetItemId,
+    )?.item.harnessKey;
+    if (key) harnessKeys.delete(key);
+  }
+  for (const item of previous?.uncertainties ?? []) {
+    if (resolutions.some((r) => r.targetItemId === item.id)) {
+      if (item.harnessKey) harnessKeys.delete(item.harnessKey);
+      continue;
+    }
+    if (item.harnessKey) {
+      harnessKeys.add(item.harnessKey);
+      continue;
+    }
+    // Legacy entries only participate when original provenance, exact Harness text and ID agree.
+    const source = input.evidenceRegistry.find(
+      (entry) =>
+        item.provenance.length === 1 &&
+        JSON.stringify(entry.provenance) === JSON.stringify(item.provenance[0]),
+    );
+    if (!source || (source.fullSource?.length ?? 0) > MAX_SOURCE_QUOTE_CHARS) continue;
+    for (const label of [
+      "Unclassified evidence",
+      "Unresolved evidence",
+      "User or Tool evidence classified as irrelevant",
+    ]) {
+      const text = boundedText(`${label}: ${source.summary}`, MAX_ITEM_TEXT_CHARS);
+      if (
+        item.text === text &&
+        item.id === stableSemanticItemId("uncertainty", text, [source.provenance]) &&
+        item.sourceQuotes.length === 1 &&
+        item.sourceQuotes[0] === boundedText(source.summary, MAX_SOURCE_QUOTE_CHARS)
+      ) {
+        harnessKeys.add(automaticKey(source));
+      }
+    }
+  }
   const materializePresentedEvidence = (
     entry: CompactionSemanticEvidenceRegistryEntry,
     uncertaintyLabel: string,
@@ -1440,10 +1628,14 @@ export function validateCompactionModelDraft(
       // explicitly cites that same successful Tool evidence and quote.
       return;
     }
+    const harnessKey = automaticKey(entry);
+    if (harnessKeys.has(harnessKey)) return;
+    harnessKeys.add(harnessKey);
     const text = boundedText(`${uncertaintyLabel}: ${entry.summary}`, MAX_ITEM_TEXT_CHARS);
     reviewedUncertainties.push(
       semanticTextItemSchema.parse({
         id: stableSemanticItemId("uncertainty", text, [entry.provenance]),
+        harnessKey,
         text,
         provenance: [entry.provenance],
         sourceQuotes: [boundedText(entry.summary, MAX_SOURCE_QUOTE_CHARS)],
@@ -1519,11 +1711,21 @@ export function validateCompactionModelDraft(
     MAX_DECISIONS,
   );
   const boundedCompletedWork = takeNewestWithinLimit(
-    normalizeCompactionSemanticItems(candidateCompletedWork),
+    normalizeCompactionSemanticItems([
+      ...candidateCompletedWork,
+      ...lifecycleItems
+        .filter((i) => i.category === "completed_work")
+        .map((i) => semanticTextItemSchema.parse(i.item)),
+    ]),
     MAX_COMPLETED_WORK,
   );
   const boundedPendingWork = takeNewestWithinLimit(
-    normalizeCompactionSemanticItems(candidatePendingWork),
+    normalizeCompactionSemanticItems([
+      ...candidatePendingWork,
+      ...lifecycleItems
+        .filter((i) => i.category === "pending_work")
+        .map((i) => semanticTextItemSchema.parse(i.item)),
+    ]),
     MAX_PENDING_WORK,
   );
   const boundedResources = takeNewestWithinLimit(
@@ -1541,6 +1743,7 @@ export function validateCompactionModelDraft(
 
   const state = compactionSemanticStateSchema.safeParse({
     version: COMPACTION_SEMANTIC_STATE_VERSION,
+    scopeId,
     goal,
     constraints: boundedConstraints.items,
     decisions: boundedDecisions.items,
@@ -1566,6 +1769,20 @@ export function validateCompactionModelDraft(
   }
   return {
     state: state.data,
+    archiveItems: [
+      ...lifecycleItems,
+      ...(goal ? [{ category: "goal" as const, item: goal }] : []),
+      ...candidateConstraints.map((item) => ({ category: "constraint" as const, item })),
+      ...candidateDecisions.map((item) => ({ category: "decision" as const, item })),
+      ...candidateCompletedWork.map((item) => ({ category: "completed_work" as const, item })),
+      ...candidatePendingWork.map((item) => ({ category: "pending_work" as const, item })),
+      ...[...candidateUncertainties, ...reviewedUncertainties].map((item) => ({
+        category: "uncertainty" as const,
+        item,
+      })),
+      ...resources.map((item) => ({ category: "resource" as const, item })),
+      ...runningSessions.map((item) => ({ category: "running_session" as const, item })),
+    ],
     resolutions,
     rejections,
     coveredEvidenceIds: [...coveredEvidenceIds],
@@ -1613,11 +1830,12 @@ export function seedCompactionSemanticConstraints(
 
 export interface LegacyCompactionSnapshotMigrationResult {
   readonly state: CompactionSemanticState;
-  /** Every migrated fragment must remain visible in the first V2 checkpoint reminder. */
+  /** Historical prose has no current authority and requires no active reminder slots. */
   readonly requiredItemIds: readonly CompactionSemanticItemId[];
+  readonly historicalItems: readonly SemanticArchiveItem[];
   /** Exact, redacted fragments that must be archived in transcript when V1 is retired. */
   readonly transcriptFragments: LegacyCompactionTranscriptFragments;
-  /** False means at least one legacy snapshot chunk did not fit and its active prefix must stay. */
+  /** Exact historical fragments were prepared for the atomic archive transaction. */
   readonly complete: boolean;
 }
 
@@ -1643,8 +1861,8 @@ function exactTextChunks(value: string, maxCodeUnits: number): readonly string[]
 }
 
 /**
- * Migrates an old active snapshot into low-confidence V2 state. It may only become uncertainty:
- * legacy prose is not authoritative user intent or Tool completion evidence.
+ * Preserve old prose as historical/unknown evidence, outside the active V2 state.
+ * The legacy function name is retained for internal callers; it no longer seeds uncertainties.
  */
 export function seedLegacyCompactionSnapshotUncertainties(
   stateInput: CompactionSemanticState,
@@ -1658,7 +1876,13 @@ export function seedLegacyCompactionSnapshotUncertainties(
     exactTextChunks(fragment, MAX_SOURCE_QUOTE_CHARS),
   );
   if (chunks.length === 0) {
-    return { state, requiredItemIds: [], transcriptFragments: [], complete: true };
+    return {
+      state,
+      requiredItemIds: [],
+      historicalItems: [],
+      transcriptFragments: [],
+      complete: true,
+    };
   }
   const candidates = chunks.map((sourceQuote, index): CompactionSemanticTextItem => {
     const provenance = createProvenanceReference({
@@ -1677,26 +1901,13 @@ export function seedLegacyCompactionSnapshotUncertainties(
       sourceQuotes: [sourceQuote],
     });
   });
-  const merged = mergeBoundedById(state.uncertainties, candidates, new Set(), MAX_UNCERTAINTIES);
-  const bounded = boundCompactionSemanticState(
-    compactionSemanticStateSchema.parse({
-      ...state,
-      uncertainties: merged.items,
-      prunedItemCounts: {
-        ...state.prunedItemCounts,
-        uncertainty: state.prunedItemCounts.uncertainty + merged.prunedCount,
-      },
-    }),
-  );
-  const retainedIds = new Set(bounded.uncertainties.map((item) => item.id));
-  const complete = candidates.every((candidate) => retainedIds.has(candidate.id));
   return {
-    state: bounded,
-    requiredItemIds: candidates.map((candidate) => candidate.id),
-    transcriptFragments: complete
-      ? legacyCompactionTranscriptFragmentsSchema.parse(chunks)
-      : legacyCompactionTranscriptFragmentsSchema.parse([]),
-    complete,
+    state,
+    requiredItemIds: [],
+    historicalItems: candidates.map((item) => ({ category: "uncertainty", item })),
+    // Durable raw archive is independent of the bounded semantic projection.
+    transcriptFragments: legacyCompactionTranscriptFragmentsSchema.parse(chunks),
+    complete: true,
   };
 }
 
@@ -1905,7 +2116,11 @@ export function mergeCompactionSemanticState(
   const completedWork = mergeBoundedById(
     previous.completedWork,
     candidate.completedWork,
-    new Set(),
+    new Set(
+      candidateInput.resolutions
+        .filter((r) => r.targetCategory === "completed_work")
+        .map((r) => r.targetItemId),
+    ),
     MAX_COMPLETED_WORK,
   );
   const pendingWork = mergeBoundedById(
@@ -1929,6 +2144,7 @@ export function mergeCompactionSemanticState(
   return boundCompactionSemanticState(
     compactionSemanticStateSchema.parse({
       version: COMPACTION_SEMANTIC_STATE_VERSION,
+      scopeId: startsNewGoalScope ? candidate.scopeId : (previous.scopeId ?? candidate.scopeId),
       goal: startsNewGoalScope
         ? candidate.goal
         : candidate.goal !== null
@@ -2044,7 +2260,14 @@ export function createCompactionSemanticReminderProjection(
   }
   const state = compactionSemanticStateSchema.parse(stateInput);
   const priority = COMPACTION_RECOVERY_PRIORITY;
-  const candidates = semanticReminderItems(state);
+  const candidates = semanticReminderItems(state).map((item) => {
+    if (JSON.stringify(item).length <= 768) return item;
+    return {
+      ...item,
+      text: boundedText(item.text, 300) + " [preview; read full item via roll__context]",
+      sourceQuotes: [],
+    };
+  });
   const byCategory = new Map(
     priority.map((category) => [
       category,
@@ -2056,7 +2279,9 @@ export function createCompactionSemanticReminderProjection(
     const selectedCounts = new Map(
       priority.map((category) => [
         category,
-        selected.filter((item) => item.category === category).length,
+        selected.filter(
+          (item) => item.category === category && !item.text.includes("[preview; read full item"),
+        ).length,
       ]),
     );
     return compactionSemanticReminderProjectionSchema.parse({
@@ -2093,6 +2318,13 @@ export function createCompactionSemanticReminderProjection(
     });
   };
 
+  // Reserve bounded previews for the goal and two latest next steps/blockers.
+  for (const category of ["goal", "pending_work", "uncertainty"] as const) {
+    for (const item of (byCategory.get(category) ?? []).slice(category === "goal" ? -1 : -2)) {
+      selected.push(item);
+      if (JSON.stringify(project()).length > maxChars) selected.pop();
+    }
+  }
   const maxDepth = Math.max(0, ...[...byCategory.values()].map((items) => items.length));
   // Historical completion records must not crowd out active requirements as the
   // checkpoint grows. Preserve fairness among active categories, then use spare room.
@@ -2105,7 +2337,7 @@ export function createCompactionSemanticReminderProjection(
       for (const category of categories) {
         const items = byCategory.get(category) ?? [];
         const candidate = items.at(-(depth + 1));
-        if (candidate === undefined) {
+        if (candidate === undefined || selected.some((item) => item.itemId === candidate.itemId)) {
           continue;
         }
         selected.push(candidate);

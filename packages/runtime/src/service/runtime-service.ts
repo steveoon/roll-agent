@@ -1,3 +1,4 @@
+import { projectContextRecovery } from "../store/semantic-ledger.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
@@ -21,7 +22,7 @@ import {
   normalizeUserInputResultForForm,
   operationIdSchema,
   parseLatestRuntimeMethodResult,
-  runtimeDurableEventV15Schema,
+  runtimeDurableEventV16Schema,
   runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
@@ -35,7 +36,7 @@ import {
   type JsonValue,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
@@ -45,7 +46,7 @@ import {
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
   type RuntimeProtocolErrorDataV14,
-  type ThreadSnapshotV15Full,
+  type ThreadSnapshotV16Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
@@ -175,7 +176,7 @@ interface PendingUserInputState {
   readonly expiresAt: string;
 }
 
-export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV15Full, "pendingInteractions">;
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV16Full, "pendingInteractions">;
 
 export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
   readonly events: readonly StoredRuntimeEvent[];
@@ -544,7 +545,7 @@ export class RuntimeService {
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
   private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV15) => void>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV16) => void>();
   private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
   private readonly userInputListeners = new Set<
     (event: RuntimeUserInputInteractionEvent) => void
@@ -612,7 +613,7 @@ export class RuntimeService {
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
-    if (protocolVersion === "1.4" || protocolVersion === "1.5") {
+    if (protocolVersion === "1.4" || protocolVersion === "1.5" || protocolVersion === "1.6") {
       const storeLimits = this.attachmentStore?.limits;
       return initializeResultSchema.parse({
         ...commonResult,
@@ -620,7 +621,10 @@ export class RuntimeService {
         features: [
           ...legacyFeatures,
           ...(this.attachmentStore !== undefined ? ["attachments" as const] : []),
-          ...(protocolVersion === "1.5" ? ["app-output" as const] : []),
+          ...(protocolVersion === "1.5" || protocolVersion === "1.6"
+            ? ["app-output" as const]
+            : []),
+          ...(protocolVersion === "1.6" ? ["context-recovery" as const] : []),
         ],
         limits: {
           ...commonResult.limits,
@@ -647,7 +651,7 @@ export class RuntimeService {
         };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelopeV15) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV16) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -777,6 +781,7 @@ export class RuntimeService {
         .map((pending) => pending.approval),
       transcriptCompleteness: this.store.getTranscriptCompleteness(params.threadId),
       eventCursor: this.store.getRuntimeEventCursor(params.threadId),
+      contextRecovery: projectContextRecovery(this.store.getContextRecovery(params.threadId)),
     };
   }
 
@@ -1379,8 +1384,8 @@ export class RuntimeService {
       threadId,
       ...(turnId !== undefined ? { turnId } : {}),
     } as const;
-    const durableEvent = runtimeDurableEventV15Schema.safeParse(event);
-    const envelope: RuntimeEventEnvelopeV15 = durableEvent.success
+    const durableEvent = runtimeDurableEventV16Schema.safeParse(event);
+    const envelope: RuntimeEventEnvelopeV16 = durableEvent.success
       ? (() => {
           let stored: StoredRuntimeEvent;
           try {
@@ -1692,6 +1697,12 @@ export class RuntimeService {
           stage: event.stage,
           message: redactSecretText(event.message),
         };
+        break;
+      case "context-recovery":
+        this.emit(state.threadId, state.turnId, {
+          type: "context.recovery.changed",
+          contextRecovery: event.state,
+        });
         break;
       case "debug":
       case "tool-input-activity": // UI-only metadata: not durable Runtime Protocol events.

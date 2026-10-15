@@ -774,6 +774,18 @@ export class ConversationEngine {
             listTranscriptMessages: (options) => store.listTranscriptMessages(id, options),
             commitCompaction: (input) => store.commitCompaction(id, input),
             readCheckpointTranscript: (options) => store.readCheckpointTranscript(id, options),
+            contextStore: {
+              read: (input) => store.readContext(id, input),
+              readTransaction: (read) => store.withContextReadTransaction(read),
+              recovery: () => store.getContextRecovery(id),
+              ready: (checkpointId, memo) => store.completeContextRecovery(id, checkpointId, memo),
+              rows: () => store.getSemanticLedgerRows(id),
+              recordSegment: (segment) => store.recordContextReadSegment(id, segment),
+              segments: (checkpointId) => store.listContextReadSegments(id, checkpointId),
+              notes: (checkpointId) => store.contextRecoveryNotes(id, checkpointId),
+              saveNotes: (checkpointId, notes) =>
+                store.saveContextRecoveryNotes(id, checkpointId, notes),
+            },
           }
         : {}),
       onClose: () => {

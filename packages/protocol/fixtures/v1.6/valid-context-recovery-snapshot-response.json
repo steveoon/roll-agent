@@ -1,0 +1,30 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "createdAt": "2026-10-13T00:00:00.000Z",
+      "updatedAt": "2026-10-13T00:00:00.000Z",
+      "messageCount": 0
+    },
+    "messages": {
+      "items": [],
+      "nextBeforeSequence": null
+    },
+    "operations": {
+      "items": [],
+      "nextBeforeSequence": null
+    },
+    "pendingApprovals": [],
+    "pendingInteractions": [],
+    "transcriptCompleteness": "complete",
+    "eventCursor": null,
+    "contextRecovery": {
+      "checkpointId": "00000000-0000-4000-8000-000000000003",
+      "required": true,
+      "unextracted": true,
+      "requiredItemCount": 24
+    }
+  }
+}

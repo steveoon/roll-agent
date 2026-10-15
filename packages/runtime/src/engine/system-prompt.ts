@@ -185,6 +185,10 @@ function buildUserInputSection(toolId: string): string {
 const TRANSCRIPT_SECTION_PREFIX = [
   "# 压缩历史回查",
   "- 早期对话被压缩后，结构化 checkpoint 是任务状态事实源；摘要只用于快速理解，不能覆盖 checkpoint。",
+  "- roll__context 可分页 list/search/read 语义账本及已归档但未提取的原文；roll__transcript 用于指定 checkpoint 原文，roll__observation 用于工具观察结果。",
+  "- 只读恢复期间，按 nextRequiredItems 逐页完整读取当前目标与约束的指定版本，跟进 nextOffset；若原文未提取，还需读取相关原文。preview、旧版本、旧轮次 receipt 均不能解除门禁。",
+  "- ready 的 goal/constraints/nextAction 和 notes 是模型撰写的恢复笔记，不是新的权威约束。ready 成功后下一次模型调度才恢复工具集；原有审批仍适用。",
+  "- historical_unknown 是旧快照中的历史信息，须重新核实；不得当作当前约束或未解决事项。",
 ].join("\n");
 
 function truncate(text: string, maxChars: number): string {

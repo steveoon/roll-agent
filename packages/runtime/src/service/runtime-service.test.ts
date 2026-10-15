@@ -15,10 +15,13 @@ import {
   requestIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
   type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
+import { createEmptyCompactionSemanticState } from "../engine/compaction-semantic-state.ts";
+import { createEmptyCompactionToolState } from "../engine/compaction-checkpoint.ts";
+import { projectContextRecovery } from "../store/semantic-ledger.ts";
 import { sessionUserInputRequestIdSchema } from "../interaction/user-input-interaction-manager.ts";
 import {
   createToolExecutionRecord,
@@ -119,6 +122,11 @@ function createFixture(store: ThreadStore): {
         { role: "user", content: typeof input === "string" ? input : input.text },
       ]);
       yield { type: "message-start", messageId: IDS.message };
+      yield {
+        type: "tool-input-activity",
+        calls: [{ toolCallId: "ephemeral-generation-sentinel", name: "demo-agent.write" }],
+      };
+      yield { type: "tool-input-activity", calls: [] };
       yield {
         type: "confirmation-required",
         approvalId: IDS.approval,
@@ -284,7 +292,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -393,6 +401,12 @@ test("RuntimeService respondApproval 不带 scope 时 session.approve 收到 und
     );
     await nextTick();
 
+    const wire = store.resumeRuntimeEvents(IDS.thread, null);
+    assert.doesNotMatch(JSON.stringify(wire), /ephemeral-generation-sentinel|tool-input-activity/);
+    assert.doesNotMatch(
+      JSON.stringify(store.listTranscriptMessages(IDS.thread)),
+      /ephemeral-generation-sentinel|tool-input-activity/,
+    );
     await service.respondApproval(
       runtimeMethodSchemas["approval.respond"].params.parse({
         requestId: IDS.requestApprove,
@@ -415,7 +429,7 @@ test("RuntimeService redacts approval rejection reasons before durable replay", 
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   service.onEvent((event) => events.push(event));
   try {
     service.initialize({
@@ -479,7 +493,7 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -613,7 +627,7 @@ for (const terminal of ["error", "cancel"] as const) {
     const store = new ThreadStore(dir);
     const fixture = createMultiStreamFailureFixture(store, terminal);
     const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-    const events: RuntimeEventEnvelopeV15[] = [];
+    const events: RuntimeEventEnvelopeV16[] = [];
     service.onEvent((event) => events.push(event));
     try {
       service.initialize({
@@ -667,7 +681,7 @@ for (const terminal of ["finish", "error", "cancel"] as const) {
       },
     });
     const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-    const events: RuntimeEventEnvelopeV15[] = [];
+    const events: RuntimeEventEnvelopeV16[] = [];
     service.onEvent((event) => events.push(event));
     try {
       service.initialize({
@@ -707,7 +721,7 @@ test("RuntimeService isolates event listeners before starting and completing a T
   const store = new ThreadStore(dir);
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const eventsAfterThrow: RuntimeEventEnvelopeV15[] = [];
+  const eventsAfterThrow: RuntimeEventEnvelopeV16[] = [];
   service.onEvent(() => {
     throw new Error("listener failed");
   });
@@ -1030,7 +1044,7 @@ test("RuntimeService durable event Store 失败时不发布 live 且回滚 turn.
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   service.onEvent((event) => events.push(event));
   try {
     await service.createThread(
@@ -1081,7 +1095,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1143,7 +1157,7 @@ test("RuntimeService approval resolution durable 写盘失败会触发 fatal shu
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1203,7 +1217,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   let terminalSnapshotHadActiveTurn = false;
   service.onEvent((event) => {
     events.push(event);
@@ -1553,7 +1567,7 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
     });
     assert.equal("executionState" in (snapshot.operations.items[0]?.outcome ?? {}), false);
     assert.doesNotThrow(() =>
-      parseRuntimeMethodResultForVersion("1.5", "thread.snapshot", {
+      parseRuntimeMethodResultForVersion("1.6", "thread.snapshot", {
         ...snapshot,
         pendingInteractions: [],
       }),
@@ -2106,6 +2120,106 @@ test("RuntimeService 未配置附件存储时 attachments 能力关闭且方法�
       ),
       (error: unknown) =>
         error instanceof RuntimeServiceError && error.rollCode === "CAPABILITY_UNAVAILABLE",
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService persists recovery entry/exit for snapshots and replay across SQLite reopen", async () => {
+  const dir = tempDir();
+  let store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  Object.defineProperty(fixture.session, "send", {
+    value: async function* () {
+      const cp = store.commitCompaction(IDS.thread, {
+        messages: [],
+        expectedActiveMessages: [],
+        expectedLatestCheckpointId: undefined,
+        semanticState: createEmptyCompactionSemanticState(),
+        draft: {
+          constraints: [],
+          resources: [],
+          runningWork: [],
+          toolState: createEmptyCompactionToolState(),
+          context: { cwd: dir, stableRuleIds: [], skills: [], explicitSkillNames: [] },
+          summary: { status: "skipped" },
+        },
+        semanticEvidenceWatermarks: {
+          messagesThroughSequence: -1,
+          toolExecutionsThroughSequence: -1,
+        },
+        evidenceWatermarks: {
+          transcriptMessagesThroughSequence: -1,
+          toolExecutionsThroughSequence: -1,
+        },
+        contextRecovery: { unextracted: true },
+      });
+      yield {
+        type: "context-recovery",
+        state: projectContextRecovery(store.getContextRecovery(IDS.thread)),
+      };
+      store.completeContextRecovery(IDS.thread, cp.id, "MODEL_NOTES_NEVER_ON_WIRE");
+      yield {
+        type: "context-recovery",
+        state: projectContextRecovery(store.getContextRecovery(IDS.thread)),
+      };
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "message-finish", text: "recovered" };
+    },
+  });
+  let service = new RuntimeService(fixture.engine, store);
+  const seen: RuntimeEventEnvelopeV16[] = [];
+  const snapshots: boolean[] = [];
+  service.onEvent((event) => {
+    seen.push(event);
+    if (event.event.type === "context.recovery.changed") {
+      snapshots.push(
+        service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
+          .contextRecovery!.required,
+      );
+    }
+  });
+  try {
+    service.initialize({ protocolVersions: ["1.6"], client: { name: "recovery", version: "1" } });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "continue" },
+      }),
+    );
+    await nextTick();
+    assert.deepEqual(snapshots, [true, false]);
+    const changes = seen.filter((event) => event.event.type === "context.recovery.changed");
+    assert.equal(changes.length, 2);
+    assert.ok(changes.every((event) => event.durability === "durable"));
+    assert.doesNotMatch(JSON.stringify(changes), /MODEL_NOTES/);
+    await service.close();
+    store.close();
+    store = new ThreadStore(dir);
+    service = new RuntimeService(createFixture(store).engine, store);
+    service.initialize({ protocolVersions: ["1.6"], client: { name: "reopened", version: "1" } });
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
+        .contextRecovery?.required,
+      false,
+    );
+    const replay = service.resumeEvents({
+      threadId: threadIdSchema.parse(IDS.thread),
+      afterCursor: null,
+    });
+    assert.deepEqual(
+      replay.events
+        .filter((entry) => entry.event.type === "context.recovery.changed")
+        .map((entry) => entry.event),
+      changes.map((entry) => entry.event),
     );
   } finally {
     await service.close();

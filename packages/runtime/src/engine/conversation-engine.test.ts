@@ -15,6 +15,7 @@ import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-leas
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
+import { contextReadInputSchema } from "../store/semantic-ledger.ts";
 import type { AgentSession } from "./agent-session.ts";
 import { ModelCatalog } from "./model-catalog.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
@@ -2037,7 +2038,7 @@ function structuredCompactionEvidence(options: LanguageModelV4CallOptions): read
   return parsed.evidence;
 }
 
-for (const scenario of ["summarize", "truncate", "fallback"] as const) {
+for (const scenario of ["summarize", "summarize-preview", "truncate", "fallback"] as const) {
   test(`ConversationEngine Unicode compaction ${scenario} persists and resumes`, async () => {
     const dir = tempDir();
     const config = rollConfigSchema.parse({
@@ -2059,6 +2060,7 @@ for (const scenario of ["summarize", "truncate", "fallback"] as const) {
     let engine: ConversationEngine | undefined;
     let store: ThreadStore | undefined;
     let draftCalls = 0;
+    const holdsHistory = scenario === "fallback" || scenario === "summarize-preview";
     try {
       store = new ThreadStore(dir);
       engine = new ConversationEngine({
@@ -2075,18 +2077,27 @@ for (const scenario of ["summarize", "truncate", "fallback"] as const) {
           assert.ok(evidence.every((entry) => entry.summary.isWellFormed()));
           return {
             ...createEmptyCompactionModelDraft(),
-            uncertainties: evidence.map((entry) => ({
-              priorItemId: null,
-              text: entry.summary,
-              sourceEvidenceIds: [entry.evidenceId],
-              sourceQuotes: [entry.summary],
-            })),
+            constraints: evidence
+              .filter((entry) => /^message \d+ user:/u.test(entry.summary))
+              .map((entry) => ({
+                priorItemId: null,
+                text: entry.summary,
+                sourceEvidenceIds: [entry.evidenceId],
+                sourceQuotes: [entry.summary],
+              })),
+            evidenceReviews: evidence
+              .filter((entry) => /^message \d+ assistant:/u.test(entry.summary))
+              .map((entry) => ({
+                evidenceId: entry.evidenceId,
+                disposition: "irrelevant",
+                reason: "Acknowledgement only",
+              })),
           };
         }),
       });
       const session = await engine.createSession();
       const threadId = session.id;
-      const request = `不要发送消息，只整理草稿。${"😀".repeat(180)}`;
+      const request = `不要发送消息，只整理草稿。${"😀".repeat(scenario === "summarize" ? 80 : 180)}`;
       await drain(session.send(request));
       await drain(session.send(`${request}继续整理`));
       const transcriptBefore = store.listTranscriptMessages(threadId);
@@ -2098,12 +2109,17 @@ for (const scenario of ["summarize", "truncate", "fallback"] as const) {
       );
       const compacted = events.find((event) => event.type === "context-compacted");
       assert.ok(compacted);
-      assert.equal(compacted.removed > 0, scenario !== "fallback");
+      assert.equal(compacted.removed > 0, !holdsHistory, JSON.stringify(events));
       assert.equal(compacted.strategy, scenario === "truncate" ? "truncate" : "summarize");
       assert.equal(draftCalls, scenario === "truncate" ? 0 : 1);
       const checkpoint = store.getLatestCheckpoint(threadId);
-      if (scenario === "fallback") {
-        assert.equal(checkpoint, undefined);
+      if (holdsHistory) {
+        assert.equal(
+          checkpoint,
+          undefined,
+          "failed manual summary must not archive or advance coverage",
+        );
+        assert.equal(store.getContextRecovery(threadId), undefined);
         assert.deepEqual(
           store.getMessages(threadId),
           transcriptBefore.map((entry) => entry.message),
@@ -2149,7 +2165,7 @@ for (const scenario of ["summarize", "truncate", "fallback"] as const) {
       assert.equal(resumedEvents.at(-1)?.type, "message-finish");
       assert.match(prompt, /不要发送消息/u);
       const restoredCheckpoint = store.getLatestCheckpoint(threadId);
-      if (scenario === "fallback") assert.equal(restoredCheckpoint, undefined);
+      if (holdsHistory) assert.equal(restoredCheckpoint?.id, checkpoint?.id);
       else {
         assert.ok(restoredCheckpoint && restoredCheckpoint.version === 2);
         assert.deepEqual(restoredCheckpoint.semanticState, checkpoint?.semanticState);
@@ -2224,6 +2240,8 @@ for (const scenario of ["duplicates", "evidence-overflow"] as const) {
         await drain(session.send("保留当前轮"));
       }
       const transcriptBefore = store.listTranscriptMessages(threadId);
+      const activeBefore = store.getMessages(threadId);
+      const checkpointBefore = store.getLatestCheckpoint(threadId);
       const events: SessionEvent[] = [];
       for await (const event of session.compact("manual")) events.push(event);
       assert.deepEqual(
@@ -2246,8 +2264,11 @@ for (const scenario of ["duplicates", "evidence-overflow"] as const) {
         assert.equal(
           checkpoint.generation,
           1,
-          "invalid evidence must not replace the prior checkpoint",
+          "manual unproven coverage must leave the prior checkpoint intact",
         );
+        assert.deepEqual(checkpoint, checkpointBefore);
+        assert.deepEqual(store.getMessages(threadId), activeBefore);
+        assert.equal(store.getContextRecovery(threadId)?.required ?? false, false);
       }
       assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
       await engine.dispose();
@@ -2272,7 +2293,7 @@ for (const scenario of ["duplicates", "evidence-overflow"] as const) {
         [],
       );
       assert.equal(resumedEvents.at(-1)?.type, "message-finish");
-      assert.match(inferencePrompt, /不要发送消息/u);
+      assertVisibleOrRecoverable(store, threadId, inferencePrompt, "不要发送消息");
       const resumedCheckpoint = store.getLatestCheckpoint(threadId);
       assert.ok(resumedCheckpoint && resumedCheckpoint.version === 2);
       assert.deepEqual(resumedCheckpoint.semanticState, checkpoint.semanticState);
@@ -2491,7 +2512,12 @@ for (const strategy of ["truncate", "summarize"] as const) {
         if (pass > 0 && compacted.checkpointGeneration === undefined) break;
         assert.equal(compacted.checkpointGeneration, pass + 1);
         assert.equal(compacted.strategy, strategy);
-        if (strategy === "summarize") assert.equal(compacted.checkpointSummaryStatus, "valid");
+        if (strategy === "summarize") {
+          assert.ok(["valid", "fallback"].includes(compacted.checkpointSummaryStatus!));
+        }
+        if (compacted.checkpointSummaryStatus === "fallback") {
+          assert.equal(store.getContextRecovery(threadId)?.required, true);
+        }
         assert.deepEqual(store.getMessages(threadId), session.getMessages());
         assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
         assert.deepEqual(store.listToolExecutions(threadId), executionsBefore);
@@ -2536,7 +2562,12 @@ for (const strategy of ["truncate", "summarize"] as const) {
       );
       assert.equal(events.at(-1)?.type, "message-finish");
       assert.equal(prompts.length, 1);
-      assert.match(JSON.stringify(prompts[0]?.prompt), /不要发送消息/u);
+      assertVisibleOrRecoverable(
+        store,
+        threadId,
+        JSON.stringify(prompts[0]?.prompt),
+        "不要发送消息",
+      );
       assert.equal(toolCalls, 0);
       assert.deepEqual(store.listToolExecutions(threadId), executionsBefore);
     } finally {
@@ -3523,7 +3554,7 @@ test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark �
 
     assert.match(semanticPrompt, /message 40 user: current-after-v1/u);
     assert.match(semanticPrompt, /message 41 assistant: current-after-v1-answer/u);
-    assert.match(semanticPrompt, new RegExp(legacyMarker, "u"));
+    assert.doesNotMatch(semanticPrompt, new RegExp(legacyMarker, "u"));
     assert.doesNotMatch(semanticPrompt, /message 0 user: archived-user-0/u);
     assert.equal(events.find((event) => event.type === "context-compacted")?.removed, 4);
     const checkpoint = store.getLatestCheckpoint(threadId);
@@ -3542,8 +3573,13 @@ test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark �
           item.sourceQuotes.some((quote) => quote.includes(legacyMarker)) &&
           item.provenance.every((reference) => reference.kind === "legacy_snapshot"),
       ),
-      true,
+      false,
     );
+    const historical = store
+      .getSemanticLedgerRows(threadId)
+      .filter((row) => row.item_json.includes(legacyMarker));
+    assert.ok(historical.length > 0);
+    assert.ok(historical.every((row) => row.status === "historical_unknown"));
     assert.equal(checkpoint.semanticState.goal?.text.includes(legacyMarker) ?? false, false);
     assert.equal(
       [
@@ -3559,7 +3595,7 @@ test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark �
       { role: "assistant", content: "current-after-v1-answer" },
     ]);
     await drain(session.send("continue-after-v1-migration"));
-    assert.match(recoveryPrompt, new RegExp(legacyMarker, "u"));
+    assert.doesNotMatch(recoveryPrompt, new RegExp(legacyMarker, "u"));
 
     const archivedLegacyEntries = store
       .listTranscriptMessages(threadId, { limit: 500 })
@@ -3621,10 +3657,11 @@ test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark �
     assert.ok(denseCheckpoint);
     assert.equal(denseCheckpoint.version, 2);
     await drain(denseSession.send("verify dense recovery"));
-    assert.match(
-      denseRecoveryPrompt,
-      new RegExp(legacyMarker, "u"),
-      "dense compaction must retain the prior fact rather than evict it for space",
+    assert.doesNotMatch(denseRecoveryPrompt, new RegExp(legacyMarker, "u"));
+    assert.ok(
+      denseStore
+        .getSemanticLedgerRows(threadId)
+        .some((row) => row.status === "historical_unknown" && row.item_json.includes(legacyMarker)),
     );
 
     let checkpointId: string | undefined = denseCheckpoint.id;
@@ -3666,7 +3703,7 @@ test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark �
   }
 });
 
-test("ConversationEngine 无法在 reminder 完整投影 V1 snapshot 时保留原 checkpoint 与消息", async () => {
+test("ConversationEngine V1 snapshot 超出 reminder 时完整归档且不占用活跃 uncertainty", async () => {
   const dir = tempDir();
   const config = rollConfigSchema.parse({
     llm: {
@@ -3791,16 +3828,22 @@ test("ConversationEngine 无法在 reminder 完整投影 V1 snapshot 时保留�
     }
 
     assert.equal(draftCalls, 1);
-    assert.equal(events.find((event) => event.type === "context-compacted")?.removed, 0);
-    assert.equal(store.getLatestCheckpoint(threadId)?.version, 1);
-    assert.equal(
+    assert.ok(events.some((event) => event.type === "context-compacted" && event.removed > 0));
+    assert.equal(store.getLatestCheckpoint(threadId)?.version, 2);
+    assert.equal(store.getLatestCheckpoint(threadId)?.version, 2);
+    const historical = store
+      .getSemanticLedgerRows(threadId)
+      .filter((row) => row.status === "historical_unknown");
+    assert.ok(historical.length > 40);
+    assert.ok(historical.some((row) => row.item_json.includes(unmigratedMarker)));
+    assert.ok(
       store
-        .getMessages(threadId)
+        .listTranscriptMessages(threadId, { limit: 500 })
         .some(
-          (message) =>
-            typeof message.content === "string" && message.content.includes(unmigratedMarker),
+          (row) =>
+            row.provenance === "legacy_snapshot" &&
+            JSON.stringify(row.message).includes(unmigratedMarker),
         ),
-      true,
     );
 
     await engine.dispose();
@@ -4101,7 +4144,7 @@ test("ConversationEngine 连续 compaction/resume 继承硬约束，并由后续
     await drain(finalSession.send("继续"));
 
     assert.match(finalPrompt, /现在允许修改公开 API/u);
-    assert.match(finalPrompt, /semanticState 是 V2 恢复事实源/u);
+    assert.match(finalPrompt, /semanticState.*omittedCounts/u);
     assert.match(finalPrompt, /\\"constraints\\":\[\]/u);
     assert.match(finalPrompt, new RegExp(third.id, "u"));
     assert.deepEqual(finalStore.getLatestCheckpoint(threadId)?.constraints, []);
@@ -5821,3 +5864,30 @@ test("buildSessionExecSettings 只在提供 onCommandSpawn 时写入该字段", 
   });
   assert.equal("onCommandSpawn" in without, false);
 });
+
+function assertVisibleOrRecoverable(
+  store: ThreadStore,
+  threadId: string,
+  prompt: string,
+  fact: string,
+): void {
+  if (prompt.includes(fact)) return;
+  assert.equal(
+    store.getContextRecovery(threadId)?.required,
+    true,
+    "omitted fact keeps write gate closed",
+  );
+  assert.match(prompt, /roll__context/u);
+  const checkpoint = store.getLatestCheckpoint(threadId)!;
+  const found = (["semantic", "message"] as const).some(
+    (kind) =>
+      store.readContext(
+        threadId,
+        contextReadInputSchema.parse({ checkpointId: checkpoint.id, kind, query: fact }),
+      ).entries.length > 0,
+  );
+  assert.ok(
+    found,
+    "omitted fact is discoverable through the same bounded readback interface used by the model",
+  );
+}

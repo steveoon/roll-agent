@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { ModelMessage } from "ai";
 import {
   buildCompactionCheckpointReminder,
+  projectCompactionCheckpointReminder,
   buildCompactionToolState,
   compactionCheckpointV1Schema,
   createCompactionCheckpoint,
@@ -203,7 +204,7 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
   assert.match(reminder, /"executionState":"not_executed"/u);
   assert.match(reminder, /roll__transcript/u);
   assert.match(reminder, /kind="message".*kind="tool_execution"/u);
-  assert.ok([...reminder].length <= 32_000);
+  assert.ok(reminder.length <= 8_000);
   assert.doesNotMatch(
     reminder,
     /message_json|record_json|raw transcript content|secret-command|secret-outcome-reason/u,
@@ -277,7 +278,7 @@ test("Checkpoint reminder 对完整 payload 施加硬预算并显式报告省略
   });
 
   const reminder = buildCompactionCheckpointReminder(checkpoint);
-  assert.ok([...reminder].length <= 32_000);
+  assert.ok(reminder.length <= 8_000);
   assert.match(reminder, /"resources":24/u);
   assert.doesNotMatch(reminder, /x{2000}/u);
 });
@@ -352,6 +353,7 @@ test("findLatestRealUserGoal 跳过仅含礼貌确认前缀的续接，但保留
     "嗯 接着做",
     "收到，那继续处理",
     "Okay, proceed with it",
+    "Continue the same project; no new requirements.",
   ];
   for (const content of informationFree) {
     assert.deepEqual(
@@ -366,6 +368,7 @@ test("findLatestRealUserGoal 跳过仅含礼貌确认前缀的续接，但保留
     "好的，继续，但不要改 API",
     "嗯 接着做，并补测试",
     "OKR，继续",
+    "Continue the same project; no new requirements. Also change port 1234.",
     "继续处理资源排序",
   ];
   for (const content of substantive) {
@@ -663,3 +666,49 @@ test("Draft schema 拒绝把未知 Tool outcome 写入持久化 checkpoint", () 
     /Invalid enum value|Invalid option/u,
   );
 });
+
+for (const memo of [undefined, "Recovered context: " + '\\"\n🧭'.repeat(550)]) {
+  test(`whole reminder bounds escaped facts, metadata and recovery memo (${memo?.length ?? 0})`, () => {
+    const constraints = Array.from({ length: 40 }, (_, i) => ({
+      quote: `constraint ${i}: ` + '\\"\n🧭'.repeat(50),
+      sourceSequence: i,
+    }));
+    const state = replaceCompactionSemanticConstraints(
+      createEmptyCompactionSemanticState(),
+      constraints,
+    );
+    const checkpoint = createCompactionCheckpoint({
+      generation: 9,
+      draft: draft({
+        constraints: state.constraints.map((item) => ({
+          quote: item.text,
+          sourceSequence: item.provenance[0]!.messageSequence!,
+        })),
+      }),
+      semanticState: state,
+      transcript: {
+        messages: { fromSequenceExclusive: -1, throughSequence: 39 },
+        toolExecutions: { fromSequenceExclusive: -1, throughSequence: -1 },
+        completeness: "complete",
+      },
+    });
+    const result = projectCompactionCheckpointReminder(
+      checkpoint,
+      undefined,
+      "roll__transcript",
+      "roll__context",
+      memo,
+    );
+    assert.ok(result.text.length <= 8000, String(result.text.length));
+    assert.match(result.text, /roll__context/u);
+    assert.match(result.text, /nextCursor/u);
+    assert.match(result.text, /nextOffset/u);
+    assert.ok(result.semanticProjection!.omittedCounts.constraint > 0);
+    const payload: unknown = JSON.parse(result.text.split("\n")[1]!);
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(payload, "semanticState")?.value,
+      result.semanticProjection,
+      "retention checks use the actual serialized projection",
+    );
+  });
+}
