@@ -343,6 +343,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const notice = (text: string): void => {
     commitHistory({ kind: "notice", id: randomUUID(), text });
   };
+  const connectionNotice = useCallback(
+    (text: string): void => {
+      commitHistory({ kind: "notice", id: randomUUID(), text }, true);
+    },
+    [commitHistory],
+  );
   const openModelPicker = (): boolean => {
     if (!modelSwitching) {
       return false;
@@ -990,7 +996,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(StatusLine, { status: state.status, width: layout.columns })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
-    props.connection ? h(ConnectionNotice, { connection: props.connection }) : null,
+    props.connection
+      ? h(ConnectionNotice, { connection: props.connection, onNotice: connectionNotice })
+      : null,
     slashPopupActive
       ? h(SlashPopup, {
           matches,

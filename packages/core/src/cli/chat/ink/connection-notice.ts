@@ -1,16 +1,25 @@
-import { createElement as h, useEffect, useSyncExternalStore } from "react";
-import type { ReactElement } from "react";
-import { Box, Text } from "ink";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 
 export function ConnectionNotice({
   connection,
+  onNotice,
 }: {
   readonly connection: ChatConnection;
-}): ReactElement {
+  readonly onNotice: (message: string) => void;
+}): null {
   const message = useSyncExternalStore(connection.subscribe, connection.getSnapshot);
+  const lastNotice = useRef<{ connection: ChatConnection; message: string } | undefined>(undefined);
   useEffect(() => {
     connection.start();
   }, [connection]);
-  return h(Box, { flexShrink: 0 }, h(Text, { dimColor: true }, message));
+  useEffect(() => {
+    if (lastNotice.current?.connection === connection && lastNotice.current.message === message) {
+      return;
+    }
+    lastNotice.current = { connection, message };
+    // Connection updates belong in the transcript, not in the permanent input chrome.
+    if (message) onNotice(message);
+  }, [connection, message, onNotice]);
+  return null;
 }

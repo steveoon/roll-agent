@@ -150,7 +150,11 @@ export type ChatUiAction =
     }
   | { readonly type: "set-thinking-display"; readonly value: ChatThinkingDisplay }
   | { readonly type: "set-auto"; readonly value: boolean }
-  | { readonly type: "commit-history"; readonly item: HistoryItem }
+  | {
+      readonly type: "commit-history";
+      readonly item: HistoryItem;
+      readonly preserveDraft?: boolean;
+    }
   | { readonly type: "start-compaction" }
   | {
       readonly type: "session-event";
@@ -594,7 +598,11 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
     case "set-auto":
       return { ...state, status: { ...state.status, autoApprove: action.value } };
     case "commit-history":
-      return { ...state, history: [...state.history, action.item], draft: "" };
+      return {
+        ...state,
+        history: [...state.history, action.item],
+        draft: action.preserveDraft ? state.draft : "",
+      };
     case "start-compaction":
       return {
         ...state,

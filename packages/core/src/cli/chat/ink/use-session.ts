@@ -51,7 +51,7 @@ export interface UseSessionResult {
   readonly setDiffDisplay: (value: DiffDisplayMode) => void;
   readonly setAutoMode: (value: boolean) => void;
   readonly toggleAutoMode: () => void;
-  readonly commitHistory: (item: HistoryItem) => void;
+  readonly commitHistory: (item: HistoryItem, preserveDraft?: boolean) => void;
 }
 
 const STREAM_FLUSH_MS = 32;
@@ -359,8 +359,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     setAutoMode(!autoModeRef.current);
   }, [setAutoMode]);
 
-  const commitHistory = useCallback((item: HistoryItem) => {
-    dispatch({ type: "commit-history", item });
+  const commitHistory = useCallback((item: HistoryItem, preserveDraft = false) => {
+    dispatch({ type: "commit-history", item, preserveDraft });
   }, []);
 
   return {
