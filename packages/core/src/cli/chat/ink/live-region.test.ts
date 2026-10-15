@@ -30,6 +30,7 @@ test("LiveRegion renders streaming assistant text as Markdown preview", () => {
     reasoningStartedAt: undefined,
     thinkTagOpen: false,
     activeTools: [],
+    generatingTools: [],
     compacting: false,
     producedOutput: true,
   };
@@ -54,6 +55,7 @@ test("LiveRegion keeps thinking dim while previewing visible Markdown", () => {
     reasoningStartedAt: undefined,
     thinkTagOpen: false,
     activeTools: [],
+    generatingTools: [],
     compacting: false,
     producedOutput: true,
   };
@@ -80,6 +82,7 @@ test("LiveRegion 活动工具行在窄宽度内单行截断 args，不会多出�
         args: '{"file_path":"/Users/someone/very/long/path/to/a/file.txt","content":"…"}',
       },
     ],
+    generatingTools: [],
     compacting: false,
     producedOutput: false,
   };

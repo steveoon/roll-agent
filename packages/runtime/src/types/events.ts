@@ -34,6 +34,11 @@ export type SessionEvent =
     }
   | { readonly type: "reasoning-end"; readonly reasoningId: string }
   | {
+      /** Ephemeral generation metadata, not execution; never projected onto Runtime wire events. */
+      readonly type: "tool-input-activity";
+      readonly calls: readonly { readonly toolCallId: string; readonly name?: string }[];
+    }
+  | {
       readonly type: "tool-call";
       readonly toolCallId: string;
       readonly agentName: string;

@@ -6,6 +6,7 @@ export const TURN_ACTIVITY_KINDS = {
   reasoning: "reasoning",
   replying: "replying",
   tool: "tool",
+  toolInput: "tool-input",
   compacting: "compacting",
   waitingUser: "waiting-user",
   cancelling: "cancelling",
@@ -65,6 +66,20 @@ export function resolveTurnActivity(state: ChatUiState): TurnActivity | undefine
     const suffix = extra > 0 ? ` 等 ${String(state.live.activeTools.length)} 项` : "";
     return activity(TURN_ACTIVITY_KINDS.tool, `执行 ${firstTool.name}${suffix}…`, {
       key: `tool:${state.live.activeTools.map((tool) => tool.toolCallId).join(",")}`,
+    });
+  }
+  const firstInput = state.live.generatingTools[0];
+  if (firstInput !== undefined) {
+    const safeName =
+      firstInput.name !== undefined && /^[a-zA-Z0-9_.-]{1,160}$/.test(firstInput.name)
+        ? ` ${firstInput.name}`
+        : "";
+    const extra =
+      state.live.generatingTools.length > 1
+        ? ` 等 ${String(state.live.generatingTools.length)} 项`
+        : "";
+    return activity(TURN_ACTIVITY_KINDS.toolInput, `正在生成工具参数${safeName}${extra}…`, {
+      key: `tool-input:${state.live.generatingTools.map((call) => call.toolCallId).join(",")}`,
     });
   }
   if (state.live.reasoningActive) {

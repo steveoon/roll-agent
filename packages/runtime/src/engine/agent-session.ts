@@ -138,6 +138,7 @@ import {
   readCompactionSummaryPayload,
 } from "./compactor.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
+import { ToolInputActivityTracker } from "./tool-input-activity.ts";
 import {
   MaintenanceEpisode,
   MaintenanceLimitError,
@@ -1995,6 +1996,17 @@ export class AgentSession {
           turnStartedAt,
           { messages: this.messages.length },
         );
+        const toolInputActivity = new ToolInputActivityTracker(
+          (name) => {
+            const route = this.registry.resolve(name);
+            return route === undefined ? undefined : `${route.agentName}.${route.toolName}`;
+          },
+          (event) => queue.push(event),
+        );
+        const clearToolInputActivity = (): void => toolInputActivity.clear();
+        activeTurn.abortController.signal.addEventListener("abort", clearToolInputActivity, {
+          once: true,
+        });
         try {
           for await (const part of result.fullStream) {
             if (this.closed) {
@@ -2008,6 +2020,15 @@ export class AgentSession {
               this.debug(queue, "model", "first stream event", turnStartedAt, { part: part.type });
             }
             switch (part.type) {
+              case "tool-input-start":
+                toolInputActivity.start(part.id, part.toolName);
+                break;
+              case "tool-input-delta":
+                toolInputActivity.delta(part.id);
+                break;
+              case "tool-input-end":
+                toolInputActivity.end(part.id);
+                break;
               case "reasoning-start":
                 queue.push({ type: "reasoning-start", reasoningId: part.id });
                 break;
@@ -2041,6 +2062,7 @@ export class AgentSession {
                 break;
               }
               case "tool-call": {
+                toolInputActivity.end(part.toolCallId);
                 sawToolCall = true;
                 pendingEchoText = "";
                 const pending = this.trackPendingToolCall(
@@ -2129,6 +2151,7 @@ export class AgentSession {
                 break;
               }
               case "tool-error": {
+                toolInputActivity.end(part.toolCallId);
                 const route = this.registry.resolve(part.toolName);
                 const outcomeKind = toolErrorOutcomeKind(part.error);
                 const friendly =
@@ -2171,6 +2194,7 @@ export class AgentSession {
                 break;
               }
               case "finish-step": {
+                toolInputActivity.clear();
                 const stepUsage = toSessionUsage(part.usage);
                 if (stepUsage.inputTokens !== undefined) {
                   contextInputTokens = stepUsage.inputTokens;
@@ -2200,6 +2224,7 @@ export class AgentSession {
                 totalUsage = toSessionUsage(part.totalUsage);
                 break;
               case "error":
+                toolInputActivity.clear();
                 if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(part.error)) {
                   activeTurn.aborted = true;
                   activeTurn.cancellationReason = resolveCancellationReason(
@@ -2212,6 +2237,7 @@ export class AgentSession {
                 streamError = errorMessage(part.error);
                 break;
               case "abort":
+                toolInputActivity.clear();
                 activeTurn.aborted = true;
                 activeTurn.cancellationReason = resolveCancellationReason(
                   activeTurn.cancellationReason,
@@ -2234,6 +2260,8 @@ export class AgentSession {
             streamError = errorMessage(error);
           }
         } finally {
+          activeTurn.abortController.signal.removeEventListener("abort", clearToolInputActivity);
+          toolInputActivity.dispose();
           this.clearDebugTimer(firstPartTimer);
         }
         this.debug(queue, "model", "fullStream finished", turnStartedAt, {

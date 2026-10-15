@@ -81,6 +81,7 @@ export interface LiveState {
   readonly reasoningStartedAt: number | undefined;
   readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
+  readonly generatingTools: Extract<SessionEvent, { type: "tool-input-activity" }>["calls"];
   readonly compacting: boolean;
   readonly producedOutput: boolean;
 }
@@ -183,6 +184,7 @@ const EMPTY_LIVE: LiveState = {
   reasoningStartedAt: undefined,
   thinkTagOpen: false,
   activeTools: [],
+  generatingTools: [],
   compacting: false,
   producedOutput: false,
 };
@@ -380,10 +382,14 @@ function applySessionEvent(
 ): ChatUiState {
   switch (event.type) {
     case "message-start":
-      return state;
+      return { ...state, live: { ...state.live, generatingTools: [] } };
+    case "tool-input-activity":
+      if (state.phase === CHAT_PHASES.idle || state.phase === CHAT_PHASES.cancelling) return state;
+      return { ...state, live: { ...state.live, generatingTools: event.calls } };
     case "step-finish":
       return {
         ...state,
+        live: { ...state.live, generatingTools: [] },
         status: {
           ...state.status,
           ...(event.usage?.inputTokens === undefined
@@ -430,6 +436,9 @@ function applySessionEvent(
         live: {
           ...current.live,
           producedOutput: true,
+          generatingTools: current.live.generatingTools.filter(
+            (call) => call.toolCallId !== event.toolCallId,
+          ),
           activeTools: [
             ...current.live.activeTools,
             {
@@ -474,6 +483,7 @@ function applySessionEvent(
           ...(event.diff !== undefined ? { diff: event.diff } : {}),
         },
         pendingUserInput: undefined,
+        live: { ...state.live, generatingTools: [] },
       };
     }
     case "user-input-required":
@@ -488,7 +498,7 @@ function applySessionEvent(
         ? { ...state, phase: CHAT_PHASES.busy, pendingUserInput: undefined }
         : state;
     case "compaction-start":
-      return { ...state, live: { ...state.live, compacting: true } };
+      return { ...state, live: { ...state.live, compacting: true, generatingTools: [] } };
     case "context-compacted":
       return {
         ...state,
@@ -623,6 +633,7 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return {
         ...state,
         phase: "cancelling",
+        live: { ...state.live, generatingTools: [] },
         pendingConfirm: undefined,
         pendingUserInput: undefined,
       };

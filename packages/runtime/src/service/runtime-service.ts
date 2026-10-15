@@ -1694,6 +1694,7 @@ export class RuntimeService {
         };
         break;
       case "debug":
+      case "tool-input-activity": // UI-only metadata: not durable Runtime Protocol events.
       case "reasoning-start":
       case "reasoning-end":
       case "step-finish":

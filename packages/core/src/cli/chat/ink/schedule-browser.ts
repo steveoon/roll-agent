@@ -32,6 +32,7 @@ const EMPTY_LIVE: LiveState = {
   reasoningStartedAt: undefined,
   thinkTagOpen: false,
   activeTools: [],
+  generatingTools: [],
   compacting: false,
   producedOutput: false,
 };
