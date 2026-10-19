@@ -1,7 +1,7 @@
 # ChatGPT 订阅最小接入验证记录
 
 验证环境：2026-10-10，macOS，Node 24.21.0，pnpm 11.24.0；独立 worktree 基于 `344750ab`。
-实现方案见 [保存的方案](../plans/2026-10-10-chatgpt-subscription.md)，使用说明见 [订阅聊天指南](../how-to-use-chatgpt-subscription.md)。
+当前使用方法与支持边界见[订阅聊天指南](../how-to-use-chatgpt-subscription.md)；本报告保留该次实现的验证记录。
 
 ## 自动化验证
 

@@ -1,5 +1,11 @@
 # Generic browser decision loop experiment
 
+> Archived on 2026-10-19. This historical plan is retained for its comparison method.
+> The elapsed-time reduction targets of at least 50%, ideally 80%, remain unaccepted;
+> this document does not establish a measured performance improvement.
+> For current behavior, see the [execution context reference](../reference-browser-execution-context.md)
+> and [operation modes](../design/browser-operate-engine-mode.md).
+
 Worktree: `codex/jev-browser-benchmark`, based on `bfbbe77` plus the recorded form-recovery baseline patch. Original checkout and running baseline service remain separate.
 
 ## Implementation
