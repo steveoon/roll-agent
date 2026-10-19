@@ -1666,7 +1666,7 @@ test("ChatApp preserves model-selected and manually changed efforts across resum
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
     stdin.write("\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第二会话/));
-    assert.match(plain(lastFrame() ?? ""), /🧠 low/);
+    assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} low`));
     await delay(20);
     stdin.write("/effort\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：low/));
@@ -1677,7 +1677,7 @@ test("ChatApp preserves model-selected and manually changed efforts across resum
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
     stdin.write("\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第三会话/));
-    assert.match(plain(lastFrame() ?? ""), /🧠 medium/);
+    assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} medium`));
     await delay(20);
     stdin.write("/effort\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：medium/));
