@@ -701,3 +701,19 @@ Protocol 1.5 operation views and tool.completed events carry an appOutput descri
 1.6 的完整 Snapshot 和 recovery projection 均包含必需的 `contextRecovery`，无恢复记录时为 `null`；否则为 `{ checkpointId, required, unextracted, requiredItemCount }`。`required` 表示写工具尚未恢复，`unextracted` 表示归档原文尚未完成语义提取，计数包含当前目标和全部活跃约束。此对象不包含模型笔记、原文或 receipt。
 
 `context.recovery.changed` 是 durable View Event，进入、退出及 checkpoint 替换均更新投影；SQLite 重开和 `runtime.events.resume` 使用相同事件。旧版 Snapshot 剥离该字段，旧版事件投影为 `capabilities.changed`，保留 eventId/cursor 的连续性。恢复状态不等于用户授权，原有 policy 和审批继续生效。
+
+
+## 文件审批完整预览（1.6 可选扩展）
+
+`approval.preview` 是只读方法，读取仍待处理审批的完整变更快照，不触发写入或批准。
+`PendingApproval.preview.fullDiffAvailable`为 true 时客户端可显示查看入口。
+
+参数：`{ threadId, turnId, approvalId, offset?, maxChars? }`。offset 默认为 0，maxChars 默认为 12000、最大 32000。
+响应：`{ text, totalChars, nextOffset }`。偏移按 UTF-16 code units 计算；nextOffset 为 null 表示结束。
+服务端在切页前对整份快照执行既有脱敏，客户端按返回的 nextOffset 续读。各页来自同一审批快照，不读取当前文件。
+审批已结束、过期、无完整预览或身份不匹配时返回 APPROVAL_NOT_FOUND。完整正文不写入持久事件或账本。
+
+`preview.diff` 保持首屏有界。`coarse: true` 表示未生成逐行 diff，此时 removed/added 是修改前后总行数，
+完整视图为明确标记的原文和新文；UI 应显示“全文对照”，不能将这些数字当作精细增删统计。
+文件内容版本变化会使原审批失效，即使同批次其他工具更新了 read tracker，也需要重新读取、预览与审批。
+本方法不扩展 1.0–1.5 或 legacy RPC 的方法集，也不隐式扩展 Relay 的远端访问白名单。

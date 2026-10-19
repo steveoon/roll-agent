@@ -14,6 +14,7 @@ import {
   getFileChangeDisplay,
   parseRuntimeMethodResultForVersion,
   requestIdSchema,
+  turnIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
   type RuntimeEventEnvelopeV16,
@@ -100,7 +101,10 @@ function execution(): ToolExecutionRecord {
   });
 }
 
-function createFixture(store: ThreadStore): {
+function createFixture(
+  store: ThreadStore,
+  review?: { readonly text: string; readonly expiresAt: string },
+): {
   readonly engine: RuntimeServiceEngine;
   readonly session: RuntimeServiceSession;
   readonly sendCount: () => number;
@@ -135,7 +139,8 @@ function createFixture(store: ThreadStore): {
           apiKey: "secret-preview",
           providerOptions: { configuration: APPROVAL_PROVIDER_OPTIONS_SENTINEL },
         },
-        expiresAt: "2026-07-28T12:05:00.000Z",
+        expiresAt: review?.expiresAt ?? "2026-07-28T12:05:00.000Z",
+        ...(review !== undefined ? { fullDiff: review.text } : {}),
         reason: "requires approval",
         explanation: "写入用户请求的文件，以完成当前任务。",
         diff: {
@@ -2202,6 +2207,70 @@ test("RuntimeService replays legacy recovery events while current snapshots have
         .map((entry) => entry.event),
       changes.map((entry) => entry.event),
     );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("完整审批预览按页返回同一快照，不进入持久事件，审批结束即不可读", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fullDiff = `${"unchanged context\n".repeat(1000)}LAST_REVIEW_CHANGE\nAuthorization: Bearer approval-secret-value-123456789`;
+  const fixture = createFixture(store, { text: fullDiff, expiresAt: "2099-01-01T00:00:00.000Z" });
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "test" });
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "review-test", version: "1" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "edit" },
+      }),
+    );
+    await nextTick();
+    const params = runtimeMethodSchemas["approval.preview"].params.parse({
+      threadId: IDS.thread,
+      turnId: IDS.firstTurn,
+      approvalId: IDS.approval,
+      maxChars: 17,
+    });
+    let offset: number | null = 0;
+    let joined = "";
+    while (offset !== null) {
+      const page = service.getApprovalPreview({ ...params, offset });
+      assert.ok(page.text.length <= 17);
+      joined += page.text;
+      offset = page.nextOffset;
+    }
+    assert.match(joined, /LAST_REVIEW_CHANGE/u);
+    assert.doesNotMatch(joined, /approval-secret-value-123456789/u);
+    assert.equal(service.getApprovalPreview(params).text, joined.slice(0, 17));
+    const wire = JSON.stringify(store.resumeRuntimeEvents(IDS.thread, null));
+    assert.match(wire, /fullDiffAvailable/u);
+    assert.doesNotMatch(wire, /LAST_REVIEW_CHANGE/u);
+    assert.throws(
+      () => service.getApprovalPreview({ ...params, turnId: turnIdSchema.parse(IDS.secondTurn) }),
+      /不存在或已失效/u,
+    );
+    await service.respondApproval(
+      runtimeMethodSchemas["approval.respond"].params.parse({
+        requestId: IDS.requestApprove,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        approvalId: IDS.approval,
+        decision: "reject",
+      }),
+    );
+    assert.throws(() => service.getApprovalPreview(params), /不存在或已失效/u);
   } finally {
     await service.close();
     store.close();

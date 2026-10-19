@@ -114,6 +114,7 @@ export interface PendingConfirm {
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
   readonly diff?: FileChangeDiff;
+  readonly fullDiff?: string;
 }
 
 export interface ConfirmDecision {
@@ -482,6 +483,7 @@ function applySessionEvent(
             ? { sessionGrantLabel: event.sessionGrantLabel }
             : {}),
           ...(event.diff !== undefined ? { diff: event.diff } : {}),
+          ...(event.fullDiff !== undefined ? { fullDiff: event.fullDiff } : {}),
         },
         pendingUserInput: undefined,
         live: { ...state.live, generatingTools: [] },

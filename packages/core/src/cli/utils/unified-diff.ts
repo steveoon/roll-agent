@@ -291,13 +291,22 @@ export function gutterNumber(line: DiffLine): number | undefined {
 }
 
 export function formatDiffStats(diff: FileChangeDiff): string {
+  if (diff.coarse === true) {
+    return `原文 ${String(diff.removed)} 行 → 新文 ${String(diff.added)} 行`;
+  }
   return `+${String(diff.added)} −${String(diff.removed)}`;
 }
 
 export function formatDiffHeader(diff: FileChangeDiff): string {
   const tags = [
     ...(diff.change === "create" ? ["新建"] : []),
-    ...(diff.unified === undefined ? ["正文省略（文件过大）"] : diff.truncated ? ["已截断"] : []),
+    ...(diff.coarse === true
+      ? ["全文对照（逐行 diff 未生成）"]
+      : diff.unified === undefined
+        ? ["正文省略（文件过大）"]
+        : diff.truncated
+          ? ["已截断"]
+          : []),
   ];
   return [sanitizeForDisplay(diff.path), formatDiffStats(diff), ...tags].join("  ");
 }

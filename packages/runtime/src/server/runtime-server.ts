@@ -319,7 +319,12 @@ export class RuntimeServer {
           this.sendNotificationOrThrow({
             jsonrpc: "2.0",
             method: EVENT_NOTIFICATION,
-            params: { sessionId: params.sessionId, event },
+            params: {
+              sessionId: params.sessionId,
+              // Full review text is available through Runtime 1.6 approval.preview only.
+              event:
+                event.type === "confirmation-required" ? { ...event, fullDiff: undefined } : event,
+            },
           });
         }
         return { status: "completed" };

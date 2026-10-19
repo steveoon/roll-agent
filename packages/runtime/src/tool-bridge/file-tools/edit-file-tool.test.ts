@@ -9,16 +9,15 @@ import { canonicalFileKey, loadTextFile } from "./file-io.ts";
 import { resolveFileToolsSettings, type ResolvedFileToolsSettings } from "./settings.ts";
 import { buildEditFileTool, executeEditFile } from "./edit-file-tool.ts";
 import { buildWriteFileTool } from "./write-file-tool.ts";
-import { planEdits } from "./edit-plan.ts";
-import { describeFileChange } from "./file-change-result.ts";
 import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
-import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import type { ApprovalDecision } from "../../approval/approval-gate.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
+import type { FileWriteApproval } from "./file-write-state.ts";
+import { buildFileChangeDiff } from "./text-diff.ts";
 
 interface Fixture {
   readonly workdir: string;
@@ -404,7 +403,7 @@ test("edit_file 拒绝审批后文件未写入", async () => {
   assert.equal(readFileSync(f.path, "utf8"), "keep\n");
 });
 
-test("edit_file 内容相关的失败（未读取 / 不匹配）不在审批前短路：仍走审批但不带 diff，执行阶段照旧失败", async () => {
+test("edit_file 内容相关的失败（未读取 / 不匹配）在审批前拒绝", async () => {
   const unread = fixture("abc\n");
   const approvals: ApprovalRequest[] = [];
   const unreadTool = buildEditFixture(unread, approvals).roll__edit_file;
@@ -415,8 +414,7 @@ test("edit_file 内容相关的失败（未读取 / 不匹配）不在审批前�
   )) as NormalizedToolResult;
   assert.equal(unreadResult.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
   assert.match(String(unreadResult.display), /尚未读取过/u);
-  assert.equal(approvals.length, 1);
-  assert.equal(Object.hasOwn(approvals[0] ?? {}, "diff"), false);
+  assert.equal(approvals.length, 0);
 
   const mismatch = fixture("abc\n");
   markRead(mismatch);
@@ -427,8 +425,7 @@ test("edit_file 内容相关的失败（未读取 / 不匹配）不在审批前�
     executeOptions(),
   )) as NormalizedToolResult;
   assert.equal(mismatchResult.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
-  assert.equal(approvals.length, 2);
-  assert.equal(Object.hasOwn(approvals[1] ?? {}, "diff"), false);
+  assert.equal(approvals.length, 0);
   assert.equal(readFileSync(mismatch.path, "utf8"), "abc\n");
 });
 
@@ -475,7 +472,7 @@ test("edit_file 工作目录外路径在策略门之前不触碰文件系统：�
 test("edit_file 执行时的实际变更与审批预览不一致则拒绝写入", async () => {
   const f = fixture("hello world\n");
   markRead(f);
-  const previewed = executeEditFilePreviewFixture(f);
+  const previewed = executeEditFilePreviewFixture(f, "hello", "goodbye");
   writeFileSync(f.path, "hello universe\n", "utf8");
   f.tracker.recordKnownContent(canonicalFileKey(f.path), "hello universe\n");
   const result = executeEditFile(
@@ -489,13 +486,10 @@ test("edit_file 执行时的实际变更与审批预览不一致则拒绝写入"
   assert.equal(readFileSync(f.path, "utf8"), "hello universe\n");
 });
 
-test("edit_file 预览后其它位置发生无关改动（同批次独立编辑）时，相同的增删行仍可写入", async () => {
+test("edit_file 预览后其它位置发生无关改动时，旧审批失效", async () => {
   const f = fixture("first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\neighth\nninth\ntenth\n");
   markRead(f);
-  const previewed = executeEditFilePreviewFixture(f, {
-    file_path: "target.txt",
-    edits: [{ old_string: "ninth", new_string: "NINTH" }],
-  });
+  const previewed = executeEditFilePreviewFixture(f, "ninth", "NINTH");
   const sibling = f.tracker;
   const afterSibling = readFileSync(f.path, "utf8").replace("first\n", "FIRST\nextra\n");
   writeFileSync(f.path, afterSibling, "utf8");
@@ -506,11 +500,11 @@ test("edit_file 预览后其它位置发生无关改动（同批次独立编辑�
     { file_path: "target.txt", edits: [{ old_string: "ninth", new_string: "NINTH" }] },
     previewed,
   );
-  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
-  assert.match(readFileSync(f.path, "utf8"), /FIRST\nextra\n[\s\S]*NINTH\n/u);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(readFileSync(f.path, "utf8"), afterSibling);
 });
 
-test("edit_file 同一批次内 write_file 改写后再 edit_file：预览与实际不一致的编辑被阻止，链式依赖的编辑照常成功", async () => {
+test("edit_file 同一批次内 write_file 改写后再 edit_file：预览与实际不一致的编辑被阻止，尚不能匹配的链式调用不进入审批", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "edit-tool-batch-"));
   const path = join(workdir, "t.txt");
   writeFileSync(path, "hello world\n", "utf8");
@@ -564,7 +558,7 @@ test("edit_file 同一批次内 write_file 改写后再 edit_file：预览与实
   await coordinator.prepare("e2", "roll__edit_file", chainA);
   await coordinator.prepare("e3", "roll__edit_file", chainB);
   coordinator.sealBatch("b2");
-  assert.equal(Object.hasOwn(approvals.at(-1) ?? {}, "diff"), false);
+  assert.equal(approvals.length, 3);
   const first = (await editTool.execute(chainA, {
     toolCallId: "e2",
     messages: [],
@@ -576,27 +570,26 @@ test("edit_file 同一批次内 write_file 改写后再 edit_file：预览与实
     context: undefined,
   })) as NormalizedToolResult;
   assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
-  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
-  assert.equal(readFileSync(path, "utf8"), "bye all\n");
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(readFileSync(path, "utf8"), "bye universe\n");
 });
 
 function executeEditFilePreviewFixture(
   f: Fixture,
-  input = { file_path: "target.txt", edits: [{ old_string: "hello", new_string: "goodbye" }] },
-): FileChangeDiff {
+  oldText: string,
+  newText: string,
+): FileWriteApproval {
   const loaded = loadTextFile(f.path, { maxFileBytes: f.settings.maxFileBytes });
   assert.ok(loaded.ok);
-  const plan = planEdits(loaded.content, input.edits);
-  assert.ok(plan.ok);
-  const diff = describeFileChange({
-    workdir: f.workdir,
-    inputPath: input.file_path,
-    change: "modify",
-    before: loaded.content,
-    after: plan.next,
-  });
-  assert.ok(diff);
-  return diff;
+  return {
+    baselineDigest: loaded.digest,
+    diff: buildFileChangeDiff({
+      path: "target.txt",
+      change: "modify",
+      before: loaded.content,
+      after: loaded.content.replace(oldText, newText),
+    }),
+  };
 }
 
 test("edit_file 审批期间文件被外部改动则不写入", async () => {

@@ -87,6 +87,8 @@ export type SessionEvent =
       readonly explanation?: string;
       readonly sessionGrantLabel?: string;
       readonly diff?: FileChangeDiff;
+      /** Ephemeral review text; remote transports expose it only through approval.preview. */
+      readonly fullDiff?: string;
     }
   | {
       /** Engine-internal request; Runtime Protocol assigns a separate InteractionId. */

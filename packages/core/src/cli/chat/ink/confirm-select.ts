@@ -6,6 +6,7 @@ import { displayWidth } from "./display-width.ts";
 import { DiffHeader, DiffLineView } from "./diff-view.ts";
 import type { ConfirmDecision } from "./state.ts";
 import { diffBodyLines, diffGutterWidth, formatDiffHeader } from "../../utils/unified-diff.ts";
+import { sanitizeForDisplay } from "../../utils/tool-format.ts";
 
 export interface ConfirmSelectProps {
   readonly prompt: string;
@@ -13,6 +14,7 @@ export interface ConfirmSelectProps {
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
   readonly diff?: FileChangeDiff;
+  readonly fullDiff?: string;
   readonly width: number;
   readonly maxRows: number;
   readonly onDecide: (decision: ConfirmDecision) => void;
@@ -172,6 +174,7 @@ export function ConfirmSelect({
   explanation,
   sessionGrantLabel,
   diff,
+  fullDiff,
   width,
   maxRows,
   onDecide,
@@ -180,18 +183,31 @@ export function ConfirmSelect({
   const boundedRows = Math.max(1, Math.floor(maxRows));
   const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const compactContentWidth = Math.max(1, width);
+  const review = fullDiff ?? diff?.unified;
+  const detailLabel =
+    review === undefined
+      ? "参数"
+      : fullDiff !== undefined || diff?.truncated === false
+        ? "完整变更"
+        : "变更预览";
+  const [detailsPage, setDetailsPage] = useState(0);
+  const detailsOpen = detailsPage > 0;
   const parameterLines = useMemo(
-    () => wrapParameterLines(args, compactContentWidth),
-    [args, compactContentWidth],
+    () =>
+      review !== undefined && !detailsOpen
+        ? []
+        : wrapParameterLines(sanitizeForDisplay(review ?? args), compactContentWidth),
+    [review, args, compactContentWidth, detailsOpen],
   );
   const detailHeader = boundedRows >= 4;
   const detailRows = Math.max(1, boundedRows - 2 - Number(detailHeader));
-  const pageCount = Math.ceil(parameterLines.length / detailRows);
+  const pageCount = Math.max(1, Math.ceil(parameterLines.length / detailRows));
   const canPage =
-    showArgs && boundedRows >= 3 && (parameterLines.length > 1 || displayWidth(args) > width);
-  const [detailsPage, setDetailsPage] = useState(0);
+    (showArgs || review !== undefined) &&
+    boundedRows >= 3 &&
+    (review !== undefined || parameterLines.length > 1 || displayWidth(args) > width);
   const page = canPage ? Math.min(detailsPage, pageCount) : 0;
-  const displayPrompt = canPage ? `PgDn 参数详情 · ${prompt}` : prompt;
+  const displayPrompt = canPage ? `PgDn ${detailLabel}详情 · ${prompt}` : prompt;
   const compactSessionGrantLabel =
     sessionGrantLabel === undefined ? undefined : normalizeInlineText(sessionGrantLabel);
   const compactSessionGrantLabelFits =
@@ -276,7 +292,7 @@ export function ConfirmSelect({
         ? h(
             Text,
             { wrap: "truncate-end" },
-            `参数 ${String(page)}/${String(pageCount)} · PgUp 返回/上一页 · PgDn 下一页`,
+            `${detailLabel} ${String(page)}/${String(pageCount)} · PgUp 返回/上一页 · PgDn 下一页`,
           )
         : null,
       ...parameterLines
@@ -285,7 +301,11 @@ export function ConfirmSelect({
           h(Text, { key: index, dimColor: true, wrap: "truncate-end" }, line || " "),
         ),
       optionRow,
-      h(Text, { dimColor: true, wrap: "truncate-end" }, "←→/y/n 确认 · Esc 取消 · PgUp/PgDn 参数"),
+      h(
+        Text,
+        { dimColor: true, wrap: "truncate-end" },
+        `←→/y/n 确认 · Esc 取消 · PgUp/PgDn ${detailLabel}`,
+      ),
     );
   }
   if (rowPlan !== undefined) {

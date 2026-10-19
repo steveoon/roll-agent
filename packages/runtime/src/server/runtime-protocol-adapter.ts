@@ -426,6 +426,10 @@ export class RuntimeProtocolAdapter {
             request.params,
           ),
         );
+      case RUNTIME_METHODS.approvalPreview:
+        return this.service.getApprovalPreview(
+          runtimeMethodSchemas[RUNTIME_METHODS.approvalPreview].params.parse(request.params),
+        );
       case RUNTIME_METHODS.operationGet: {
         const result = this.service.getOperation(
           runtimeMethodSchemas[RUNTIME_METHODS.operationGet].params.parse(request.params),

@@ -2239,3 +2239,28 @@ test("Protocol 1.4 golden fixtures keep attachment requests, responses and snaps
   const event = fixtureV14("valid-runtime-durable-event-notification.json");
   assert.equal(projectRuntimeEventEnvelopeForVersion("1.4", event.params).protocolVersion, "1.4");
 });
+
+test("approval.preview 是 1.6 的有界只读扩展，旧版本方法集不变", () => {
+  assert.equal(isRuntimeMethodAvailable("1.6", "approval.preview"), true);
+  assert.equal(isRuntimeMethodAvailable("1.5", "approval.preview"), false);
+  const input = {
+    threadId: "00000000-0000-4000-8000-000000000001",
+    turnId: "00000000-0000-4000-8000-000000000002",
+    approvalId: "00000000-0000-4000-8000-000000000003",
+  };
+  const params = parseRuntimeMethodParamsForVersion("1.6", "approval.preview", input);
+  assert.equal(params.offset, 0);
+  assert.equal(params.maxChars, 12_000);
+  for (const invalid of [{ offset: -1 }, { maxChars: 0 }, { maxChars: 32_001 }]) {
+    assert.throws(() =>
+      parseRuntimeMethodParamsForVersion("1.6", "approval.preview", { ...input, ...invalid }),
+    );
+  }
+  assert.throws(() =>
+    parseRuntimeMethodResultForVersion("1.6", "approval.preview", {
+      text: "x".repeat(32_001),
+      totalChars: 32_001,
+      nextOffset: null,
+    }),
+  );
+});

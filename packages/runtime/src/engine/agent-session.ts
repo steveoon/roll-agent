@@ -2513,6 +2513,7 @@ export class AgentSession {
         ? { sessionGrantLabel: request.sessionGrantLabel }
         : {}),
       ...(request.diff !== undefined ? { diff: request.diff } : {}),
+      ...(request.fullDiff !== undefined ? { fullDiff: request.fullDiff } : {}),
     });
     return decision;
   }

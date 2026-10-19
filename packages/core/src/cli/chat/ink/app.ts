@@ -892,6 +892,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
           })
         : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
           ? h(ConfirmSelect, {
+              key: state.pendingConfirm.approvalId,
               prompt: state.pendingConfirm.prompt,
               args: state.pendingConfirm.args,
               ...(state.pendingConfirm.explanation !== undefined
@@ -902,6 +903,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                 : {}),
               ...(state.pendingConfirm.diff !== undefined
                 ? { diff: state.pendingConfirm.diff }
+                : {}),
+              ...(state.pendingConfirm.fullDiff !== undefined
+                ? { fullDiff: state.pendingConfirm.fullDiff }
                 : {}),
               width: layout.columns,
               maxRows: layout.promptRows + layout.popupRows,

@@ -226,6 +226,7 @@ export const RUNTIME_METHODS = {
   turnStart: "turn.start",
   turnCancel: "turn.cancel",
   approvalRespond: "approval.respond",
+  approvalPreview: "approval.preview",
   operationGet: "operation.get",
   attachmentStage: "attachment.stage",
   attachmentChunk: "attachment.chunk",
@@ -350,6 +351,8 @@ export const fileChangeDiffSchema = z
     hunks: z.number().int().nonnegative(),
     unified: z.string().max(FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS).optional(),
     truncated: z.boolean(),
+    /** True when the counts describe whole before/after files rather than a line diff. */
+    coarse: z.boolean().optional(),
   })
   .readonly();
 
@@ -1507,6 +1510,27 @@ export const approvalRespondResultSchema = z
   .strict()
   .readonly();
 
+/** Offsets count UTF-16 code units in the stable, redacted review text. */
+export const approvalPreviewParamsSchema = z
+  .object({
+    ...threadRequestFields,
+    turnId: turnIdSchema,
+    approvalId: approvalIdSchema,
+    offset: z.number().int().nonnegative().default(0),
+    maxChars: z.number().int().min(1).max(32_000).default(12_000),
+  })
+  .strict()
+  .readonly();
+
+export const approvalPreviewResultSchema = z
+  .object({
+    text: z.string().max(32_000),
+    totalChars: z.number().int().nonnegative(),
+    nextOffset: z.number().int().nonnegative().nullable(),
+  })
+  .strict()
+  .readonly();
+
 export const approvalRequestParamsSchema = z
   .object({
     threadId: threadIdSchema,
@@ -2183,6 +2207,10 @@ export const runtimeMethodSchemasV15 = {
 } as const;
 export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
+  [RUNTIME_METHODS.approvalPreview]: {
+    params: approvalPreviewParamsSchema,
+    result: approvalPreviewResultSchema,
+  },
   [RUNTIME_METHODS.initialize]: {
     params: initializeParamsSchema,
     result: initializeResultV16Schema,

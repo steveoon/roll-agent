@@ -107,6 +107,7 @@ const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
   RUNTIME_METHODS.threadCapabilities,
   RUNTIME_METHODS.operationGet,
   RUNTIME_METHODS.operationResultGet,
+  RUNTIME_METHODS.approvalPreview,
 ]);
 
 export interface RuntimeClientTransport {

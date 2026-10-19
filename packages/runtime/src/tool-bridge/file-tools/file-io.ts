@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
@@ -39,6 +40,8 @@ export interface LoadedTextFile {
   readonly path: string;
   readonly key: string;
   readonly content: string;
+  /** Digest of the actual bytes read, including BOM and original encoding. */
+  readonly digest: string;
   readonly hadBom: boolean;
   readonly suspectEncoding: boolean;
 }
@@ -227,6 +230,7 @@ export function loadTextFile(
     path,
     key: canonicalFileKey(path),
     content,
+    digest: createHash("sha256").update(buffer).digest("hex"),
     hadBom,
     suspectEncoding: content.includes("�"),
   };
@@ -350,9 +354,7 @@ function imageLooksComplete(buffer: Buffer, mediaType: string): boolean {
   }
   if (mediaType === "image/jpeg") {
     return (
-      buffer.length >= 2 &&
-      buffer[buffer.length - 2] === 0xff &&
-      buffer[buffer.length - 1] === 0xd9
+      buffer.length >= 2 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9
     );
   }
   if (mediaType === "image/gif") {

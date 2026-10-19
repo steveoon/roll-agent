@@ -164,6 +164,7 @@ interface PendingApprovalState {
   readonly session: RuntimeServiceSession;
   readonly approval: PendingApproval;
   readonly expiresAt: string | undefined;
+  readonly fullDiff: string | undefined;
 }
 
 interface PendingUserInputState {
@@ -512,6 +513,7 @@ function toPendingApproval(
           ? { [APPROVAL_EXPLANATION_PREVIEW_KEY]: parsedExplanation.data }
           : {}),
         ...(safeDiff !== undefined ? { [APPROVAL_DIFF_PREVIEW_KEY]: safeDiff } : {}),
+        ...(event.fullDiff !== undefined ? { fullDiffAvailable: true } : {}),
       }
     : safePreview;
   return {
@@ -1278,6 +1280,29 @@ export class RuntimeService {
     return cancelled;
   }
 
+  getApprovalPreview(
+    params: LatestRuntimeMethodParams<"approval.preview">,
+  ): LatestRuntimeMethodResult<"approval.preview"> {
+    this.assertOpen();
+    const pending = this.requirePendingApproval(params);
+    if (
+      pending.fullDiff === undefined ||
+      (pending.expiresAt !== undefined && Date.parse(pending.expiresAt) <= Date.now())
+    ) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.approvalNotFound,
+        "完整预览不存在或审批已失效",
+      );
+    }
+    const text = pending.fullDiff.slice(params.offset, params.offset + params.maxChars);
+    const end = params.offset + text.length;
+    return {
+      text,
+      totalChars: pending.fullDiff.length,
+      nextOffset: end < pending.fullDiff.length ? end : null,
+    };
+  }
+
   getOperation(
     params: RuntimeMethodParams<"operation.get">,
   ): LatestRuntimeMethodResult<"operation.get"> {
@@ -1618,6 +1643,8 @@ export class RuntimeService {
           session: state.session,
           approval,
           expiresAt: event.expiresAt,
+          // Redact the whole snapshot once, before pagination, so page boundaries cannot reveal secrets.
+          fullDiff: event.fullDiff === undefined ? undefined : redactSecretText(event.fullDiff),
         });
         this.emit(state.threadId, state.turnId, {
           type: "approval.required",

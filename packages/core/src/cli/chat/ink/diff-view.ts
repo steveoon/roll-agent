@@ -8,6 +8,7 @@ import {
   diffGutterWidth,
   formatDiffGutter,
   type DiffLine,
+  formatDiffHeader,
 } from "../../utils/unified-diff.ts";
 
 export interface DiffHeaderProps {
@@ -38,6 +39,7 @@ function headerTags(diff: FileChangeDiff): string {
 }
 
 export function DiffHeader({ diff }: DiffHeaderProps): ReactElement {
+  if (diff.coarse === true) return h(Text, null, sanitizeForDisplay(formatDiffHeader(diff)));
   return h(
     Text,
     null,
