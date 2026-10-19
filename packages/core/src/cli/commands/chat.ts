@@ -622,10 +622,44 @@ export default defineCommand({
         config = applyLlmOverrides(loadConfig().config);
       }
     }
+    const presentationDecision = args.message
+      ? undefined
+      : resolveChatPresentation({
+          mode: screenModeRequest.mode,
+          source: screenModeRequest.source,
+          capabilities: await detectChatTerminalCapabilities({
+            stdinIsTty: process.stdin.isTTY === true,
+            stdoutIsTty: process.stdout.isTTY === true,
+            rawModeSupported: typeof process.stdin.setRawMode === "function",
+            env: process.env,
+          }),
+        });
+    if (presentationDecision !== undefined && !presentationDecision.ok) {
+      log.error(presentationDecision.error);
+      process.exitCode = 1;
+      return;
+    }
+    if (presentationDecision?.warning) {
+      log.warn(presentationDecision.warning);
+    } else if (
+      presentationDecision?.presentation === CHAT_PRESENTATIONS.inline &&
+      presentationDecision.reason !== "requested"
+    ) {
+      log.debug(`chat 自动选择基础 REPL：${presentationDecision.reason}`);
+    }
+    const needsStartupModel =
+      presentationDecision?.presentation === CHAT_PRESENTATIONS.inline &&
+      (config.runtime.provider ?? config.llm.defaultProvider) === "chatgpt" &&
+      config.runtime.model === undefined;
+    if (needsStartupModel && !canPrompt) {
+      log.error("基础模式需要指定 ChatGPT 模型：请使用 --model <slug>，或配置 runtime.model。");
+      process.exitCode = 1;
+      return;
+    }
     let selection: Awaited<ReturnType<typeof resolveInteractiveChatLlm>>;
     try {
       selection = await resolveInteractiveChatLlm(config, {
-        deferConnection: !args.message && !args.json,
+        deferConnection: !args.message && !args.json && !needsStartupModel,
         ...(canPrompt
           ? {
               selectModel: async (models: ChatGptModels) => {
@@ -683,32 +717,6 @@ export default defineCommand({
       log.error('--json 模式需要消息：roll chat "<message>" --json');
       process.exitCode = 1;
       return;
-    }
-
-    const presentationDecision = args.message
-      ? undefined
-      : resolveChatPresentation({
-          mode: screenModeRequest.mode,
-          source: screenModeRequest.source,
-          capabilities: await detectChatTerminalCapabilities({
-            stdinIsTty: process.stdin.isTTY === true,
-            stdoutIsTty: process.stdout.isTTY === true,
-            rawModeSupported: typeof process.stdin.setRawMode === "function",
-            env: process.env,
-          }),
-        });
-    if (presentationDecision !== undefined && !presentationDecision.ok) {
-      log.error(presentationDecision.error);
-      process.exitCode = 1;
-      return;
-    }
-    if (presentationDecision?.warning) {
-      log.warn(presentationDecision.warning);
-    } else if (
-      presentationDecision?.presentation === CHAT_PRESENTATIONS.inline &&
-      presentationDecision.reason !== "requested"
-    ) {
-      log.debug(`chat 自动选择基础 REPL：${presentationDecision.reason}`);
     }
 
     const runtime = await loadRuntime();

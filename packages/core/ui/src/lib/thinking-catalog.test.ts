@@ -70,11 +70,15 @@ test("loading, model changes and account ownership refresh hidden field validati
   assert.equal(draft.runtime.compaction.thinkingLevel, "max");
 });
 
-test("API and missing catalog keep four levels; compaction follows same capability", () => {
-  for (const provider of ["openai", "chatgpt"]) {
-    const result = thinkingCatalog(node, provider);
-    assert.equal(result.kind, "enum");
-    if (result.kind === "enum") assert.deepEqual(result.options, ["off", "low", "medium", "high"]);
+test("API keeps four levels while missing subscription capability stays pending", () => {
+  const api = thinkingCatalog(node, "openai");
+  assert.equal(api.kind, "enum");
+  if (api.kind === "enum") assert.deepEqual(api.options, ["off", "low", "medium", "high"]);
+  const pending = thinkingCatalog(node, "chatgpt");
+  assert.equal(pending.kind, "enum");
+  if (pending.kind === "enum") {
+    assert.equal(pending.optionsStatus, "unavailable");
+    assert.ok(pending.options.includes("max"));
   }
   const result = thinkingCatalog(
     { ...node, path: ["runtime", "compaction", "thinkingLevel"] },
@@ -83,4 +87,58 @@ test("API and missing catalog keep four levels; compaction follows same capabili
   );
   if (result.kind !== "enum") throw new Error("expected enum");
   assert.deepEqual(result.options, ["off", "max"]);
+});
+
+test("unresolved provider, model and account references cannot block valid reasoning levels", () => {
+  const catalog: ChatGptModelCatalog = {
+    accountId: "a",
+    status: "ready",
+    models: [
+      { slug: "fixture", displayName: "fixture", reasoningEfforts: ["low", "max", "xhigh"] },
+    ],
+  };
+  for (const field of ["provider", "model", "chatgptAccountId"] as const) {
+    const draft = {
+      runtime: {
+        provider: "chatgpt",
+        model: "fixture",
+        chatgptAccountId: "a",
+        thinkingLevel: "max",
+        compaction: { thinkingLevel: "xhigh" },
+        [field]: `\${ROLL_TEST_VALUE}`,
+      },
+    };
+    assert.ok(thinkingFieldValidity(draft, catalog).every(({ message }) => message === undefined));
+    const projected = thinkingCatalogForDraft(node, draft, catalog);
+    assert.equal(projected.kind, "enum");
+    if (projected.kind === "enum") {
+      assert.equal(projected.optionsStatus, "unavailable");
+      assert.ok(projected.options.includes("max"));
+    }
+    assert.equal(draft.runtime[field], `\${ROLL_TEST_VALUE}`);
+  }
+});
+
+test("missing models and effort metadata stay unknown, while llm provider fallback is honored", () => {
+  const draft = {
+    llm: { defaultProvider: "chatgpt" },
+    runtime: { model: "fixture", thinkingLevel: "max" },
+  };
+  for (const models of [[], [{ slug: "fixture", displayName: "fixture" }]]) {
+    const catalog: ChatGptModelCatalog = { status: "ready", models };
+    assert.ok(thinkingFieldValidity(draft, catalog).every(({ message }) => message === undefined));
+    const projected = thinkingCatalogForDraft(node, draft, catalog);
+    if (projected.kind !== "enum") throw new Error("expected enum");
+    assert.equal(projected.optionsStatus, "unavailable");
+  }
+  const catalog: ChatGptModelCatalog = {
+    status: "ready",
+    models: [{ slug: "fixture", displayName: "fixture", reasoningEfforts: ["low", "max"] }],
+  };
+  assert.ok(thinkingFieldValidity(draft, catalog).every(({ message }) => message === undefined));
+  assert.match(
+    thinkingFieldValidity({ ...draft, llm: { defaultProvider: "openai" } }, catalog)[0]?.message ??
+      "",
+    /不支持 max/,
+  );
 });

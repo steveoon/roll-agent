@@ -137,8 +137,9 @@ export class ChatGptAuthService {
     });
   }
 
-  cachedModels(accountId: string): ChatGptModel[] {
-    const profile = this.store.read(accountId);
+  cachedModels(accountId?: string): ChatGptModel[] {
+    const id = accountId ?? this.store.readHost()?.currentAccountId;
+    const profile = id === undefined ? undefined : this.store.read(id);
     return profile ? readChatGptModelCache(this.store.directory, profile, this.now()) : [];
   }
 

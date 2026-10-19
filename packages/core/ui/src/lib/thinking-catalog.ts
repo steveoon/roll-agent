@@ -1,4 +1,8 @@
-import { chatGptThinkingLevels, legacyThinkingLevels } from "../../../src/llm/thinking-levels.ts";
+import {
+  chatGptThinkingLevels,
+  legacyThinkingLevels,
+  runtimeThinkingLevels,
+} from "../../../src/llm/thinking-levels.ts";
 import type { ConfigCatalogNode, ConfigEnumOptionsStatus, JsonObject } from "../types.ts";
 import { getAtPath } from "./config-value.ts";
 import { validateEnumInput } from "./input-validation.ts";
@@ -16,15 +20,26 @@ const THINKING_PATHS = [
 ] as const;
 
 function selectedCapability(draft: JsonObject, catalog: ChatGptModelCatalog) {
+  const provider =
+    getAtPath(draft, ["runtime", "provider"]) ?? getAtPath(draft, ["llm", "defaultProvider"]);
   const accountId = getAtPath(draft, ["runtime", "chatgptAccountId"]);
+  const modelName = getAtPath(draft, ["runtime", "model"]);
   const matchesAccount = accountId === undefined || accountId === catalog.accountId;
-  return {
-    provider: getAtPath(draft, ["runtime", "provider"]),
-    model: matchesAccount
-      ? catalog.models.find(({ slug }) => slug === getAtPath(draft, ["runtime", "model"]))
-      : undefined,
-    status: matchesAccount ? catalog.status : ("loading" as const),
-  };
+  const model = matchesAccount ? catalog.models.find(({ slug }) => slug === modelName) : undefined;
+  const unresolved =
+    provider === undefined ||
+    [provider, modelName, accountId].some(
+      (value) => typeof value === "string" && value.includes("${"),
+    );
+  let status: ConfigEnumOptionsStatus = provider === "chatgpt" ? catalog.status : "ready";
+  if (provider === "chatgpt" && !matchesAccount) status = "loading";
+  if (
+    unresolved ||
+    (provider === "chatgpt" && status === "ready" && model?.reasoningEfforts === undefined)
+  ) {
+    status = "unavailable";
+  }
+  return { provider, model, status };
 }
 
 export function thinkingCatalogForDraft(
@@ -44,7 +59,7 @@ export function thinkingFieldValidity(draft: JsonObject, catalog: ChatGptModelCa
     path,
     message: validateEnumInput(getAtPath(draft, path), {
       options,
-      optionsStatus: provider === "chatgpt" ? status : "ready",
+      optionsStatus: status,
     }),
   }));
 }
@@ -73,11 +88,20 @@ export function thinkingCatalog(
   ) {
     return node;
   }
-  const options = provider === "chatgpt" ? chatGptThinkingLevels(model) : legacyThinkingLevels;
+  const optionsStatus =
+    provider === "chatgpt" && model?.reasoningEfforts === undefined && status === "ready"
+      ? "unavailable"
+      : status;
+  const options =
+    optionsStatus !== "ready"
+      ? runtimeThinkingLevels
+      : provider === "chatgpt"
+        ? chatGptThinkingLevels(model)
+        : legacyThinkingLevels;
   return {
     ...node,
     options,
-    optionsStatus: provider === "chatgpt" ? status : "ready",
-    description: `${node.description ?? ""} 当前可选：${options.join(" / ") || "无"}。xhigh/max 使用模型原生强度，可能增加延迟和用量。`,
+    optionsStatus,
+    description: `${node.description ?? ""} ${optionsStatus === "ready" ? `当前可选：${options.join(" / ") || "无"}` : "配置或模型能力尚未解析，支持情况待验证"}。xhigh/max 使用模型原生强度，可能增加延迟和用量。`,
   };
 }

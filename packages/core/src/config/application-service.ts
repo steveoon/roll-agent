@@ -28,6 +28,7 @@ import {
 } from "./loader.ts";
 import { detectKnownConfigMigrations, formatConfigMigrationError } from "./migration.ts";
 import { isRollConfigSecretPath, isSecretConfigValue } from "./secret-policy.ts";
+import type { RollConfig } from "./schema.ts";
 
 export const CONFIG_UI_SECRET_SENTINEL = "__ROLL_UI_KEEP_EXISTING_SECRET__" as const;
 
@@ -86,6 +87,8 @@ export interface ConfigApplicationRecoverySaveResult {
 }
 
 export interface ConfigApplicationServiceOptions extends LoadConfigOptions {
+  /** Host-specific checks on the resolved candidate, shared by preview and save. */
+  readonly validateEffectiveConfig?: (config: RollConfig) => void;
   /** Extra Agent env names declared as secret in their env.yaml contract. */
   readonly secretEnvNames?: readonly string[];
   /** Exact Agent env visibility derived from registered env.yaml declarations. */
@@ -121,8 +124,10 @@ export class ConfigApplicationService {
   readonly configPath: string;
   readonly store: YamlConfigDocumentStore;
   private readonly isSecretPath: (path: ConfigPath) => boolean;
+  private readonly validateEffectiveConfig: ConfigApplicationServiceOptions["validateEffectiveConfig"];
 
   constructor(options: ConfigApplicationServiceOptions = {}) {
+    this.validateEffectiveConfig = options.validateEffectiveConfig;
     this.configPath = resolveConfigPath(options) ?? resolve(homedir(), "roll.config.yaml");
     this.store = new YamlConfigDocumentStore(this.configPath, buildBaseConfigYaml());
     const secretEnvNames = new Set(options.secretEnvNames ?? []);
@@ -287,7 +292,7 @@ export class ConfigApplicationService {
   private prepareDocumentPreview(
     documentPreview: ConfigDocumentPreview,
   ): PreparedApplicationPreview {
-    validateRawConfig(documentPreview.raw, this.configPath);
+    validateRawConfig(documentPreview.raw, this.configPath, this.validateEffectiveConfig);
     const previousCanonical = decodePersistedConfig(
       parseConfigDocument(documentPreview.previousRaw, this.configPath),
     );
@@ -492,9 +497,14 @@ function createPublicSnapshot(
   };
 }
 
-function validateRawConfig(raw: string, configPath: string): void {
+function validateRawConfig(
+  raw: string,
+  configPath: string,
+  validateEffectiveConfig?: ConfigApplicationServiceOptions["validateEffectiveConfig"],
+): void {
   try {
-    validateConfigText(raw, configPath);
+    const config = validateConfigText(raw, configPath);
+    validateEffectiveConfig?.(config);
   } catch (error) {
     throw new ConfigApplicationValidationError(error);
   }
