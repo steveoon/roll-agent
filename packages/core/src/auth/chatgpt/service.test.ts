@@ -626,45 +626,62 @@ test("independent OS processes serialize rotating refresh and only one consumes 
     },
   });
   await store.setCurrent(accountId);
-  let exchanges = 0;
-  const server = createServer((_request, response) => {
-    exchanges += 1;
-    setTimeout(() => {
-      response.setHeader("Content-Type", "application/json");
-      response.end(
-        JSON.stringify({
-          access_token: "new-access",
-          refresh_token: "new-refresh",
-          token_type: "Bearer",
-          expires_in: 3600,
-        }),
-      );
-    }, 300);
+  const exchanges: URLSearchParams[] = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += String(chunk);
+    exchanges.push(new URLSearchParams(body));
+    response.setHeader("Content-Type", "application/json");
+    response.end(
+      JSON.stringify({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        token_type: "Bearer",
+        expires_in: 3600,
+      }),
+    );
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const endpoint = `http://127.0.0.1:${address.port}`;
   const moduleUrl = new URL("./service.ts", import.meta.url).href;
+  const storeUrl = new URL("./storage.ts", import.meta.url).href;
   const worker = `
     import { createChatGptAuthService } from ${JSON.stringify(moduleUrl)};
+    import { ChatGptCredentialStore } from ${JSON.stringify(storeUrl)};
+    class WaitingStore extends ChatGptCredentialStore {
+      withLock(...args) {
+        const pending = super.withLock(...args);
+        process.send('refresh-waiting');
+        process.disconnect();
+        return pending;
+      }
+    }
     const fetcher = async (input, init) => String(input).includes('openid-configuration')
       ? Response.json({issuer: 'https://auth.test', authorization_endpoint: 'https://auth.test/authorize', token_endpoint: 'https://auth.test/token', jwks_uri: 'https://auth.test/jwks'})
       : String(input).endsWith('/jwks') ? Response.json(${JSON.stringify({ keys: [jwk] })})
       : fetch(${JSON.stringify(endpoint)}, init);
-    const service = createChatGptAuthService({directory: ${JSON.stringify(directory)}, issuer: 'https://auth.test', fetch: fetcher});
+    const service = createChatGptAuthService({store: new WaitingStore(${JSON.stringify(directory)}), issuer: 'https://auth.test', fetch: fetcher});
     const result = await service.refresh();
     console.log(JSON.stringify(result));
   `;
-  const runWorker = () =>
-    new Promise<string>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ["--experimental-strip-types", "--input-type=module", "-e", worker],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
+  const runWorker = () => {
+    const child = spawn(
+      process.execPath,
+      ["--experimental-strip-types", "--input-type=module", "-e", worker],
+      { stdio: ["ignore", "pipe", "pipe", "ipc"], timeout: 30_000 },
+    );
+    const waiting = new Promise<void>((resolve) => {
+      child.once("message", (message) => {
+        if (message === "refresh-waiting") resolve();
+      });
+    });
+    const result = new Promise<string>((resolve, reject) => {
       let output = "";
       let errors = "";
+      assert.ok(child.stdout);
+      assert.ok(child.stderr);
       child.stdout.on("data", (chunk: Buffer) => {
         output += chunk.toString();
       });
@@ -677,12 +694,36 @@ test("independent OS processes serialize rotating refresh and only one consumes 
         else reject(new Error(errors));
       });
     });
+    return {
+      child,
+      result,
+      ready: Promise.race([
+        waiting,
+        result.then(() => {
+          throw new Error("Refresh worker exited before waiting for the account lock");
+        }),
+      ]),
+    };
+  };
+  const workers: ReturnType<typeof runWorker>[] = [];
   try {
-    const outputs = await Promise.all([runWorker(), runWorker()]);
-    assert.equal(exchanges, 1);
+    // Both processes must capture the old credentials before either can rotate them.
+    // A timed token response cannot guarantee this when process startup is slow.
+    await store.withLock(accountId, async () => {
+      workers.push(runWorker(), runWorker());
+      await Promise.all(workers.map((worker) => worker.ready));
+      assert.equal(exchanges.length, 0);
+    });
+    const outputs = await Promise.all(workers.map((worker) => worker.result));
+    assert.deepEqual(
+      exchanges.map((params) => params.get("refresh_token")),
+      ["old-refresh"],
+    );
     assert.equal(outputs.filter((output) => output.includes('"refreshed":true')).length, 1);
     assert.equal(store.read(accountId)?.credentials?.refreshToken, "new-refresh");
   } finally {
+    for (const worker of workers) worker.child.kill();
+    await Promise.allSettled(workers.flatMap((worker) => [worker.ready, worker.result]));
     server.close();
     server.closeAllConnections();
     rmSync(directory, { recursive: true, force: true });
