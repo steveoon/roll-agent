@@ -75,12 +75,15 @@ test("viewport loads older records with PageUp and preserves visible rows after 
       }),
     );
   const view = render(viewFor(original));
-  await delay(80);
-  for (let i = 0; i < 8; i++) {
+  // Layout measurement and scroll coalescing need not settle within a fixed key count on CI.
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
     view.stdin.write("\u001b[5~");
     await delay(25);
+    if (loads > 0 && /row-0\b/.test(view.lastFrame() ?? "")) break;
   }
   assert.ok(loads > 0);
+  assert.match(view.lastFrame() ?? "", /row-0\b/);
   const before = (view.lastFrame() ?? "").match(/row-\d+/g);
   assert.ok(before?.length);
   view.rerender(
