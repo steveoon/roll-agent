@@ -12,6 +12,9 @@ import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
 import {
   createEmptyCompactionToolState,
   createCompactionSummary,
+  createCompactionCheckpoint,
+  type CompactionCheckpointV2,
+  type CreateCompactionCheckpointInput,
 } from "../engine/compaction-checkpoint.ts";
 import {
   compactionSemanticStateSchema,
@@ -30,11 +33,45 @@ const origin = scheduledThreadOriginSchema.parse({
 });
 
 function commitInput(store: ThreadStore, id: string): CommitCompactionInput {
+  return {
+    messages: [{ role: "user", content: "Compacted history" }],
+    expectedActiveMessages: store.getMessages(id),
+    expectedLatestCheckpointId: store.getLatestCheckpoint(id)?.id,
+    summary: "Current task summary",
+  };
+}
+function persistLegacyCheckpoint(
+  dbPath: string,
+  threadId: string,
+  checkpoint: CompactionCheckpointV2,
+): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare(
+      `INSERT INTO compaction_checkpoints (id,thread_id,generation,schema_version,message_from_sequence,message_through_sequence,tool_from_sequence,tool_through_sequence,checkpoint_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      checkpoint.id,
+      threadId,
+      checkpoint.generation,
+      checkpoint.version,
+      checkpoint.transcript.messages.fromSequenceExclusive,
+      checkpoint.transcript.messages.throughSequence,
+      checkpoint.transcript.toolExecutions.fromSequenceExclusive,
+      checkpoint.transcript.toolExecutions.throughSequence,
+      JSON.stringify(checkpoint),
+      checkpoint.createdAt,
+    );
+  } finally {
+    db.close();
+  }
+}
+function legacyInput(store: ThreadStore, id: string): CreateCompactionCheckpointInput {
   const snapshot = store.readSnapshot(id);
   return {
-    expectedActiveMessages: snapshot.messages,
-    expectedLatestCheckpointId: snapshot.checkpoints.at(-1)?.id,
-    messages: [{ role: "user", content: "Compacted history" }],
+    generation: snapshot.checkpoints.length + 1,
+    ...(snapshot.checkpoints.at(-1)
+      ? { previousCheckpointId: snapshot.checkpoints.at(-1)!.id }
+      : {}),
     draft: {
       constraints: [],
       resources: [],
@@ -56,10 +93,18 @@ function commitInput(store: ThreadStore, id: string): CommitCompactionInput {
       ),
     },
     semanticState: createEmptyCompactionSemanticState(),
-    semanticEvidenceWatermarks: { messagesThroughSequence: -1, toolExecutionsThroughSequence: -1 },
-    evidenceWatermarks: {
-      transcriptMessagesThroughSequence: snapshot.transcript.at(-1)?.sequence ?? -1,
-      toolExecutionsThroughSequence: snapshot.toolExecutions.at(-1)?.sequence ?? -1,
+    transcript: {
+      messages: {
+        fromSequenceExclusive:
+          snapshot.checkpoints.at(-1)?.transcript.messages.throughSequence ?? -1,
+        throughSequence: snapshot.transcript.at(-1)?.sequence ?? -1,
+      },
+      toolExecutions: {
+        fromSequenceExclusive:
+          snapshot.checkpoints.at(-1)?.transcript.toolExecutions.throughSequence ?? -1,
+        throughSequence: snapshot.toolExecutions.at(-1)?.sequence ?? -1,
+      },
+      completeness: "complete",
     },
   };
 }
@@ -179,11 +224,15 @@ test("snapshot fork retains checkpoint ancestry, semantic references, archives, 
         },
       },
     );
-    const first = source.commitCompaction(id, commitInput(source, id));
-    const secondInput = commitInput(source, id);
-    const second = source.commitCompaction(id, {
+    const first = createCompactionCheckpoint(legacyInput(source, id));
+    persistLegacyCheckpoint(join(dir, "source", "threads.db"), id, first);
+    const secondInput = legacyInput(source, id);
+    const second = createCompactionCheckpoint({
       ...secondInput,
-      draft: { ...secondInput.draft, summary: { status: "fallback", reason: "provider failed" } },
+      draft: {
+        ...secondInput.draft,
+        summary: { status: "fallback", reason: "provider failed", lastValidCheckpointId: first.id },
+      },
       semanticState: compactionSemanticStateSchema.parse({
         ...createEmptyCompactionSemanticState(),
         pendingWork: [
@@ -207,6 +256,7 @@ test("snapshot fork retains checkpoint ancestry, semantic references, archives, 
         ],
       }),
     });
+    persistLegacyCheckpoint(join(dir, "source", "threads.db"), id, second);
     source.appendRuntimeEvent({
       threadId: id,
       timestamp: new Date().toISOString(),
@@ -236,6 +286,9 @@ test("snapshot fork retains checkpoint ancestry, semantic references, archives, 
     assert.notEqual(clonedFirst.id, first.id);
     assert.notEqual(clonedSecond.id, second.id);
     assert.equal(clonedSecond.previousCheckpointId, clonedFirst.id);
+    assert.equal(clonedFirst.version, 2);
+    assert.equal(clonedSecond.version, 2);
+    assert.ok(clonedFirst.version === 2 && clonedSecond.version === 2);
     assert.equal(
       clonedSecond.summary.status === "fallback" && clonedSecond.summary.lastValidCheckpointId,
       clonedFirst.id,
@@ -246,7 +299,9 @@ test("snapshot fork retains checkpoint ancestry, semantic references, archives, 
       clonedFirst.id,
     );
     assert.equal(clonedFirst.runningWork[0]?.recoverability, "unavailable");
-    assert.equal(source.getCheckpoint(id, first.id)?.runningWork[0]?.recoverability, "live");
+    const originalFirst = source.getCheckpoint(id, first.id);
+    assert.ok(originalFirst?.version === 2);
+    assert.equal(originalFirst.runningWork[0]?.recoverability, "live");
     assert.deepEqual(
       target
         .readCheckpointTranscript(fork, { checkpointId: clonedFirst.id, kind: "message" })

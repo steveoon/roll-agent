@@ -23,32 +23,3 @@ export function diagnosticError(error, depth = 0) {
     ...(error.cause === undefined ? {} : { cause: diagnosticError(error.cause, depth + 1) }),
   };
 }
-
-export function summaryEvidenceDiagnostics(prompt, snapshot) {
-  const text = prompt
-    .filter((message) => message.role === "user")
-    .flatMap((message) => message.content)
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .find((value) => value.startsWith("<harness-evidence>\n"));
-  if (text === undefined) return { available: false };
-  const packed = JSON.parse(text.replace(/^<harness-evidence>\n|\n<\/harness-evidence>$/gu, ""));
-  const first = JSON.stringify(snapshot.messages[0]);
-  return {
-    presentedCount: packed.evidence.length,
-    omittedEvidenceCount: packed.omittedEvidenceCount,
-    previousSemanticEvidence: snapshot.checkpoints.at(-1)?.semanticEvidence,
-    firstActiveSequence: snapshot.transcript.findLast(
-      (entry) => JSON.stringify(entry.message) === first,
-    )?.sequence,
-    transcriptCount: snapshot.transcript.length,
-    toolExecutionCount: snapshot.toolExecutions.length,
-    sources: packed.evidence.map((entry) => ({
-      evidenceId: entry.evidenceId,
-      kind: entry.kind,
-      role: entry.role,
-      chars: entry.summary.length,
-      messageSequence: /^message (\d+) /u.exec(entry.summary)?.[1],
-    })),
-  };
-}

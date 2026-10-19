@@ -5,4 +5,4 @@
 "@roll-agent/core": patch
 ---
 
-Carry bounded context recovery state through opt-in Relay Wire 1.3. Existing Relay deployments continue using Wire 1.2 until the service and Companion are upgraded together.
+Preserve bounded legacy context recovery event transport through opt-in Relay Wire 1.3. New summary-based sessions have no active recovery gate. Existing Relay deployments continue using Wire 1.2 until the service and Companion are upgraded together.

@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  contextRecoveryViewSchema,
   getApprovalDiffPreview,
   getApprovalExplanation,
   getFileChangeDisplay,
@@ -19,9 +20,6 @@ import {
   type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
-import { createEmptyCompactionSemanticState } from "../engine/compaction-semantic-state.ts";
-import { createEmptyCompactionToolState } from "../engine/compaction-checkpoint.ts";
-import { projectContextRecovery } from "../store/semantic-ledger.ts";
 import { sessionUserInputRequestIdSchema } from "../interaction/user-input-interaction-manager.ts";
 import {
   createToolExecutionRecord,
@@ -2128,62 +2126,45 @@ test("RuntimeService 未配置附件存储时 attachments 能力关闭且方法�
   }
 });
 
-test("RuntimeService persists recovery entry/exit for snapshots and replay across SQLite reopen", async () => {
+test("RuntimeService replays legacy recovery events while current snapshots have no gate", async () => {
   const dir = tempDir();
   let store = new ThreadStore(dir);
   const fixture = createFixture(store);
   Object.defineProperty(fixture.session, "send", {
     value: async function* () {
-      const cp = store.commitCompaction(IDS.thread, {
-        messages: [],
-        expectedActiveMessages: [],
-        expectedLatestCheckpointId: undefined,
-        semanticState: createEmptyCompactionSemanticState(),
-        draft: {
-          constraints: [],
-          resources: [],
-          runningWork: [],
-          toolState: createEmptyCompactionToolState(),
-          context: { cwd: dir, stableRuleIds: [], skills: [], explicitSkillNames: [] },
-          summary: { status: "skipped" },
-        },
-        semanticEvidenceWatermarks: {
-          messagesThroughSequence: -1,
-          toolExecutionsThroughSequence: -1,
-        },
-        evidenceWatermarks: {
-          transcriptMessagesThroughSequence: -1,
-          toolExecutionsThroughSequence: -1,
-        },
-        contextRecovery: { unextracted: true },
+      // A legacy session fixture may still emit V1.6 events. They remain readable
+      // and durable without recreating a ledger or enabling a current recovery gate.
+      const legacyState = contextRecoveryViewSchema.parse({
+        checkpointId: "00000000-0000-4000-8000-000000000201",
+        required: true,
+        unextracted: true,
+        requiredItemCount: 2,
       });
-      yield {
-        type: "context-recovery",
-        state: projectContextRecovery(store.getContextRecovery(IDS.thread)),
-      };
-      store.completeContextRecovery(IDS.thread, cp.id, "MODEL_NOTES_NEVER_ON_WIRE");
-      yield {
-        type: "context-recovery",
-        state: projectContextRecovery(store.getContextRecovery(IDS.thread)),
-      };
+      yield { type: "context-recovery", state: legacyState };
+      yield { type: "context-recovery", state: { ...legacyState, required: false } };
       yield { type: "message-start", messageId: IDS.message };
       yield { type: "message-finish", text: "recovered" };
     },
   });
   let service = new RuntimeService(fixture.engine, store);
   const seen: RuntimeEventEnvelopeV16[] = [];
-  const snapshots: boolean[] = [];
+  const snapshots: unknown[] = [];
   service.onEvent((event) => {
     seen.push(event);
     if (event.event.type === "context.recovery.changed") {
       snapshots.push(
         service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
-          .contextRecovery!.required,
+          .contextRecovery,
       );
     }
   });
   try {
-    service.initialize({ protocolVersions: ["1.6"], client: { name: "recovery", version: "1" } });
+    const initialized = service.initialize({
+      protocolVersions: ["1.6"],
+      client: { name: "recovery", version: "1" },
+    });
+    assert.equal(initialized.protocolVersion, "1.6");
+    assert.ok(!initialized.features.includes("context-recovery"));
     await service.createThread(
       runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
     );
@@ -2196,7 +2177,7 @@ test("RuntimeService persists recovery entry/exit for snapshots and replay acros
       }),
     );
     await nextTick();
-    assert.deepEqual(snapshots, [true, false]);
+    assert.deepEqual(snapshots, [null, null]);
     const changes = seen.filter((event) => event.event.type === "context.recovery.changed");
     assert.equal(changes.length, 2);
     assert.ok(changes.every((event) => event.durability === "durable"));
@@ -2208,8 +2189,8 @@ test("RuntimeService persists recovery entry/exit for snapshots and replay acros
     service.initialize({ protocolVersions: ["1.6"], client: { name: "reopened", version: "1" } });
     assert.equal(
       service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
-        .contextRecovery?.required,
-      false,
+        .contextRecovery,
+      null,
     );
     const replay = service.resumeEvents({
       threadId: threadIdSchema.parse(IDS.thread),

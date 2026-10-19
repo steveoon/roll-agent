@@ -1,153 +1,347 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { z } from "zod";
 import { MockLanguageModelV4 } from "ai/test";
-import { compactMessages, compactionEvidenceTokenBudget } from "./compactor.ts";
-import {
-  buildCompactionSemanticEvidenceRegistry,
-  buildCompactionSemanticModelContext,
-  createEmptyCompactionModelDraft,
-  validateCompactionModelDraft,
-} from "./compaction-semantic-state.ts";
+import type { ModelMessage } from "ai";
+import { z } from "zod";
+import { compactMessages } from "./compactor.ts";
+import { estimatePreparedRequest } from "./request-budget.ts";
 
-test("packing subtracts real output schema, provider options and output reservation", async () => {
-  const base = { model: new MockLanguageModelV4({}), contextWindow: 20_000, maxOutputTokens: 8192 };
-  const budget = await compactionEvidenceTokenBudget(base);
-  assert.ok(budget !== undefined && budget > 1000 && budget < 11_408);
-  const smaller = await compactionEvidenceTokenBudget({
-    ...base,
-    structuredOutputProviderOptions: { test: { note: "x".repeat(3500) } },
+function summaryModel(): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
+    doGenerate: async () => ({
+      content: [{ type: "text", text: "Continue with the current request." }],
+      finishReason: { unified: "stop", raw: "stop" },
+      usage: {
+        inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 3, text: 3, reasoning: 0 },
+      },
+      warnings: [],
+    }),
   });
-  assert.ok(smaller !== undefined && smaller < budget - 999);
-  assert.equal(await compactionEvidenceTokenBudget({ model: base.model }), undefined);
-  await assert.rejects(
-    compactionEvidenceTokenBudget({ ...base, contextWindow: 2048 }),
-    /evidence_unpresentable/,
+}
+
+for (const fragment of ["inspection ", "检查记录", "🧪", '\\"\n']) {
+  test(`summary request fits complete UTF-8 source prefixes: ${JSON.stringify(fragment)}`, async () => {
+    const messages: ModelMessage[] = Array.from({ length: 12 }, (_, index) => [
+      { role: "user" as const, content: `request-${index}` },
+      { role: "assistant" as const, content: `${fragment.repeat(1000)}END-${index}` },
+    ]).flat();
+    const model = summaryModel();
+    const result = await compactMessages({
+      messages,
+      model,
+      strategy: "summarize",
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+      contextWindow: 8000,
+      maxOutputTokens: 500,
+    });
+    assert.ok(result.removed > 0 && result.removed < messages.length - 2);
+    assert.equal(model.doGenerateCalls.length, 1);
+    const call = model.doGenerateCalls[0]!;
+    const budget = estimatePreparedRequest(
+      call,
+      { provider: model.provider, model: model.modelId, window: 8000 },
+      0,
+    );
+    assert.ok(budget.rawInputEstimate <= budget.availableInputCeiling!);
+    const user = call.prompt.find((message) => message.role === "user");
+    assert.ok(user?.role === "user");
+    const text = user.content[0];
+    assert.ok(text?.type === "text");
+    const payload = z.object({ removedHistory: z.array(z.unknown()) }).parse(JSON.parse(text.text));
+    const kept = new Set(result.messages);
+    assert.deepEqual(
+      payload.removedHistory,
+      messages.filter((message) => !kept.has(message)),
+    );
+    assert.ok(
+      result.messages.every((message) => messages.includes(message)),
+      "kept sources are never replaced by excerpts",
+    );
+  });
+}
+
+const imageData = "QUJD".repeat(250_000);
+for (const [name, image] of Object.entries({
+  base64: imageData,
+  dataUrl: `data:image/png;base64,${imageData}`,
+  urlObject: new URL(`data:image/png;base64,${imageData}`),
+  bytes: new Uint8Array(750_000).fill(65),
+  buffer: Buffer.alloc(750_000, 65),
+  arrayBuffer: new Uint8Array(750_000).fill(65).buffer,
+})) {
+  test(`summary omits inline image bytes without changing history: ${name}`, async () => {
+    const messages: ModelMessage[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect screenshot" },
+          { type: "image", image, mediaType: "image/png" },
+        ],
+      },
+      { role: "assistant", content: "Observed a red button. " + "detail ".repeat(1000) },
+      { role: "user", content: "Continue" },
+    ];
+    const before = JSON.stringify(messages);
+    const model = summaryModel();
+    const result = await compactMessages({
+      messages,
+      model,
+      strategy: "summarize",
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+      contextWindow: 128_000,
+      maxOutputTokens: 1000,
+    });
+    assert.equal(result.removed, 2);
+    assert.equal(model.doGenerateCalls.length, 1);
+    const prompt = JSON.stringify(model.doGenerateCalls[0]!.prompt);
+    assert.ok(prompt.length < 20_000);
+    assert.match(prompt, /Observed a red button/);
+    assert.match(prompt, /sha256/);
+    assert.match(prompt, /omitted/);
+    assert.ok(!prompt.includes(imageData));
+    assert.equal(JSON.stringify(messages), before);
+    assert.equal(result.messages[0], messages[2]);
+  });
+}
+
+test("summary projects SDK file and tool media only, preserving business JSON and text", async () => {
+  const business = { type: "image", image: "business-value", data: "must remain" };
+  const messages: ModelMessage[] = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          filename: "screen.png",
+          data: { type: "data", data: imageData },
+        },
+        {
+          type: "file",
+          mediaType: "text/plain",
+          data: { type: "text", text: "verbatim file text" },
+        },
+        { type: "image", image: new URL("https://example.test/image.png") },
+        {
+          type: "file",
+          mediaType: "image/png",
+          data: { type: "reference", reference: { test: "file-123" } },
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: "read", toolName: "read", input: business }],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "read",
+          toolName: "read",
+          output: {
+            type: "content",
+            value: [
+              { type: "text", text: "observed tool text" },
+              { type: "file", mediaType: "image/png", data: { type: "data", data: imageData } },
+              { type: "image-data", mediaType: "image/png", data: imageData },
+              { type: "file-data", mediaType: "image/png", data: imageData },
+              { type: "image-url", url: `data:image/png;base64,${imageData}` },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: "json", toolName: "read", input: {} }],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "json",
+          toolName: "read",
+          output: { type: "json", value: business },
+        },
+      ],
+    },
+    { role: "user", content: "Continue" },
+  ];
+  const before = JSON.stringify(messages);
+  const model = summaryModel();
+  const result = await compactMessages({
+    messages,
+    model,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    contextWindow: 128_000,
+    maxOutputTokens: 1000,
+  });
+  assert.equal(result.removed, 5);
+  const call = model.doGenerateCalls[0]!;
+  const user = call.prompt.find((message) => message.role === "user");
+  assert.ok(user?.role === "user" && user.content[0]?.type === "text");
+  const text = user.content[0].text;
+  assert.ok(text.length < 10_000);
+  for (const expected of [
+    "screen.png",
+    "verbatim file text",
+    "https://example.test/image.png",
+    "file-123",
+    "observed tool text",
+    JSON.stringify(business),
+  ]) {
+    assert.ok(text.includes(expected), expected);
+  }
+  assert.ok(!text.includes(imageData));
+  assert.equal(JSON.stringify(messages), before);
+  const budget = estimatePreparedRequest(
+    call,
+    { provider: model.provider, model: model.modelId, window: 128_000 },
+    0,
   );
+  assert.ok(budget.rawInputEstimate <= budget.availableInputCeiling!);
 });
 
-test("verbatim multi-sentence facts are admitted without admitting mid-sentence fragments", () => {
-  const source =
-    "archive\n".repeat(100) +
-    "Do not replay unknown outcomes. Retry only known failures. Keep input immutable.\n";
-  const registry = buildCompactionSemanticEvidenceRegistry({
-    fullSources: true,
-    messages: [{ sequence: 0, role: "user", summary: source }],
-    toolExecutions: [],
-    resources: [],
-    runningSessions: [],
+test("an oversized first source stays intact and cannot be bypassed by deleting later history", async () => {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "important".repeat(20_000) },
+    { role: "assistant", content: "old response" },
+    { role: "user", content: "current" },
+  ];
+  const model = summaryModel();
+  const result = await compactMessages({
+    messages,
+    model,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    contextWindow: 4000,
   });
-  const id = registry[0]!.evidenceId;
-  for (const [quote, valid] of [
-    ["Do not replay unknown outcomes. Retry only known failures. Keep input immutable.", true],
-    ["Do not replay unknown outcomes. Retry only known failures.", true],
-    ["Retry only known failures. Keep input immutable.", true],
-    ["replay unknown outcomes.", false],
-    ["Retry only known", false],
-    ["Do not replay unknown outcomes.  Retry only known failures.", false],
-  ] as const) {
-    const candidate = validateCompactionModelDraft({
-      evidenceRegistry: registry,
-      presentedEvidenceIds: [id],
-      draft: {
-        ...createEmptyCompactionModelDraft(),
-        constraints: [
-          { priorItemId: null, text: "label", sourceEvidenceIds: [id], sourceQuotes: [quote] },
-        ],
-        evidenceReviews: [{ evidenceId: id, disposition: "reviewed", reason: "Complete" }],
-      },
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.messages, messages);
+  assert.equal(model.doGenerateCalls.length, 0);
+});
+
+test("packing counts provider options, previous summary and output reservation", async () => {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "Earlier request." },
+    { role: "assistant", content: "Earlier inspection." },
+    { role: "user", content: "Continue." },
+  ];
+  for (const extra of [
+    { structuredOutputProviderOptions: { test: { metadata: "重要".repeat(5000) } } },
+    { previousSummary: "Earlier fact".repeat(5000) },
+    { contextWindow: 10 },
+  ]) {
+    const model = summaryModel();
+    const result = await compactMessages({
+      messages,
+      model,
+      strategy: "summarize",
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+      contextWindow: 8000,
+      maxOutputTokens: 2000,
+      ...extra,
     });
-    assert.equal(candidate.state.constraints.length, valid ? 1 : 0, quote);
-    assert.deepEqual(candidate.coveredEvidenceIds, valid ? [id] : [], quote);
-    if (valid) assert.equal(candidate.state.constraints[0]?.text, quote);
+    assert.equal(result.removed, 0);
+    assert.deepEqual(result.messages, messages);
+    assert.equal(model.doGenerateCalls.length, 0);
   }
 });
 
-for (const fragment of ["inspection ", "检查记录", "🧪", '\\"\n']) {
-  test(`summary packing budgets complete UTF-8 evidence: ${JSON.stringify(fragment)}`, () => {
-    const messages = Array.from({ length: 40 }, (_, sequence) => ({
-      sequence,
-      role: "assistant",
-      summary: `${sequence}\n${fragment.repeat(1800)}\nNever replay outcome_unknown.`,
-    }));
-    const registry = buildCompactionSemanticEvidenceRegistry({
-      fullSources: true,
-      messages,
-      toolExecutions: [],
-      resources: [],
-      runningSessions: [],
-    });
-    const context = buildCompactionSemanticModelContext(
-      registry,
-      undefined,
-      1_000_000,
-      undefined,
-      96_000,
-    );
-    const payload = z
-      .object({
-        evidence: z.array(
-          z.object({
-            evidenceId: z.string(),
-            summary: z.string(),
-          }),
-        ),
-      })
-      .parse(JSON.parse(context.prompt));
-    assert.ok(Math.ceil(Buffer.byteLength(context.prompt) / 3.5) <= 96_000);
-    assert.ok(payload.evidence.length > 10, "a token budget must not become a character budget");
-    assert.ok(payload.evidence.length <= 32);
-    for (const [index, entry] of payload.evidence.entries()) {
-      assert.equal(entry.summary, messages[index]?.summary, "never clip an admitted source");
-      assert.equal(entry.evidenceId, context.includedEvidenceIds[index]);
-    }
+test("source packing backs off at settled steps in a long old turn while keeping its user", async () => {
+  const messages: ModelMessage[] = [{ role: "user", content: "old-anchor" }];
+  for (let index = 0; index < 8; index += 1) {
+    messages.push({ role: "assistant", content: `STEP-${index}:` + "x".repeat(3000) });
+  }
+  messages.push({ role: "user", content: "current" });
+  const model = summaryModel();
+  const result = await compactMessages({
+    messages,
+    model,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    contextWindow: 4000,
+    maxOutputTokens: 500,
   });
-}
-
-test("an oversized mandatory source is retained rather than clipped to the token allowance", () => {
-  const registry = buildCompactionSemanticEvidenceRegistry({
-    fullSources: true,
-    messages: [{ sequence: 0, role: "user", summary: "重要事实".repeat(1000) }],
-    toolExecutions: [],
-    resources: [],
-    runningSessions: [],
-  });
-  assert.throws(
-    () => buildCompactionSemanticModelContext(registry, undefined, 1_000_000, undefined, 1000),
-    /evidence_unpresentable/,
-  );
+  assert.ok(result.removed > 0 && result.removed < 9);
+  assert.equal(result.messages[0], messages[0]);
+  assert.equal(result.messages.at(-1), messages.at(-1));
+  const call = model.doGenerateCalls[0]!;
+  const user = call.prompt.find((message) => message.role === "user");
+  assert.ok(user?.role === "user" && user.content[0]?.type === "text");
+  const payload = z
+    .object({ retainedUserMessages: z.array(z.unknown()) })
+    .parse(JSON.parse(user.content[0].text));
+  assert.deepEqual(payload.retainedUserMessages, [messages[0], messages.at(-1)]);
 });
 
-for (const cause of ["output reserve", "provider options"] as const) {
-  test(`summary final SDK guard counts ${cause} before dispatch`, async () => {
-    let dispatched = false;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () => {
-        dispatched = true;
-        throw new Error("must not dispatch an oversized summary request");
-      },
-    });
-    await assert.rejects(
-      compactMessages({
-        model,
-        messages: [
-          { role: "user", content: "Earlier requirements." },
-          { role: "assistant", content: "Earlier inspection." },
-          { role: "user", content: "Continue." },
-        ],
-        strategy: "summarize",
-        keepRecentTurns: 1,
-        keepRecentTokens: 1,
-        contextWindow: cause === "output reserve" ? 2048 : 128000,
-        maxOutputTokens: 8192,
-        ...(cause === "provider options"
-          ? {
-              structuredOutputProviderOptions: { test: { metadata: "重要".repeat(100000) } },
-            }
-          : {}),
-      }),
-      /evidence_unpresentable/,
-    );
-    assert.equal(dispatched, false);
+test("retained user context participates in summary packing instead of bypassing the budget", async () => {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "Review only" },
+    { role: "assistant", content: "Found a P2 issue" },
+    { role: "user", content: "Fix it under these constraints: " + "重要约束".repeat(10_000) },
+  ];
+  const model = summaryModel();
+  const result = await compactMessages({
+    messages,
+    model,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    contextWindow: 4000,
+    maxOutputTokens: 500,
   });
-}
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.messages, messages);
+  assert.equal(model.doGenerateCalls.length, 0);
+});
+
+test("retained user media is projected while preserving its instruction and original payload", async () => {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "Review only" },
+    { role: "assistant", content: "Found a P2 issue" },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "按这张截图修复，不要发布。" },
+        { type: "image", image: imageData, mediaType: "image/png" },
+      ],
+    },
+  ];
+  const before = structuredClone(messages);
+  const model = summaryModel();
+  const result = await compactMessages({
+    messages,
+    model,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    contextWindow: 8000,
+    maxOutputTokens: 500,
+  });
+  assert.equal(result.removed, 2);
+  assert.equal(model.doGenerateCalls.length, 1);
+  const call = model.doGenerateCalls[0]!;
+  const user = call.prompt.find((message) => message.role === "user");
+  assert.ok(user?.role === "user" && user.content[0]?.type === "text");
+  const payload = z
+    .object({ retainedUserMessages: z.array(z.unknown()) })
+    .parse(JSON.parse(user.content[0].text));
+  const context = JSON.stringify(payload.retainedUserMessages);
+  assert.match(context, /按这张截图修复，不要发布/);
+  assert.match(context, /omitted/);
+  assert.ok(!context.includes(imageData));
+  assert.deepEqual(result.messages, [messages[2]]);
+  assert.deepEqual(messages, before);
+});

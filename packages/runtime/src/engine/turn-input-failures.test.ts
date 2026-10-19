@@ -71,49 +71,78 @@ test("failed acceptance does not claim durable input or infer, and session remai
   }
 });
 
-test("real pre-turn compaction provider failure retains raw accepted input without inference", async () => {
-  let inferenceCalls = 0;
-  let summaryCalls = 0;
-  const persisted: ModelMessage[] = [];
-  const session = new AgentSession({
-    id: "precompact-provider-failure",
-    sources: [],
-    maxSteps: 1,
-    model: new MockLanguageModelV4({
-      doStream: async () => {
-        inferenceCalls += 1;
-        throw new Error("inference must not start");
-      },
-      doGenerate: async () => {
-        summaryCalls += 1;
-        throw new Error("ECONNRESET");
-      },
-    }),
-    initialMessages: [
+for (const pressure of ["soft", "hard"] as const) {
+  test(`real pre-turn summary failure retains accepted input under ${pressure} request pressure`, async () => {
+    let inferenceCalls = 0;
+    let summaryCalls = 0;
+    let replacements = 0;
+    const persisted: ModelMessage[] = [];
+    const original: ModelMessage[] = [
       { role: "user", content: "older" },
       { role: "assistant", content: "x".repeat(2000) },
-    ],
-    contextWindow: 20_000, // The summary must fit before exercising provider failure.
-    compaction: {
-      enabled: true,
-      strategy: "summarize",
-      threshold: 0.01,
-      keepRecentTurns: 1,
-      keepRecentTokens: 1,
-    },
-    onPersist: (messages) => persisted.push(...messages),
+    ];
+    const inference = textModel(() => {
+      inferenceCalls += 1;
+    });
+    const session = new AgentSession({
+      id: `precompact-provider-failure-${pressure}`,
+      sources: [],
+      maxSteps: 1,
+      model: new MockLanguageModelV4({
+        doStream: (options) => inference.doStream(options),
+        doGenerate: async () => {
+          summaryCalls += 1;
+          throw new Error("ECONNRESET");
+        },
+      }),
+      initialMessages: original,
+      contextWindow: 20_000,
+      // This overhead affects only the task request; the complete summary source still fits.
+      ...(pressure === "hard" ? { systemPrompt: "mandatory system context ".repeat(4000) } : {}),
+      compaction: {
+        enabled: true,
+        strategy: "summarize",
+        threshold: 0.01,
+        keepRecentTurns: 1,
+        keepRecentTokens: 1,
+      },
+      onPersist: (messages) => persisted.push(...messages),
+      onReplace: () => {
+        replacements += 1;
+      },
+    });
+    try {
+      const events = await drain(session, "new accepted input");
+      assert.equal(summaryCalls, 1, "one failed summary attempt per unchanged request");
+      assert.equal(replacements, 0, "summary failure must not replace the original context");
+      assert.deepEqual(session.getMessages().slice(0, original.length), original);
+      assert.deepEqual(
+        persisted.filter((message) => message.role === "user"),
+        [{ role: "user", content: "new accepted input" }],
+      );
+      if (pressure === "soft") {
+        assert.equal(inferenceCalls, 1);
+        assert.equal(
+          events.some((event) => event.type === "error"),
+          false,
+        );
+        assert.equal(events.at(-1)?.type, "message-finish");
+      } else {
+        assert.equal(inferenceCalls, 0);
+        assert.ok(
+          events.some(
+            (event) =>
+              event.type === "error" && /context_request_budget_unrecoverable/u.test(event.message),
+          ),
+        );
+        assert.deepEqual(persisted, [{ role: "user", content: "new accepted input" }]);
+        assert.equal(session.getMessages().at(-1)?.content, "new accepted input");
+      }
+    } finally {
+      await session.close();
+    }
   });
-  try {
-    const events = await drain(session, "new accepted input");
-    assert.ok(summaryCalls > 0);
-    assert.equal(inferenceCalls, 0);
-    assert.ok(events.some((event) => event.type === "error"));
-    assert.deepEqual(persisted, [{ role: "user", content: "new accepted input" }]);
-    assert.equal(session.getMessages().at(-1)?.content, "new accepted input");
-  } finally {
-    await session.close();
-  }
-});
+}
 
 for (const termination of ["cancel", "timeout"] as const) {
   test(`${termination} during synchronous Skill loading retains input and never starts inference`, async () => {

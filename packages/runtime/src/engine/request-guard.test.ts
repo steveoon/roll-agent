@@ -145,10 +145,10 @@ test("soft 75% target never becomes a hard rejection or repeated unchanged prepa
   }
 });
 
-test("expired summary allowance still verifies and admits a fitting request above the advisory target", async (t) => {
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: new Date() });
+test("expired summary deadline still verifies and admits a fitting request above the advisory target", async () => {
   let calls = 0;
   let drafts = 0;
+  let timeoutObserved = false;
   const model = new MockLanguageModelV4({
     doStream: async () => {
       calls += 1;
@@ -157,8 +157,21 @@ test("expired summary allowance still verifies and admits a fitting request abov
     doGenerate: async ({ abortSignal }) => {
       drafts += 1;
       assert.ok(abortSignal);
-      t.mock.timers.tick(1001);
-      throw new DOMException("Summary deadline expired", "TimeoutError");
+      return new Promise<never>((_resolve, reject) => {
+        const watchdog = setTimeout(
+          () => reject(new Error("summary abort was not signalled")),
+          1_000,
+        );
+        abortSignal.addEventListener(
+          "abort",
+          () => {
+            timeoutObserved = true;
+            clearTimeout(watchdog);
+            reject(abortSignal.reason);
+          },
+          { once: true },
+        );
+      });
     },
   });
   const initialMessages = Array.from({ length: 20 }, () => [
@@ -177,7 +190,7 @@ test("expired summary allowance still verifies and admits a fitting request abov
     maxSteps: 1,
     initialMessages,
     contextWindow: Math.ceil(raw / 0.8),
-    compaction: { ...compaction, strategy: "summarize", timeoutMs: 1000, maxOutputTokens: 512 },
+    compaction: { ...compaction, strategy: "summarize", timeoutMs: 15, maxOutputTokens: 512 },
   });
   try {
     const events = await drain(session, "new goal");
@@ -187,11 +200,16 @@ test("expired summary allowance still verifies and admits a fitting request abov
     );
     assert.equal(calls, 1);
     assert.equal(drafts, 1);
+    assert.equal(timeoutObserved, true);
     assert.equal(events.at(-1)?.type, "message-finish");
-    const episode = session.getMaintenanceEpisodes()[0];
-    assert.equal(episode?.reason, "advisory_target_miss");
-    assert.ok(episode?.after);
-    assert.equal(episode.checkpointId, undefined, "expired work cannot commit");
+    assert.equal(
+      events.filter((event) => event.type === "context-compacted" && event.removed > 0).length,
+      0,
+    );
+    assert.deepEqual(session.getMessages().slice(0, initialMessages.length), initialMessages);
+    assert.ok(session.getRequestBudgetState().comparison?.after);
+    assert.equal(session.getRequestBudgetState().comparison?.spaceImproved, false);
+    assert.ok(session.getRequestBudgetState().preparedAttempts <= 3);
   } finally {
     await session.close();
   }
@@ -369,7 +387,11 @@ test("unpresentable full evidence retains its tail and still admits a fitting SD
     assert.equal(calls, 1);
     assert.ok(request.includes(marker));
     assert.deepEqual(session.getMessages().slice(0, 2), initialMessages);
-    assert.equal(session.getMaintenanceEpisodes()[0]?.reason, "advisory_target_miss");
+    assert.equal(
+      events.filter((event) => event.type === "context-compacted" && event.removed > 0).length,
+      0,
+    );
+    assert.ok(session.getRequestBudgetState().preparedAttempts <= 3);
   } finally {
     await session.close();
   }

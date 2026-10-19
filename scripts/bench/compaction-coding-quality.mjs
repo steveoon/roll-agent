@@ -212,11 +212,10 @@ for (const compact of values.variant === "compacted"
                 : [],
             )
             .join("\n");
-          const evidence = /<harness-evidence>\n([\s\S]+)\n<\/harness-evidence>/.exec(prompt)?.[1];
           variant.summaryRequests.push({
             at: new Date().toISOString(),
             promptChars: JSON.stringify(params.prompt).length,
-            evidence: evidence ? JSON.parse(evidence) : null,
+            sourceChars: prompt.length,
           });
           save();
         } else {
@@ -309,7 +308,6 @@ for (const compact of values.variant === "compacted"
       }
       if (event.type === "step-finish" && event.usage) variant.usage.push(event.usage);
     }
-    variant.episodes = session.getMaintenanceEpisodes();
     variant.finalBudget = session.getRequestBudgetState().last;
     const checkpoint = store.getLatestCheckpoint(id);
     variant.checkpointFactVisibility = facts.map((fact) =>

@@ -121,7 +121,7 @@ for (const failure of [
         configurable: true,
         value: async () => {
           session.cancel();
-          return undefined;
+          return false;
         },
       });
     }
@@ -130,7 +130,7 @@ for (const failure of [
         configurable: true,
         value: async () => {
           t.mock.timers.tick(1001);
-          return undefined;
+          return false;
         },
       });
     }
@@ -146,8 +146,19 @@ for (const failure of [
       failure === "skill" || failure === "metadata" ? "/demo saved request" : "saved request";
     try {
       const events = await drain(session, prompt);
-      assert.equal(calls, 0);
-      assert.ok(events.some((event) => event.type === "error" || event.type === "turn-cancelled"));
+      const firstCalls = failure === "precompact" ? 1 : 0;
+      assert.equal(calls, firstCalls);
+      if (failure === "precompact") {
+        assert.equal(
+          events.some((event) => event.type === "error"),
+          false,
+        );
+        assert.equal(events.at(-1)?.type, "message-finish");
+      } else {
+        assert.ok(
+          events.some((event) => event.type === "error" || event.type === "turn-cancelled"),
+        );
+      }
       assert.equal(store.listTurnInputs(thread).length, 1);
       assert.deepEqual(
         store
@@ -164,21 +175,13 @@ for (const failure of [
         [prompt],
       );
       if (["precompact", "cancel", "timeout"].includes(failure)) {
-        const coverage = { messagesThroughSequence: -1, toolExecutionsThroughSequence: -1 };
-        Object.defineProperty(session, "runCompaction", {
-          value: async () => ({
-            stage: "no_commit",
-            historyChanged: false,
-            coverageBefore: coverage,
-            coverageAfter: coverage,
-          }),
-        });
+        Object.defineProperty(session, "runCompaction", { value: async () => false });
       }
       if (failure === "rollback") {
         Object.defineProperty(session, "syncWorkspaceInstructions", { value: () => {} });
       }
       await drain(session, "next request");
-      assert.equal(calls, 1);
+      assert.equal(calls, firstCalls + 1);
       assert.equal(store.listTurnInputs(thread).length, 2);
       assert.equal(
         store

@@ -1,4 +1,3 @@
-import { projectContextRecovery } from "../store/semantic-ledger.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
@@ -624,7 +623,6 @@ export class RuntimeService {
           ...(protocolVersion === "1.5" || protocolVersion === "1.6"
             ? ["app-output" as const]
             : []),
-          ...(protocolVersion === "1.6" ? ["context-recovery" as const] : []),
         ],
         limits: {
           ...commonResult.limits,
@@ -781,7 +779,8 @@ export class RuntimeService {
         .map((pending) => pending.approval),
       transcriptCompleteness: this.store.getTranscriptCompleteness(params.threadId),
       eventCursor: this.store.getRuntimeEventCursor(params.threadId),
-      contextRecovery: projectContextRecovery(this.store.getContextRecovery(params.threadId)),
+      // V1.6 remains readable for legacy event replay; new sessions have no recovery gate.
+      contextRecovery: null,
     };
   }
 

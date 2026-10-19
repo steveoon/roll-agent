@@ -204,7 +204,6 @@ export class RequestBudgetTracker {
     | undefined;
   private pending: { budget: RequestBudgetSnapshot; owner: string } | undefined;
   private comparison: RequestBudgetComparison | undefined;
-  private episodeBasis: { owner: string; residual: number } | undefined;
   private last: RequestBudgetSnapshot | undefined;
   private prepared = 0;
   private dispatched = 0;
@@ -239,9 +238,7 @@ export class RequestBudgetTracker {
     if (pending !== undefined) {
       // Progress uses one frozen basis; a shape change invalidating admission
       // calibration must not manufacture compression savings.
-      const basis =
-        (this.episodeBasis?.owner === owner ? this.episodeBasis.residual : undefined) ??
-        pending.budget.calibrationResidual;
+      const basis = pending.budget.calibrationResidual;
       const before = compareBudgetOnBasis(pending.budget, basis);
       const after = compareBudgetOnBasis(budget, basis);
       const saved = before.calibratedInputEstimate - after.calibratedInputEstimate;
@@ -259,12 +256,8 @@ export class RequestBudgetTracker {
     this.pending = { budget: before, owner };
     this.comparison = { before };
   }
-  freezeEpisode(owner: string, residual: number): void {
-    this.episodeBasis = { owner, residual };
-  }
   abandonMaintenance(owner: string): void {
     if (this.pending?.owner === owner) this.pending = undefined;
-    if (this.episodeBasis?.owner === owner) this.episodeBasis = undefined;
   }
   /** Approximate post-step predictor: actual prepared overhead + production-projected message delta.
    * No schema resolver/download is repeated; final prepare remains the dispatch authority. */

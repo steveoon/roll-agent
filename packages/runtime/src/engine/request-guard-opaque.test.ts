@@ -98,7 +98,7 @@ for (const opaque of [false, true]) {
   });
 }
 
-test("one send can finish three or more maintenance episodes after new tool progress", async () => {
+test("one send can compact three or more times after new tool progress without replay", async () => {
   let calls = 0;
   let effects = 0;
   const client = new Client({ name: "fixture", version: "1" });
@@ -180,16 +180,18 @@ test("one send can finish three or more maintenance episodes after new tool prog
     );
     assert.equal(calls, 8);
     assert.equal(effects, 7);
-    const episodes = session.getMaintenanceEpisodes();
-    assert.ok(episodes.length >= 3, JSON.stringify(episodes));
-    assert.equal(new Set(episodes.map((e) => e.owner)).size, 1);
-    assert.equal(new Set(episodes.map((e) => e.episodeId)).size, episodes.length);
-    for (const episode of episodes) {
-      assert.ok(episode.deadline <= start + 60000);
-      assert.ok(episode.preparations <= episode.maxPreparations);
-      assert.ok(episode.after);
-      assert.ok(["ready", "advisory_target_miss"].includes(episode.reason ?? ""));
-    }
+    const compactions = events.flatMap((event) =>
+      event.type === "context-compacted" && event.removed > 0 ? [event] : [],
+    );
+    assert.ok(compactions.length >= 3, JSON.stringify(compactions));
+    const checkpointIds = compactions.map((event) => event.checkpointId);
+    assert.ok(checkpointIds.every((id) => typeof id === "string"));
+    assert.equal(new Set(checkpointIds).size, compactions.length);
+    assert.ok(Date.now() - start < 60000);
+    assert.ok(
+      session.getRequestBudgetState().preparedAttempts <= calls + compactions.length * 2 + 1,
+    );
+    assert.equal(events.filter((event) => event.type === "message-finish").at(-1)?.text, "done");
   } finally {
     await session.close();
   }

@@ -95,10 +95,13 @@ test("unknown window overflow cannot redispatch a larger complete request after 
     const events = await collect(session, "new goal");
     assert.equal(calls, 1);
     assert.ok(events.some((e) => e.type === "error"));
-    const comparison = session.getRequestBudgetState().comparison;
-    assert.ok(comparison?.after);
-    assert.equal(comparison.spaceImproved, false);
-    assert.ok(comparison.after.rawInputEstimate >= comparison.before.rawInputEstimate);
+    assert.equal(session.getRequestBudgetState().comparison?.after, undefined);
+    assert.equal(
+      events.filter((event) => event.type === "context-compacted" && event.removed > 0).length,
+      0,
+    );
+    assert.equal(session.getMessages()[0]?.content, "old small goal");
+    assert.ok(session.getMessages().some((message) => message.content === "new goal"));
   } finally {
     await session.close();
   }
@@ -150,7 +153,6 @@ test("real cancelled maintenance cannot be finalized at the next turn's first SD
       return false;
     },
   });
-  Object.defineProperty(session, "runAutoCompactionPasses", { value: async () => false });
   try {
     await collect(session, "X".repeat(29000));
     const before = tracker.view().comparison!.before;

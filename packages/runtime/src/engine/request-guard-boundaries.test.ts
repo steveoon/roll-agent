@@ -34,7 +34,7 @@ async function collect(session: AgentSession, text = "accepted") {
   return events;
 }
 for (const reason of ["cancel", "timeout", "failure"] as const) {
-  test(`guard maintenance ${reason} leaves finalized after pending and accepted input reusable`, async () => {
+  test(`guard maintenance ${reason} preserves accepted input and truthfully reports request preparation`, async () => {
     let calls = 0;
     const model = new MockLanguageModelV4({
       doStream: async () => {
@@ -57,8 +57,7 @@ for (const reason of ["cancel", "timeout", "failure"] as const) {
         keepRecentTokens: 1,
       },
     });
-    // Isolate the owned-marker recovery boundary; the initial legacy pass remains unchanged.
-    Object.defineProperty(session, "runAutoCompactionPasses", { value: async () => false });
+    // Isolate cancellation and failure at the owned request-maintenance boundary.
     Object.defineProperty(session, "runCompaction", {
       configurable: true,
       value: async () => {
@@ -75,8 +74,15 @@ for (const reason of ["cancel", "timeout", "failure"] as const) {
         session.getMessages().filter((m) => m.role === "user" && m.content === "accepted").length,
         1,
       );
-      assert.equal(session.getRequestBudgetState().comparison?.after, undefined);
-      assert.equal(session.getRequestBudgetState().preparedAttempts, 1);
+      const budget = session.getRequestBudgetState();
+      if (reason === "failure") {
+        assert.ok(budget.comparison?.after);
+        assert.equal(budget.comparison.spaceImproved, false);
+        assert.equal(budget.preparedAttempts, 2);
+      } else {
+        assert.equal(budget.comparison?.after, undefined);
+        assert.equal(budget.preparedAttempts, 1);
+      }
       assert.ok(events.some((event) => event.type === "error" || event.type === "turn-cancelled"));
       session.switchModel({ model, contextWindow: 100000 });
       assert.ok((await collect(session, "next")).some((event) => event.type === "message-finish"));

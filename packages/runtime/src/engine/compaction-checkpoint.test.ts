@@ -9,14 +9,9 @@ import {
   createCompactionCheckpoint,
   createCompactionCheckpointDraft,
   createCompactionSummary,
-  compactionSummaryQualityAdvisory,
   createEmptyCompactionToolState,
-  extractExplicitCompactionConstraintCandidates,
-  findLatestRealUserGoal,
+  createSummaryCheckpoint,
   parseCompactionCheckpoint,
-  resolveActiveCompactionConstraints,
-  verifyCompactionConstraintCandidates,
-  type ArchivedTranscriptMessage,
   type CompactionCheckpointDraftInput,
 } from "./compaction-checkpoint.ts";
 import {
@@ -24,7 +19,6 @@ import {
   replaceCompactionSemanticConstraints,
   replaceCompactionSemanticGoal,
 } from "./compaction-semantic-state.ts";
-import { attachExplicitSkillCheckpoint } from "./explicit-skill-context.ts";
 import {
   TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
@@ -35,6 +29,22 @@ import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.
 
 const CHECKPOINT_ID = "c41bdaa2-9e08-4aac-a8f0-eb7c6c0ca498";
 const PREVIOUS_ID = "302c48af-68a0-4b82-85cc-e8c59cfcdac0";
+
+test("V3 reminder gives recent original user messages precedence over summary authorization claims", () => {
+  const checkpoint = createSummaryCheckpoint({
+    summary: "Review completed; no repair authorization was found in older history.",
+    generation: 1,
+    transcript: {
+      messages: { fromSequenceExclusive: -1, throughSequence: 5 },
+      toolExecutions: { fromSequenceExclusive: -1, throughSequence: -1 },
+      completeness: "complete",
+    },
+  });
+  const reminder = buildCompactionCheckpointReminder(checkpoint);
+  assert.match(reminder, /Recent original user messages take precedence over this summary/);
+  assert.match(reminder, /including task scope and authorization/);
+  assert.match(reminder, /Missing details in this summary do not imply missing authorization/);
+});
 
 function draft(
   overrides: Partial<CompactionCheckpointDraftInput> = {},
@@ -52,19 +62,6 @@ function draft(
     },
     summary: { status: "skipped" },
     ...overrides,
-  };
-}
-
-function transcript(
-  sequence: number,
-  message: ModelMessage,
-  provenance: ArchivedTranscriptMessage["provenance"] = "native",
-): ArchivedTranscriptMessage {
-  return {
-    sequence,
-    provenance,
-    createdAt: "2026-07-17T10:00:00.000Z",
-    message,
   };
 }
 
@@ -313,205 +310,6 @@ test("CompactionCheckpoint 拒绝回退的 transcript high watermark 和未知�
   );
 });
 
-test("findLatestRealUserGoal 跳过无信息续接与 legacy summary，并读取显式 Skill 的真实 userPrompt", () => {
-  const explicit = attachExplicitSkillCheckpoint(
-    { role: "user", content: "/skill 修一下" },
-    {
-      userPrompt: "修一下类型，并且不要改 API",
-      modelUserContent: "[Skill content]\n...\n[User request]\n修一下类型，并且不要改 API",
-      skillNames: ["skill"],
-    },
-  );
-  const entries = [
-    transcript(0, { role: "user", content: "旧目标" }),
-    transcript(1, explicit),
-    transcript(
-      2,
-      {
-        role: "user",
-        content:
-          "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:\n\n这是历史摘要",
-      },
-      "legacy_snapshot",
-    ),
-    transcript(3, { role: "user", content: "继续" }),
-    transcript(4, { role: "user", content: "继续处理" }),
-  ];
-
-  assert.deepEqual(findLatestRealUserGoal(entries), {
-    verbatimRequest: "修一下类型，并且不要改 API",
-    sourceSequence: 1,
-    status: "active",
-  });
-});
-
-test("findLatestRealUserGoal 跳过仅含礼貌确认前缀的续接，但保留携带新信息的请求", () => {
-  const original = transcript(0, { role: "user", content: "修复调度器" });
-  const informationFree = [
-    "OK，继续",
-    "好的，继续吧",
-    "嗯 接着做",
-    "收到，那继续处理",
-    "Okay, proceed with it",
-    "Continue the same project; no new requirements.",
-  ];
-  for (const content of informationFree) {
-    assert.deepEqual(
-      findLatestRealUserGoal([original, transcript(2, { role: "user", content })]),
-      { verbatimRequest: "修复调度器", sourceSequence: 0, status: "active" },
-      content,
-    );
-  }
-
-  const substantive = [
-    "OK，继续修复 X",
-    "好的，继续，但不要改 API",
-    "嗯 接着做，并补测试",
-    "OKR，继续",
-    "Continue the same project; no new requirements. Also change port 1234.",
-    "继续处理资源排序",
-  ];
-  for (const content of substantive) {
-    assert.deepEqual(
-      findLatestRealUserGoal([original, transcript(2, { role: "user", content })]),
-      { verbatimRequest: content, sourceSequence: 2, status: "active" },
-      content,
-    );
-  }
-});
-
-test("显式约束只从 transcript 原文 clause 提取，普通目标与无信息续接不冒充 constraint", () => {
-  const entries = [
-    transcript(0, {
-      role: "user",
-      content: "修复调度器，但绝对不要修改公开 API；必须保留现有 CLI 行为。",
-    }),
-    transcript(2, { role: "user", content: "继续" }),
-    transcript(4, { role: "user", content: "补齐回归测试" }),
-  ];
-
-  const candidates = extractExplicitCompactionConstraintCandidates(entries);
-  assert.deepEqual(candidates, [
-    { quote: "绝对不要修改公开 API", sourceSequence: 0 },
-    { quote: "必须保留现有 CLI 行为", sourceSequence: 0 },
-  ]);
-  assert.deepEqual(verifyCompactionConstraintCandidates(entries, candidates), [
-    { quote: "必须保留现有 CLI 行为", sourceSequence: 0 },
-    { quote: "绝对不要修改公开 API", sourceSequence: 0 },
-  ]);
-});
-
-test("显式约束 marker regex audit 覆盖 English、CJK 标点、换行与歧义负例", () => {
-  const entries = [
-    transcript(0, { role: "user", content: "继续处理" }),
-    transcript(2, { role: "user", content: "保持进度" }),
-    transcript(4, {
-      role: "user",
-      content: "Fix the scheduler, but must not change the public API.",
-    }),
-    transcript(6, {
-      role: "user",
-      content: "不得删除兼容层，\n务必保留现有 CLI 行为。",
-    }),
-    transcript(8, {
-      role: "user",
-      content: "mustard and avoidance are ordinary words",
-    }),
-    transcript(10, { role: "user", content: "不允许修改公开 API。" }),
-    transcript(12, { role: "user", content: "不可以删除日志；不再允许改变输出格式。" }),
-    transcript(14, {
-      role: "user",
-      content: "Can you fix the scheduler but must not change the public CLI?",
-    }),
-    transcript(16, { role: "user", content: "可以帮我继续但不要删除回归测试" }),
-  ];
-
-  assert.deepEqual(extractExplicitCompactionConstraintCandidates(entries), [
-    { quote: "must not change the public API", sourceSequence: 4 },
-    { quote: "不得删除兼容层", sourceSequence: 6 },
-    { quote: "务必保留现有 CLI 行为", sourceSequence: 6 },
-    { quote: "不允许修改公开 API", sourceSequence: 10 },
-    { quote: "不可以删除日志", sourceSequence: 12 },
-    { quote: "不再允许改变输出格式", sourceSequence: 12 },
-    { quote: "must not change the public CLI", sourceSequence: 14 },
-    { quote: "不要删除回归测试", sourceSequence: 16 },
-  ]);
-});
-
-test("后续同 scope 显式允许会撤销旧约束，旧版整条 goal constraint 不再无条件继承", () => {
-  const entries = [
-    transcript(0, { role: "user", content: "绝对不要修改公开 API" }),
-    transcript(2, { role: "user", content: "继续" }),
-    transcript(4, { role: "user", content: "现在允许修改公开 API" }),
-  ];
-
-  assert.deepEqual(
-    resolveActiveCompactionConstraints(entries, [
-      { quote: "修复调度器，但绝对不要修改公开 API", sourceSequence: 0 },
-      { quote: "绝对不要修改公开 API", sourceSequence: 0 },
-      { quote: "继续", sourceSequence: 2 },
-    ]),
-    [],
-  );
-  assert.deepEqual(
-    resolveActiveCompactionConstraints([
-      transcript(0, { role: "user", content: "绝对不要修改公开 API" }),
-      transcript(2, { role: "user", content: "不再要求绝对不要修改公开 API" }),
-    ]),
-    [],
-  );
-  assert.deepEqual(
-    resolveActiveCompactionConstraints([
-      transcript(0, { role: "user", content: "must not modify the public API" }),
-      transcript(2, { role: "user", content: "you can modify the public API" }),
-    ]),
-    [],
-  );
-  for (const revocation of [
-    "公开 API 现在可以改了",
-    "解除公开 API 限制",
-    "可以修改公开 API 了",
-    "不需要避免修改公开 API",
-  ]) {
-    assert.deepEqual(
-      resolveActiveCompactionConstraints([
-        transcript(0, { role: "user", content: "绝对不要修改公开 API" }),
-        transcript(2, { role: "user", content: revocation }),
-      ]),
-      [],
-      revocation,
-    );
-  }
-});
-
-test("不允许、不可以、不再允许是负约束，不会从内部允许词误判为 revocation", () => {
-  const entries = [
-    transcript(0, { role: "user", content: "绝对不要修改公开 API" }),
-    transcript(2, { role: "user", content: "不允许修改公开 API" }),
-  ];
-
-  assert.deepEqual(resolveActiveCompactionConstraints(entries), [
-    { quote: "不允许修改公开 API", sourceSequence: 2 },
-  ]);
-});
-
-test("约束只接受可回指到真实 user message 的原文 quote，并保留上一 checkpoint", () => {
-  const entries = [transcript(3, { role: "user", content: "请修复，并且不要改公开 API" })];
-  const constraints = verifyCompactionConstraintCandidates(
-    entries,
-    [
-      { quote: "不要改公开 API", sourceSequence: 3 },
-      { quote: "已经发布成功", sourceSequence: 3 },
-    ],
-    [{ quote: "保留旧配置", sourceSequence: 1 }],
-  );
-
-  assert.deepEqual(constraints, [
-    { quote: "保留旧配置", sourceSequence: 1 },
-    { quote: "不要改公开 API", sourceSequence: 3 },
-  ]);
-});
-
 test("Tool state 只信 typed outcome，不从误导 display 推断", () => {
   const messages: ModelMessage[] = [
     {
@@ -606,7 +404,6 @@ test("Summary correctness 只拒绝空内容，语言无关的质量提示不参
     reason: "empty summary",
   });
   assert.equal(createCompactionSummary("太短").status, "valid");
-  assert.equal(compactionSummaryQualityAdvisory("太短"), "summary is unusually short");
   assert.equal(
     createCompactionSummary(
       "現在の作業を安全に継続し、保存済みの制約と検証結果を確認してから次の変更を実施する。",
