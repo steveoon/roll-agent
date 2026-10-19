@@ -1,4 +1,4 @@
-import { afterEach, test } from "node:test";
+import { after, afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   computeVisibleWindow,
@@ -6,13 +6,27 @@ import {
   retainedScrollOffset,
   TranscriptViewport,
 } from "./transcript-viewport.ts";
-import { createElement as h } from "react";
+import { act, createElement as h } from "react";
 import { Box } from "ink";
 import { cleanup, render } from "ink-testing-library";
 import { setTimeout as delay } from "node:timers/promises";
 import { createInitialState, type HistoryItem } from "./state.ts";
 
-afterEach(() => cleanup());
+const previousActEnvironment = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "IS_REACT_ACT_ENVIRONMENT",
+);
+Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+after(() => {
+  if (previousActEnvironment === undefined) {
+    Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  } else {
+    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousActEnvironment);
+  }
+});
+afterEach(async () => {
+  await act(() => cleanup());
+});
 
 test("computeVisibleWindow follows the tail and keeps one viewport of overscan", () => {
   const result = computeVisibleWindow([2, 2, 2, 2, 2, 2], 4, 0);
@@ -74,28 +88,32 @@ test("viewport loads older records with PageUp and preserves visible rows after 
         },
       }),
     );
-  const view = render(viewFor(original));
+  const view = await act(() => render(viewFor(original)));
   // Layout measurement and scroll coalescing need not settle within a fixed key count on CI.
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
-    view.stdin.write("\u001b[5~");
-    await delay(25);
+    await act(async () => {
+      view.stdin.write("\u001b[5~");
+      await delay(25);
+    });
     if (loads > 0 && /row-0\b/.test(view.lastFrame() ?? "")) break;
   }
   assert.ok(loads > 0);
   assert.match(view.lastFrame() ?? "", /row-0\b/);
   const before = (view.lastFrame() ?? "").match(/row-\d+/g);
   assert.ok(before?.length);
-  view.rerender(
-    viewFor([
-      ...Array.from(
-        { length: 10 },
-        (_, i): HistoryItem => ({ kind: "user", id: `earlier-${i}`, text: `earlier-${i}` }),
-      ),
-      ...original,
-    ]),
-  );
-  await delay(100);
+  await act(async () => {
+    view.rerender(
+      viewFor([
+        ...Array.from(
+          { length: 10 },
+          (_, i): HistoryItem => ({ kind: "user", id: `earlier-${i}`, text: `earlier-${i}` }),
+        ),
+        ...original,
+      ]),
+    );
+    await delay(100);
+  });
   const after = view.lastFrame() ?? "";
   assert.deepEqual(after.match(/row-\d+/g), before);
   assert.doesNotMatch(after, /条新内容/);
