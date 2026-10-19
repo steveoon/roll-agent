@@ -46,6 +46,8 @@ export interface TranscriptViewportProps {
   readonly onWheelScroll?: () => void;
   readonly thinkingDisplay: ChatThinkingDisplay;
   readonly diffDisplay: DiffDisplayMode;
+  readonly historyNotice?: string | undefined;
+  readonly onLoadOlder?: (() => void) | undefined;
 }
 
 interface VisibleWindow {
@@ -94,6 +96,17 @@ function historyEntry(
 
 export function coalesceScrollOffset(next: number, maxScroll: number): number {
   return Math.min(Math.max(0, next), Math.max(0, maxScroll));
+}
+
+/** Offsets are measured from the bottom: prepending must not move existing content. */
+export function retainedScrollOffset(
+  offset: number,
+  heightDelta: number,
+  viewportDelta: number,
+  prependedHeight: number,
+  maxScroll: number,
+): number {
+  return coalesceScrollOffset(offset + heightDelta - viewportDelta - prependedHeight, maxScroll);
 }
 
 export function computeVisibleWindow(
@@ -198,6 +211,14 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
         marginLeft: 1,
       });
     }
+    if (props.historyNotice !== undefined) {
+      result.unshift({
+        key: "history-page-notice",
+        element: h(Text, { dimColor: true }, props.historyNotice),
+        paddingTop: 0,
+        marginLeft: 1,
+      });
+    }
     if (hasLiveContent(props.live)) {
       result.push({
         key: "live",
@@ -212,6 +233,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     props.banner,
     props.diffDisplay,
     props.history,
+    props.historyNotice,
     props.live,
     props.onBannerSettled,
     props.thinkingDisplay,
@@ -243,40 +265,75 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     });
   }, [entries]);
 
-  const measuredHeights = entries.map((entry) => heights.get(entry.key));
+  const measuredHeights = useMemo(
+    () => entries.map((entry) => heights.get(entry.key)),
+    [entries, heights],
+  );
   const allMeasured = measuredHeights.every((height) => height !== undefined);
-  const numericHeights = allMeasured ? measuredHeights.map((height) => height ?? 0) : [];
+  const numericHeights = useMemo(
+    () => (allMeasured ? measuredHeights.map((height) => height ?? 0) : []),
+    [allMeasured, measuredHeights],
+  );
   const totalHeight = numericHeights.reduce((sum, height) => sum + height, 0);
   const viewportHeight = Math.max(1, viewportMetrics.height);
   const maxScroll = Math.max(0, totalHeight - viewportHeight);
-  const clampedOffset = Math.min(scrollOffset, maxScroll);
-  const previousGeometryRef = useRef<{ totalHeight: number; viewportHeight: number } | undefined>(
-    undefined,
-  );
+  // New page rows need one measurement pass. Keep the old bottom-relative offset meanwhile.
+  const clampedOffset = allMeasured ? Math.min(scrollOffset, maxScroll) : scrollOffset;
+  const previousGeometryRef = useRef<
+    | {
+        totalHeight: number;
+        viewportHeight: number;
+        firstKey: string | undefined;
+        prefixHeight: number;
+      }
+    | undefined
+  >(undefined);
 
   useEffect(() => {
     if (!allMeasured) {
       return;
     }
     const previous = previousGeometryRef.current;
-    previousGeometryRef.current = { totalHeight, viewportHeight };
+    const firstKey = props.history[0] === undefined ? undefined : `history:${props.history[0].id}`;
+    const firstIndex = entries.findIndex((entry) => entry.key === firstKey);
+    previousGeometryRef.current = {
+      totalHeight,
+      viewportHeight,
+      firstKey,
+      prefixHeight: numericHeights
+        .slice(0, Math.max(0, firstIndex))
+        .reduce((sum, height) => sum + height, 0),
+    };
     if (previous === undefined || scrollOffsetRef.current === 0) {
       return;
     }
-    const delta = totalHeight - previous.totalHeight - (viewportHeight - previous.viewportHeight);
-    if (delta !== 0) {
-      setScrollOffset((current) => Math.min(Math.max(0, current + delta), maxScroll));
-    }
-  }, [allMeasured, maxScroll, totalHeight, viewportHeight]);
+    const retainedIndex = entries.findIndex((entry) => entry.key === previous.firstKey);
+    const prependedHeight =
+      retainedIndex < 0
+        ? 0
+        : numericHeights.slice(0, retainedIndex).reduce((sum, height) => sum + height, 0) -
+          previous.prefixHeight;
+    setScrollOffset((current) =>
+      retainedScrollOffset(
+        current,
+        totalHeight - previous.totalHeight,
+        viewportHeight - previous.viewportHeight,
+        prependedHeight,
+        maxScroll,
+      ),
+    );
+  }, [allMeasured, entries, maxScroll, numericHeights, props.history, totalHeight, viewportHeight]);
 
-  const previousHistoryLengthRef = useRef(props.history.length);
+  const previousHistoryRef = useRef(props.history);
   useEffect(() => {
-    const previous = previousHistoryLengthRef.current;
-    previousHistoryLengthRef.current = props.history.length;
-    if (scrollOffsetRef.current > 0 && props.history.length > previous) {
-      setUnseenHistory((current) => current + props.history.length - previous);
+    const previousLast = previousHistoryRef.current.at(-1)?.id;
+    previousHistoryRef.current = props.history;
+    const previousIndex = props.history.findIndex((item) => item.id === previousLast);
+    const appended = previousIndex < 0 ? 0 : props.history.length - previousIndex - 1;
+    if (scrollOffsetRef.current > 0 && appended > 0) {
+      setUnseenHistory((current) => current + appended);
     }
-  }, [props.history.length]);
+  }, [props.history]);
 
   const liveSignature = `${props.live.streamingText.length}:${props.live.reasoningText.length}:${props.live.activeTools.length}:${props.live.compacting ? "1" : "0"}`;
   const previousLiveSignatureRef = useRef(liveSignature);
@@ -318,8 +375,11 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     (delta: number): void => {
       const base = pendingScrollRef.current ?? scrollOffsetRef.current;
       scrollTo(base + delta);
+      if (delta > 0 && allMeasured && base + delta >= Math.max(0, maxScroll - viewportHeight)) {
+        props.onLoadOlder?.();
+      }
     },
-    [scrollTo],
+    [allMeasured, maxScroll, props.onLoadOlder, scrollTo, viewportHeight],
   );
   const followTail = useCallback((): void => {
     // A hidden live entry may have changed height while the user was browsing history.
@@ -348,6 +408,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
         scrollBy(-Math.max(1, viewportHeight - 2));
       } else if (key.ctrl && key.home) {
         scrollTo(maxScroll);
+        props.onLoadOlder?.();
       } else if (key.ctrl && key.end) {
         followTail();
       }

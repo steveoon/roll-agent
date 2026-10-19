@@ -1,3 +1,4 @@
+export { createRollUiChatGptController } from "./chatgpt-controller.ts";
 export {
   createRollUiCompanionController,
   RollUiCompanionBusyError,

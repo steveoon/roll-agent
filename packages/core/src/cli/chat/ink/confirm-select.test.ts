@@ -12,6 +12,37 @@ const ESC = "\u001b";
 const SESSION_LABEL = "本会话内不再询问：写入工作目录内的文件";
 const EXTERNAL_SESSION_LABEL = "本会话内不再询问：roll__read_file 访问工作目录外的任意路径";
 
+test("缺少完整正文时不把截断的 diff 标为完整变更", async () => {
+  const ui = render(
+    h(ConfirmSelect, {
+      prompt: "编辑文件？",
+      args: "{}",
+      diff: {
+        path: "f",
+        change: "modify",
+        added: 1,
+        removed: 1,
+        hunks: 1,
+        truncated: true,
+        unified: "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n",
+      },
+      width: 80,
+      maxRows: 12,
+      onDecide: () => {},
+    }),
+  );
+  try {
+    assert.match(ui.lastFrame() ?? "", /变更预览/u);
+    assert.doesNotMatch(ui.lastFrame() ?? "", /完整变更/u);
+    ui.stdin.write("\u001b[6~");
+    await delay(10);
+    assert.match(ui.lastFrame() ?? "", /变更预览/u);
+    assert.doesNotMatch(ui.lastFrame() ?? "", /完整变更/u);
+  } finally {
+    ui.unmount();
+  }
+});
+
 test("calendar approval exposes full timing and quota through parameter pages in a small terminal", async () => {
   let approved = false;
   const ui = render(
@@ -432,3 +463,43 @@ test("compact 无 diff 时说明第二行 / 标签仍优先于 args 行（现状
   assert.ok(frame.split("\n").length <= 6);
   assert.match(frame, /本会话内不再询问：修改工作目录内的文件/u);
 });
+
+for (const maxRows of [9, 20]) {
+  test(`完整 diff 超过首屏字符上限且长行尾部可分页审查（${maxRows} 行终端）`, async () => {
+    let decided = false;
+    const fullDiff = `${"+ordinary change\n".repeat(720)}+${"x".repeat(200)}LONG_LINE_END\n+FINAL_REVIEW_MARKER`;
+    const ui = render(
+      h(ConfirmSelect, {
+        prompt: "修改文件？",
+        args: "{}",
+        diff: { ...CONFIRM_DIFF, truncated: true },
+        fullDiff,
+        width: 50,
+        maxRows,
+        onDecide: () => {
+          decided = true;
+        },
+      }),
+    );
+    try {
+      assert.match(ui.lastFrame() ?? "", /PgDn 完整变更/u);
+      let frames = "";
+      for (let page = 0; page < 130; page++) {
+        ui.stdin.write("\u001b[6~");
+        await delay(5);
+        const frame = ui.lastFrame() ?? "";
+        assert.ok(frame.split("\n").length <= maxRows);
+        frames += frame;
+        if (frames.includes("FINAL_REVIEW_MARKER")) break;
+      }
+      assert.match(frames, /LONG_LINE_END/u);
+      assert.match(frames, /FINAL_REVIEW_MARKER/u);
+      assert.equal(decided, false);
+      ui.stdin.write("y");
+      await delay(10);
+      assert.equal(decided, true);
+    } finally {
+      ui.unmount();
+    }
+  });
+}

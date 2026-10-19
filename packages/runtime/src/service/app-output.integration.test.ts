@@ -18,7 +18,7 @@ import {
   runtimeMethodSchemas,
   operationIdSchema,
   threadIdSchema,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
 } from "@roll-agent/protocol";
 import { AgentSession } from "../engine/agent-session.ts";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -130,7 +130,7 @@ for (const invalid of [false, true]) {
         const { thread } = await service.createThread(
           runtimeMethodSchemas["thread.create"].params.parse({ requestId: randomUUID() }),
         );
-        const events: RuntimeEventEnvelopeV15[] = [];
+        const events: RuntimeEventEnvelopeV16[] = [];
         const done = Promise.withResolvers<void>();
         service.onEvent((event) => {
           events.push(event);

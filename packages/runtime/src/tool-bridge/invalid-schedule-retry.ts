@@ -3,12 +3,16 @@ import type { StopCondition, ToolSet } from "ai";
 import { readToolOutcome, TOOL_OUTCOME_KINDS } from "./normalize-result.ts";
 import { SCHEDULE_CREATE_TOOL_ID } from "./schedule-tool.ts";
 
-/** Local to one inference sequence; never blocks repaired inputs or future user turns. */
+/** Local to one user turn, including internal stream rebuilds; never blocks future turns. */
 export function createInvalidScheduleRetryGuard() {
   let message: string | undefined;
+  const invalidInputs: unknown[] = [];
+  const observedSteps = new WeakSet<object>();
   const stop: StopCondition<ToolSet> = ({ steps }) => {
-    const invalidInputs: unknown[] = [];
+    if (message !== undefined) return true;
     for (const step of steps) {
+      if (observedSteps.has(step)) continue;
+      observedSteps.add(step);
       for (const call of step.toolCalls) {
         if (call.toolName !== SCHEDULE_CREATE_TOOL_ID) continue;
         const result = step.toolResults.find((item) => item.toolCallId === call.toolCallId);

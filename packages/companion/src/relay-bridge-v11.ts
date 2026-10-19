@@ -18,6 +18,9 @@ import {
   relayEnvelopeIdSchema,
   relayMessageSchemaV11,
   relayMessageSchemaV12,
+  relayMessageSchemaV13,
+  projectRelayThreadSnapshotV13,
+  projectRelayMessageV13ToV12,
   relayRuntimeRequestSchemaV12,
   projectRelayThreadSnapshotV12,
   projectRelayOperationGetResultV12,
@@ -25,6 +28,7 @@ import {
   projectRelayCapabilitiesV11,
   type DeviceId,
   type RelayEncryptedMessageV11,
+  type RelayMessageV13,
   type RelayMessageV12,
   type RelayMessageV11 as LegacyRelayMessageV11,
   type RelayRequestId,
@@ -38,12 +42,12 @@ import type {
   RemoteInteractionResponderPolicy,
 } from "./interaction-broker.ts";
 import {
-  materializeRelayFrameV12,
+  materializeRelayFrameV13,
   type CompanionRelayFrameEntryV11,
   type CompanionRelayFrameReplayV11,
 } from "./relay-frame-buffer.ts";
 
-type RelayMessageV11 = RelayMessageV12 | LegacyRelayMessageV11;
+type RelayMessageV11 = RelayMessageV13 | RelayMessageV12 | LegacyRelayMessageV11;
 type RelayRuntimeResponseV11 = Extract<RelayMessageV11, { readonly type: "runtime.response" }>;
 
 export interface RelayTransportV11 {
@@ -79,7 +83,7 @@ export interface CompanionRelayBridgeV11Options {
   readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
   readonly ciphers?: ReadonlyMap<WorkspaceId, RelayPayloadCipherV11>;
   readonly maxRequestCacheEntries?: number;
-  readonly protocolVersion?: "1.1" | "1.2";
+  readonly protocolVersion?: "1.1" | "1.2" | "1.3";
 }
 
 export interface CompanionRelayConnectionV11Options {
@@ -155,7 +159,7 @@ function relayRequestFingerprintV11(request: RelayRuntimeRequestV11): string {
 function projectRelayRuntimeResultV11(
   request: RelayRuntimeRequestV11,
   value: unknown,
-  version: "1.1" | "1.2",
+  version: "1.1" | "1.2" | "1.3",
 ): JsonValue {
   let projected = value;
   if (
@@ -163,12 +167,14 @@ function projectRelayRuntimeResultV11(
     request.method === RELAY_REQUEST_METHODS_V11.threadSnapshot
   ) {
     projected =
-      version === "1.2"
-        ? projectRelayThreadSnapshotV12(value)
-        : projectRelayThreadSnapshotV11(value);
+      version === "1.3"
+        ? projectRelayThreadSnapshotV13(value)
+        : version === "1.2"
+          ? projectRelayThreadSnapshotV12(value)
+          : projectRelayThreadSnapshotV11(value);
   } else if (request.method === RELAY_REQUEST_METHODS_V11.operationGet) {
     projected =
-      version === "1.2"
+      version !== "1.1"
         ? projectRelayOperationGetResultV12(value)
         : projectRelayOperationGetResultV11(value);
   }
@@ -227,7 +233,7 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
  * a frozen Wire 1.0 path; callers must opt into this class to project typed Interactions.
  */
 export class CompanionRelayBridgeV11 {
-  private readonly protocolVersion: "1.1" | "1.2";
+  private readonly protocolVersion: "1.1" | "1.2" | "1.3";
   private readonly deviceId: DeviceId;
   private readonly pairingToken: string;
   private readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
@@ -373,7 +379,11 @@ export class CompanionRelayBridgeV11 {
       return;
     }
     const parsed = (
-      this.protocolVersion === "1.2" ? relayMessageSchemaV12 : relayMessageSchemaV11
+      this.protocolVersion === "1.3"
+        ? relayMessageSchemaV13
+        : this.protocolVersion === "1.2"
+          ? relayMessageSchemaV12
+          : relayMessageSchemaV11
     ).safeParse(value);
     if (!parsed.success) {
       return;
@@ -607,8 +617,14 @@ export class CompanionRelayBridgeV11 {
     workspaceId: WorkspaceId,
     entry: CompanionRelayFrameEntryV11,
   ): void {
-    const current = materializeRelayFrameV12(workspaceId, entry);
-    const message = this.protocolVersion === "1.2" ? current : projectRelayMessageV12ToV11(current);
+    const current = materializeRelayFrameV13(workspaceId, entry);
+    const v12 = projectRelayMessageV13ToV12(current);
+    const message =
+      this.protocolVersion === "1.3"
+        ? current
+        : this.protocolVersion === "1.2"
+          ? v12
+          : projectRelayMessageV12ToV11(v12);
     const cipher = this.ciphers.get(workspaceId);
     if (cipher === undefined) {
       this.enqueue(generation, message);

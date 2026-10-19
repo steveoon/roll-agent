@@ -18,16 +18,7 @@ import {
 } from "./thread-store.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
-import {
-  UnsupportedCompactionCheckpointVersionError,
-  createCompactionSummary,
-  createEmptyCompactionToolState,
-  type CompactionCheckpointDraftInput,
-} from "../engine/compaction-checkpoint.ts";
-import {
-  createEmptyCompactionSemanticState,
-  replaceCompactionSemanticGoal,
-} from "../engine/compaction-semantic-state.ts";
+import { UnsupportedCompactionCheckpointVersionError } from "../engine/compaction-checkpoint.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-threads-"));
@@ -124,25 +115,6 @@ function execution(id: string, toolCallId: string, secret: string) {
   });
 }
 
-function checkpointDraft(
-  overrides: Partial<CompactionCheckpointDraftInput> = {},
-): CompactionCheckpointDraftInput {
-  return {
-    constraints: [],
-    resources: [],
-    toolState: createEmptyCompactionToolState(),
-    runningWork: [],
-    context: {
-      cwd: "/workspace",
-      stableRuleIds: ["tool-grounding/v1"],
-      skills: [],
-      explicitSkillNames: [],
-    },
-    summary: { status: "skipped" },
-    ...overrides,
-  };
-}
-
 function legacyExplicitSkillMessage(skillBody: string): ModelMessage {
   return {
     role: "user",
@@ -162,32 +134,13 @@ function legacyExplicitSkillMessage(skillBody: string): ModelMessage {
     },
   };
 }
-
 function currentCompactionGuard(
   store: ThreadStore,
   threadId: string,
-): Pick<
-  CommitCompactionInput,
-  | "evidenceWatermarks"
-  | "expectedActiveMessages"
-  | "expectedLatestCheckpointId"
-  | "semanticEvidenceWatermarks"
-  | "semanticState"
-> {
+): Pick<CommitCompactionInput, "expectedActiveMessages" | "expectedLatestCheckpointId"> {
   return {
     expectedActiveMessages: store.getMessages(threadId),
     expectedLatestCheckpointId: store.getLatestCheckpoint(threadId)?.id,
-    semanticState: createEmptyCompactionSemanticState(),
-    semanticEvidenceWatermarks: {
-      messagesThroughSequence: -1,
-      toolExecutionsThroughSequence: -1,
-    },
-    evidenceWatermarks: {
-      transcriptMessagesThroughSequence:
-        store.listTranscriptMessages(threadId, { limit: 500 }).at(-1)?.sequence ?? -1,
-      toolExecutionsThroughSequence:
-        store.listToolExecutions(threadId, { limit: 500 }).at(-1)?.sequence ?? -1,
-    },
   };
 }
 
@@ -771,7 +724,7 @@ test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
       readonly user_version: number;
     };
     assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
-    assert.equal(version.user_version, 7);
+    assert.equal(version.user_version, 11);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -980,7 +933,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      7,
+      11,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1011,7 +964,7 @@ test("ThreadStore 所有 message 写入边界都清除 legacy Skill 正文", () 
     store.commitCompaction(threadId, {
       messages: [legacySkillMessage],
       ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.doesNotMatch(JSON.stringify(store.getMessages(threadId)), new RegExp(legacySkillBody));
     store.close();
@@ -1129,7 +1082,7 @@ test("ThreadStore retention 后 checkpoint/read/resume 都保守降级并由后�
     const checkpoint = initial.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-before-retention" }],
       ...currentCompactionGuard(initial, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.equal(checkpoint.transcript.completeness, "complete");
     initial.close();
@@ -1174,7 +1127,7 @@ test("ThreadStore retention 后 checkpoint/read/resume 都保守降级并由后�
     const inherited = reopened.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-after-retention" }],
       ...currentCompactionGuard(reopened, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.equal(inherited.transcript.completeness, "legacy_snapshot");
     assert.equal(inherited.toolState.integrityStatus, "sanitized");
@@ -1411,15 +1364,9 @@ test("ThreadStore commitCompaction 原子写 active projection、versioned check
     const first = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-1" }],
       ...currentCompactionGuard(store, threadId),
-      semanticState: replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
-        verbatimRequest: "turn-1",
-        sourceSequence: 0,
-      }),
-      draft: checkpointDraft({
-        goal: { verbatimRequest: "turn-1", sourceSequence: 0, status: "active" },
-      }),
+      summary: "Current task summary",
     });
-    assert.equal(first.version, 2);
+    assert.equal(first.version, 3);
     assert.equal(first.generation, 1);
     assert.deepEqual(first.transcript.messages, {
       fromSequenceExclusive: -1,
@@ -1442,13 +1389,7 @@ test("ThreadStore commitCompaction 原子写 active projection、versioned check
     const second = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-2" }],
       ...currentCompactionGuard(store, threadId),
-      semanticState: replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
-        verbatimRequest: "turn-2",
-        sourceSequence: 2,
-      }),
-      draft: checkpointDraft({
-        goal: { verbatimRequest: "turn-2", sourceSequence: 2, status: "active" },
-      }),
+      summary: "Current task summary",
     });
 
     assert.equal(second.generation, 2);
@@ -1496,7 +1437,7 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
     const first = compactionStore.commitCompaction(threadId, {
       messages: [{ role: "user", content: "captured summary" }],
       ...capturedGuard,
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.deepEqual(first.transcript.messages, {
       fromSequenceExclusive: -1,
@@ -1504,7 +1445,7 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
     });
     assert.deepEqual(first.transcript.toolExecutions, {
       fromSequenceExclusive: -1,
-      throughSequence: 0,
+      throughSequence: 1,
     });
     assert.deepEqual(
       compactionStore
@@ -1522,21 +1463,21 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
           kind: "tool_execution",
         })
         .entries.map((entry) => entry.sequence),
-      [0],
+      [0, 1],
     );
 
     const staleAncestryGuard = currentCompactionGuard(compactionStore, threadId);
     const concurrentCheckpoint = concurrentWriter.commitCompaction(threadId, {
       messages: compactionStore.getMessages(threadId),
       ...currentCompactionGuard(concurrentWriter, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.throws(
       () =>
         compactionStore.commitCompaction(threadId, {
           messages: [{ role: "user", content: "stale ancestry summary" }],
           ...staleAncestryGuard,
-          draft: checkpointDraft(),
+          summary: "Current task summary",
         }),
       /checkpoint ancestry changed/u,
     );
@@ -1548,7 +1489,7 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
         compactionStore.commitCompaction(threadId, {
           messages: [{ role: "user", content: "stale projection summary" }],
           ...staleProjectionGuard,
-          draft: checkpointDraft(),
+          summary: "Current task summary",
         }),
       /active projection changed/u,
     );
@@ -1561,7 +1502,7 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
     const fresh = compactionStore.commitCompaction(threadId, {
       messages: [{ role: "user", content: "fresh summary" }],
       ...currentCompactionGuard(compactionStore, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     assert.deepEqual(fresh.transcript.messages, {
       fromSequenceExclusive: 1,
@@ -1571,27 +1512,6 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
       fromSequenceExclusive: 1,
       throughSequence: 1,
     });
-
-    assert.throws(
-      () =>
-        compactionStore.commitCompaction(threadId, {
-          messages: [{ role: "user", content: "impossible summary" }],
-          expectedActiveMessages: compactionStore.getMessages(threadId),
-          expectedLatestCheckpointId: fresh.id,
-          draft: checkpointDraft(),
-          semanticState: createEmptyCompactionSemanticState(),
-          semanticEvidenceWatermarks: {
-            messagesThroughSequence: 2,
-            toolExecutionsThroughSequence: 1,
-          },
-          evidenceWatermarks: {
-            transcriptMessagesThroughSequence: 3,
-            toolExecutionsThroughSequence: 2,
-          },
-        }),
-      /watermark .* outside the available range/u,
-    );
-    assert.equal(compactionStore.getLatestCheckpoint(threadId)?.id, fresh.id);
 
     concurrentWriter.close();
     compactionStore.close();
@@ -1619,7 +1539,7 @@ test("ThreadStore compaction 拒绝 malformed Tool protocol，resume 则确定�
         store.commitCompaction(threadId, {
           messages: [dangling],
           ...currentCompactionGuard(store, threadId),
-          draft: checkpointDraft(),
+          summary: "Current task summary",
         }),
       /malformed Tool protocol: dangling/u,
     );
@@ -1649,39 +1569,6 @@ test("ThreadStore compaction 拒绝 malformed Tool protocol，resume 则确定�
   }
 });
 
-test("ThreadStore fallback checkpoint 不覆盖最后有效语义摘要选择点", () => {
-  const dir = tempDir();
-  try {
-    const store = new ThreadStore(dir);
-    const threadId = store.createThread();
-    store.appendMessages(threadId, [{ role: "user", content: "goal" }]);
-    const validSummary = createCompactionSummary(
-      "当前目标：修复 checkpoint 恢复。关键约束：保留旧 thread。下一步：运行 store 测试并核对 transcript 证据。",
-    );
-    assert.equal(validSummary.status, "valid");
-    const valid = store.commitCompaction(threadId, {
-      messages: [{ role: "user", content: "valid projection" }],
-      ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft({ summary: validSummary }),
-    });
-    const fallback = store.commitCompaction(threadId, {
-      messages: [{ role: "user", content: "fallback projection" }],
-      ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft({
-        summary: { status: "fallback", reason: "summary lacks concrete task evidence" },
-      }),
-    });
-
-    assert.equal(store.getLatestCheckpoint(threadId)?.id, fallback.id);
-    assert.equal(fallback.summary.status, "fallback");
-    assert.equal(fallback.summary.lastValidCheckpointId, valid.id);
-    assert.equal(store.getLatestSummaryCheckpoint(threadId)?.id, valid.id);
-    store.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("ThreadStore checkpoint transcript 受 checkpoint/thread/range 约束并可分页", () => {
   const dir = tempDir();
   try {
@@ -1700,7 +1587,7 @@ test("ThreadStore checkpoint transcript 受 checkpoint/thread/range 约束并可
     const checkpoint = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary" }],
       ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
 
     const firstPage = store.readCheckpointTranscript(threadId, {
@@ -1744,67 +1631,6 @@ test("ThreadStore checkpoint transcript 受 checkpoint/thread/range 约束并可
         } as unknown as ReadCheckpointTranscriptOptions),
       /kind 必须/u,
     );
-    store.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("ThreadStore V1 transcript archive 与 checkpoint 同事务回滚", () => {
-  const dir = tempDir();
-  try {
-    const initialStore = new ThreadStore(dir);
-    const threadId = initialStore.createThread();
-    const activeMessages = [{ role: "user", content: "legacy goal" }] as const;
-    initialStore.appendMessages(threadId, activeMessages);
-    const seeded = initialStore.commitCompaction(threadId, {
-      messages: activeMessages,
-      ...currentCompactionGuard(initialStore, threadId),
-      draft: checkpointDraft(),
-    });
-    initialStore.close();
-
-    const legacyCheckpoint = {
-      version: 1,
-      id: seeded.id,
-      generation: seeded.generation,
-      createdAt: seeded.createdAt,
-      transcript: seeded.transcript,
-      goal: seeded.goal,
-      constraints: seeded.constraints,
-      resources: seeded.resources,
-      toolState: seeded.toolState,
-      runningWork: seeded.runningWork,
-      context: seeded.context,
-      summary: seeded.summary,
-    };
-    const database = new DatabaseSync(join(dir, "threads.db"));
-    database
-      .prepare(
-        `UPDATE compaction_checkpoints
-            SET schema_version = 1, checkpoint_json = ?
-          WHERE id = ?`,
-      )
-      .run(JSON.stringify(legacyCheckpoint), seeded.id);
-    database.close();
-
-    const store = new ThreadStore(dir);
-    const transcriptBefore = store.listTranscriptMessages(threadId, { limit: 500 });
-    assert.throws(
-      () =>
-        store.commitCompaction(threadId, {
-          messages: activeMessages,
-          ...currentCompactionGuard(store, threadId),
-          draft: checkpointDraft({
-            goal: { verbatimRequest: "legacy goal", sourceSequence: 0, status: "active" },
-          }),
-          legacySnapshotTranscriptFragments: ["ROLLBACK_LEGACY_MARKER"],
-        }),
-      /V2 goal compatibility projection requires semanticState.goal/u,
-    );
-    assert.deepEqual(store.listTranscriptMessages(threadId, { limit: 500 }), transcriptBefore);
-    assert.deepEqual(store.getMessages(threadId), activeMessages);
-    assert.equal(store.getLatestCheckpoint(threadId)?.id, seeded.id);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1926,7 +1752,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 7);
+    assert.equal(version.user_version, 11);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -1948,7 +1774,7 @@ test("ThreadStore 跳过损坏的最新 checkpoint，继续返回上一条有效
     const valid = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary" }],
       ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     store.close();
 
@@ -1984,6 +1810,56 @@ test("ThreadStore 跳过损坏的最新 checkpoint，继续返回上一条有效
   }
 });
 
+test("ThreadStore schema v8 迁移跳过损坏 checkpoint 并标记来源限制", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [{ role: "user", content: "goal" }]);
+    const valid = store.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary" }],
+      ...currentCompactionGuard(store, threadId),
+      summary: "Current task summary",
+    });
+    store.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `INSERT INTO compaction_checkpoints
+           (id, thread_id, generation, schema_version,
+            message_from_sequence, message_through_sequence,
+            tool_from_sequence, tool_through_sequence,
+            checkpoint_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "51aabf47-369d-40cd-b409-ae4c3f3e07bb",
+        threadId,
+        2,
+        2,
+        0,
+        0,
+        -1,
+        -1,
+        JSON.stringify({ version: 2 }),
+        "2026-07-17T10:00:00.000Z",
+      );
+    database.exec("PRAGMA user_version = 8;");
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.equal(reopened.getLatestCheckpoint(threadId)?.id, valid.id);
+    assert.equal(
+      reopened.getLatestCheckpoint(threadId)?.transcript.completeness,
+      "legacy_snapshot",
+    );
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore checkpoint DB future version 在解析 payload 前 fail closed", () => {
   const dir = tempDir();
   try {
@@ -1993,7 +1869,7 @@ test("ThreadStore checkpoint DB future version 在解析 payload 前 fail closed
     const valid = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary" }],
       ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft(),
+      summary: "Current task summary",
     });
     store.close();
 
@@ -2044,9 +1920,7 @@ test("ThreadStore checkpoint DB/payload 版本不一致时按损坏的已知版�
     const valid = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary" }],
       ...currentCompactionGuard(store, threadId),
-      draft: checkpointDraft({
-        summary: createCompactionSummary("Keep the grounded checkpoint as the recovery point."),
-      }),
+      summary: "Current task summary",
     });
     store.close();
 
@@ -2459,7 +2333,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 7);
+    assert.equal(version.user_version, 11);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

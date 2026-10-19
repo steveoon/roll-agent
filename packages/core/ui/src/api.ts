@@ -1,4 +1,12 @@
 import { environmentDiagnosticsSchema } from "../../src/config/environment-diagnostic-schema.ts";
+import { z } from "zod/v4";
+import {
+  chatGptStatusSchema,
+  chatGptModelSchema,
+  chatGptLoginProgressSchema,
+  chatGptRefreshResultSchema,
+  chatGptLogoutResultSchema,
+} from "../../src/ui/chatgpt-public.ts";
 import { COMPANION_ACTION_PATHS, type CompanionAction } from "./lib/companion-state.ts";
 import { SCHEDULE_ACTION_PATHS, type ScheduleAction } from "./lib/schedule-state.ts";
 import { isRecord } from "./lib/config-value.ts";
@@ -62,6 +70,68 @@ export class RollUiApi {
   private csrfToken = "";
   private bootstrapRequest: Promise<BootstrapInfo> | undefined;
   private bootstrapFragmentCleanupInstalled = false;
+
+  async getChatGptStatus(accountId?: string) {
+    return chatGptStatusSchema.parse(
+      unwrapData(await this.request(chatGptPath("status", { accountId }))),
+    );
+  }
+
+  async getChatGptModels(accountId?: string) {
+    return z
+      .array(chatGptModelSchema)
+      .parse(unwrapData(await this.request(chatGptPath("models", { accountId }))));
+  }
+
+  async beginChatGptLogin(accountId?: string) {
+    return chatGptLoginProgressSchema.parse(
+      unwrapData(
+        await this.request("/api/auth/chatgpt/login", {
+          method: "POST",
+          body: JSON.stringify({ accountId }),
+        }),
+      ),
+    );
+  }
+
+  async getChatGptLoginStatus(id: string) {
+    return chatGptLoginProgressSchema.parse(
+      unwrapData(await this.request(chatGptPath("login/status", { id }))),
+    );
+  }
+
+  async cancelChatGptLogin(id: string) {
+    return chatGptLoginProgressSchema.parse(
+      unwrapData(
+        await this.request("/api/auth/chatgpt/login/cancel", {
+          method: "POST",
+          body: JSON.stringify({ id }),
+        }),
+      ),
+    );
+  }
+
+  async refreshChatGpt(accountId?: string) {
+    return chatGptRefreshResultSchema.parse(
+      unwrapData(
+        await this.request("/api/auth/chatgpt/refresh", {
+          method: "POST",
+          body: JSON.stringify({ accountId }),
+        }),
+      ),
+    );
+  }
+
+  async logoutChatGpt(accountId?: string) {
+    return chatGptLogoutResultSchema.parse(
+      unwrapData(
+        await this.request("/api/auth/chatgpt/logout", {
+          method: "POST",
+          body: JSON.stringify({ accountId }),
+        }),
+      ),
+    );
+  }
 
   bootstrap(): Promise<BootstrapInfo> {
     this.bootstrapRequest ??= this.requestBootstrap().catch((error: unknown) => {
@@ -275,6 +345,14 @@ export class RollUiApi {
     });
     return readResponse(response);
   }
+}
+
+function chatGptPath(action: string, values: Readonly<Record<string, string | undefined>>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) query.set(key, value);
+  }
+  return `/api/auth/chatgpt/${action}${query.size > 0 ? `?${query}` : ""}`;
 }
 
 async function fetchBootstrapResponse(token?: string): Promise<{

@@ -73,10 +73,15 @@ export interface ConfigArrayCatalogNode extends ConfigCatalogNodeBase {
   readonly item: ConfigCatalogNode;
 }
 
+export const CONFIG_ENUM_OPTIONS_STATUSES = ["loading", "ready", "unavailable"] as const;
+export type ConfigEnumOptionsStatus = (typeof CONFIG_ENUM_OPTIONS_STATUSES)[number];
+
 export interface ConfigEnumCatalogNode extends ConfigCatalogNodeBase {
   readonly kind: "enum";
   readonly options: readonly string[];
   readonly optionLabels?: Readonly<Record<string, string>>;
+  /** Client-only model-capability state, not authoritative schema validation. */
+  readonly optionsStatus?: ConfigEnumOptionsStatus;
 }
 
 export interface ConfigLeafCatalogNode extends ConfigCatalogNodeBase {

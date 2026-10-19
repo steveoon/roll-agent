@@ -207,3 +207,15 @@ test("assistant 项把可用宽度传给 Markdown，超宽表格不再溢出", (
     unmount();
   }
 });
+
+test("archived tools without a result show unknown rather than success or failure", () => {
+  const frame = renderFrame({
+    kind: "tool",
+    id: "unknown",
+    name: "roll.bash",
+    args: "{}",
+    ok: undefined,
+  });
+  assert.match(frame, /\? roll\.bash/);
+  assert.doesNotMatch(frame, /✓|✗/);
+});

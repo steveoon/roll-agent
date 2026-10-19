@@ -252,6 +252,14 @@ chat:
 `--screen-mode` 只适用于没有起始 message 的交互会话，不能与 `--json`、`--server` 或
 `--list` 同用。显式指定 `fullscreen` 但 stdin/stdout 不具备交互能力时会直接报错。
 
+### 长对话与历史回查
+
+接近 context window 阈值时，Roll 将较早对话整理成任务摘要，保留近期原文和当前输入。
+需要旧路径、标识或工具输出时，模型可用 `roll__transcript` 按需回查，长记录支持分块读取。
+摘要失败不会清空历史或进入强制回查阶段；输入和已完成操作持续保存。
+手动执行 `/compact` 也使用相同的提交检查。配置、边界与迁移行为见
+[上下文压缩说明](docs/how-to-context-compaction.md)。
+
 ### `roll chat` 工作区工程约定（AGENTS.md / CLAUDE.md）
 
 `roll chat` 启动时从工作目录逐级向上查找最近一层的 `AGENTS.md`（优先）或 `CLAUDE.md`，

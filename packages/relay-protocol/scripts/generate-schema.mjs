@@ -20,6 +20,8 @@ import {
   relayMessageSchema,
   relayMessageSchemaV11,
   relayMessageSchemaV12,
+  relayMessageSchemaV13,
+  relayRequestMethodSchemasV13,
   relayRequestMethodSchemasV12,
   RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
   RELAY_REQUEST_METHOD_VALUES_V12,
@@ -45,6 +47,7 @@ import { z } from "zod/v4";
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const frozenSchemaHashes = {
+  1.3: "2819ab0961b094b72295bd801a3c5fc01d4e68637afbeb2d5d1096aa2e540b6d",
   1.2: "7ddb7bff0066b0bfb87e1f25fcaac26f24a45f926a25c6c98bd5f7b58ff30f33",
   "1.0": "0e393e2278d141e620fbdd69da8ed7b805311ba0cccaaf4ff495175bd2edf2c1",
   1.1: "3e8688aad7e60d32915e140e095998410986ab90ef683c2938cca368a8e1c162",
@@ -127,6 +130,66 @@ protocolConfigs.push({
   methodRegistryCases: [],
   methodCases: [],
 });
+
+protocolConfigs.push({
+  ...protocolConfigs[2],
+  protocolVersion: "1.3",
+  schemaFileName: "roll-relay-protocol-v1.3.schema.json",
+  fixturesVersion: "v1.3",
+  messageSchema: relayMessageSchemaV13,
+  requestMethodSchemas: relayRequestMethodSchemasV13,
+  frameCases: RELAY_FRAME_CONFORMANCE_CASES_V11.map((entry) =>
+    entry.frame.type === "device.connect" && entry.valid
+      ? { ...entry, frame: { ...entry.frame, protocolVersion: "1.3" } }
+      : entry,
+  ),
+});
+
+// New wire fixtures verify recovery state without leaking model-authored notes.
+const recoveryFrame = {
+  type: "runtime.event",
+  workspaceId: "00000000-0000-4000-8000-000000000002",
+  relaySequence: 0,
+  event: {
+    protocolVersion: "1.1",
+    runtimeInstanceId: "00000000-0000-4000-8000-000000000001",
+    sequence: 0,
+    timestamp: "2026-10-13T00:00:00.000Z",
+    threadId: "00000000-0000-4000-8000-000000000002",
+    event: {
+      type: "context.recovery.changed",
+      contextRecovery: {
+        checkpointId: "00000000-0000-4000-8000-000000000003",
+        required: true,
+        unextracted: true,
+        requiredItemCount: 24,
+      },
+    },
+  },
+};
+protocolConfigs.at(-1).frameCases.push(
+  {
+    id: "context-recovery",
+    fixtureName: "valid-context-recovery.json",
+    valid: true,
+    frame: recoveryFrame,
+  },
+  {
+    id: "context-recovery-private-notes",
+    fixtureName: "invalid-context-recovery-notes.json",
+    valid: false,
+    frame: {
+      ...recoveryFrame,
+      event: {
+        ...recoveryFrame.event,
+        event: {
+          ...recoveryFrame.event.event,
+          contextRecovery: { ...recoveryFrame.event.event.contextRecovery, memo: "not public" },
+        },
+      },
+    },
+  },
+);
 
 async function formatJson(value) {
   return format(JSON.stringify(value, null, 2), { parser: "json" });
@@ -368,7 +431,7 @@ async function writeOrVerifyFixtures(config, validate, ajv) {
   }
 }
 
-if (RELAY_PROTOCOL_VERSION !== "1.0" || LATEST_RELAY_PROTOCOL_VERSION !== "1.2") {
+if (RELAY_PROTOCOL_VERSION !== "1.0" || LATEST_RELAY_PROTOCOL_VERSION !== "1.3") {
   throw new Error(
     "Schema generator version registry must be reviewed for a Relay Wire version change",
   );

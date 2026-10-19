@@ -1,5 +1,10 @@
 import type { ModelMessage } from "ai";
-import { readTurnCancellationReason, SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
+import {
+  readTurnCancellationReason,
+  stripCancelledTurnRecoveryMessages,
+  SUMMARY_ACK,
+  SUMMARY_PREFIX,
+} from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { HistoryItem } from "./state.ts";
@@ -29,6 +34,10 @@ function toolDisplayName(toolName: string): string {
 export function messagesToHistory(
   messages: readonly ModelMessage[],
   idPrefix = "h",
+  options: {
+    readonly messageId?: (index: number) => string;
+    readonly toolOutcome?: (toolCallId: string) => boolean | undefined;
+  } = {},
 ): HistoryItem[] {
   const resultOk = new Map<string, boolean>();
   for (const message of messages) {
@@ -44,8 +53,10 @@ export function messagesToHistory(
   }
 
   const items: HistoryItem[] = [];
-  messages.forEach((message, messageIndex) => {
-    const id = `${idPrefix}-${String(messageIndex)}`;
+  messages.forEach((rawMessage, messageIndex) => {
+    const [message] = stripCancelledTurnRecoveryMessages([rawMessage]);
+    if (message === undefined) return;
+    const id = options.messageId?.(messageIndex) ?? `${idPrefix}-${String(messageIndex)}`;
     if (message.role === "user") {
       const text = textFromContent(message.content);
       if (text.startsWith(SUMMARY_PREFIX)) {
@@ -84,7 +95,9 @@ export function messagesToHistory(
               id: `${id}-${String(partIndex)}`,
               name: toolDisplayName(part.toolName),
               args: formatToolInput(part.input),
-              ok: resultOk.get(part.toolCallId) ?? true,
+              ok:
+                resultOk.get(part.toolCallId) ??
+                (options.toolOutcome ? options.toolOutcome(part.toolCallId) : true),
             });
           }
         });

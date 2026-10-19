@@ -1,3 +1,4 @@
+import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import { createElement as h } from "react";
 import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
@@ -13,6 +14,10 @@ import { createChatTerminalOutput } from "./terminal-output.ts";
 import { DISABLE_MOUSE_TRACKING } from "./mouse-input.ts";
 import { createFileHintFlagStore } from "./hint-flags.ts";
 import type { ScheduleBrowserPort } from "../schedule-browser.ts";
+import {
+  createTranscriptHistorySource,
+  type TranscriptHistoryStore,
+} from "./transcript-history.ts";
 
 export interface InkReplThreadSummary {
   readonly id: string;
@@ -20,7 +25,7 @@ export interface InkReplThreadSummary {
   readonly updatedAt: string;
 }
 
-export interface InkReplStore {
+export interface InkReplStore extends Partial<TranscriptHistoryStore> {
   updateTitle(threadId: string, title: string): void;
   countMessages(threadId: string): number;
   deleteThread(threadId: string): void;
@@ -28,11 +33,14 @@ export interface InkReplStore {
 }
 
 export interface RunInkReplOptions {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly model: string;
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
+  readonly getThinkingLevels?: () => readonly ThinkingLevel[];
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
   readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
@@ -118,7 +126,18 @@ export async function runInkRepl(
   if (!options.banner) {
     log.info(`多轮对话已就绪（${INK_HINTS}）`);
   }
-  const priorHistory = messagesToHistory(session.getMessages());
+  const historySource =
+    store.listRecentTranscriptMessages &&
+    store.listToolExecutions &&
+    store.getTranscriptCompleteness
+      ? createTranscriptHistorySource({
+          listRecentTranscriptMessages: store.listRecentTranscriptMessages.bind(store),
+          listToolExecutions: store.listToolExecutions.bind(store),
+          getTranscriptCompleteness: store.getTranscriptCompleteness.bind(store),
+        })
+      : undefined;
+  const priorHistory =
+    historySource === undefined ? messagesToHistory(session.getMessages()) : undefined;
 
   const terminalOutput = createChatTerminalOutput(process.stdout);
   try {
@@ -131,7 +150,8 @@ export async function runInkRepl(
           instance.unmount();
         },
         hintFlags: createFileHintFlagStore(),
-        initialHistory: priorHistory,
+        ...(priorHistory === undefined ? {} : { initialHistory: priorHistory }),
+        ...(historySource === undefined ? {} : { historySource }),
         ...(sessionSwitching === undefined ? {} : { sessionSwitching }),
         ...(options.banner === undefined ? {} : { banner: options.banner }),
         ...(options.initialThinkingLevel
@@ -141,7 +161,10 @@ export async function runInkRepl(
           ? { initialThinkingDisplay: options.initialThinkingDisplay }
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
+        ...(options.getThinkingLevels ? { getThinkingLevels: options.getThinkingLevels } : {}),
         ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
+        ...(options.connection ? { connection: options.connection } : {}),
+        ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),
       {

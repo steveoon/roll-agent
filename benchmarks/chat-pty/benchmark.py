@@ -1676,7 +1676,8 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
                 stable_latencies.append(stable - resized_at)
             fixture.send("\x15")
             fixture.drain_for(0.04)
-            fixture.send("/")
+            # Keep the layout probe independent of slash-command ordering.
+            fixture.send("/compact")
             fixture.resize(40, 10)
             fixture.wait_for(
                 lambda screen: "/compact" in screen,
@@ -1705,7 +1706,7 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
                     + compact_screen
                 )
             assert_prompt(compact_screen)
-            assert_editor_cursor(fixture.screen, "/")
+            assert_editor_cursor(fixture.screen, "/compact")
             return {
                 "resizeCount": len(sizes) + 1,
                 "stableAfterResizeMs": max(stable_latencies),

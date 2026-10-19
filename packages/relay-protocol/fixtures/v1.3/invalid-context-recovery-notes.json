@@ -1,0 +1,22 @@
+{
+  "type": "runtime.event",
+  "workspaceId": "00000000-0000-4000-8000-000000000002",
+  "relaySequence": 0,
+  "event": {
+    "protocolVersion": "1.1",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "sequence": 0,
+    "timestamp": "2026-10-13T00:00:00.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "event": {
+      "type": "context.recovery.changed",
+      "contextRecovery": {
+        "checkpointId": "00000000-0000-4000-8000-000000000003",
+        "required": true,
+        "unextracted": true,
+        "requiredItemCount": 24,
+        "memo": "not public"
+      }
+    }
+  }
+}

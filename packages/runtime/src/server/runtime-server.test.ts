@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -17,6 +17,7 @@ import {
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
   RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   approvalIdSchema,
+  approvalPreviewResultSchema,
   interactionIdSchema,
   requestIdSchema,
   streamIdSchema,
@@ -1832,7 +1833,7 @@ test("RuntimeServer send 复用中央 overflow 重放且仅持久化一组当前
       [
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "t1" },
-        { type: "text-delta", id: "t1", delta: "seed one" },
+        { type: "text-delta", id: "t1", delta: "seed one".repeat(2000) },
         { type: "text-end", id: "t1" },
         { type: "finish", usage: usage(), finishReason: STOP },
       ],
@@ -4033,3 +4034,105 @@ for (const protocolVersion of ["1.3", "1.4"] as const) {
     });
   });
 }
+
+test(
+  "Runtime 1.6 文件审批通过协议分页审查完整快照，再批准实际写入",
+  { timeout: 20_000 },
+  async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-full-review-wire-"));
+    const target = join(dir, "generated.txt");
+    const content = `${"timeout: 5\n".repeat(1500)}FINAL_FILE_CHANGE\n`;
+    const store = new ThreadStore(dir);
+    const { serverConn, clientConn } = memoryPair();
+    const engine = new ConversationEngine({
+      config,
+      store,
+      sources: [],
+      policy: new DefaultToolPolicy(),
+      skillLibrary: null,
+      workspaceInstructions: null,
+      model: sequencedModel([
+        [
+          { type: "stream-start", warnings: [] },
+          {
+            type: "tool-call",
+            toolCallId: "write-file",
+            toolName: "roll__write_file",
+            input: JSON.stringify({ file_path: target, content }),
+          },
+          { type: "finish", usage: usage(), finishReason: TOOL_CALLS },
+        ],
+        [
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "done" },
+          { type: "text-delta", id: "done", delta: "done" },
+          { type: "text-end", id: "done" },
+          { type: "finish", usage: usage(), finishReason: STOP },
+        ],
+      ]),
+    });
+    const service = new RuntimeService(engine, store, { runtimeVersion: "test" });
+    const server = new RuntimeServer(engine, serverConn, { runtimeService: service });
+    t.after(async () => {
+      await server.abortAll();
+      await engine.dispose();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const client = attachRuntimeProtocolClient(clientConn);
+    await client.request(1, RUNTIME_METHODS.initialize, {
+      protocolVersions: ["1.6"],
+      client: { name: "file-review", version: "1" },
+    });
+    await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+      revision: 1,
+      serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    });
+    const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+      requestId: "00000000-0000-4000-8000-000000000991",
+    })) as { readonly thread: { readonly id: string } };
+    const turnId = "00000000-0000-4000-8000-000000000992";
+    await client.request(4, RUNTIME_METHODS.turnStart, {
+      requestId: "00000000-0000-4000-8000-000000000993",
+      threadId: created.thread.id,
+      turnId,
+      input: { text: "write requested file" },
+    });
+    const request = await waitForWireValue(clientConn, () =>
+      client.wire.find(
+        (m): m is JsonRpcRequest =>
+          isRequest(m) && m.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    );
+    const approval = (request.params as ApprovalRequestParamsV12).approval;
+    assert.match(JSON.stringify(approval.preview), /fullDiffAvailable/u);
+    const identity = { threadId: created.thread.id, turnId, approvalId: approval.id };
+    let offset: number | null = 0;
+    let fullDiff = "";
+    let requestId = 10;
+    while (offset !== null) {
+      const page = approvalPreviewResultSchema.parse(
+        await client.request(requestId++, RUNTIME_METHODS.approvalPreview, {
+          ...identity,
+          offset,
+          maxChars: 4096,
+        }),
+      );
+      fullDiff += page.text;
+      offset = page.nextOffset;
+    }
+    assert.ok(fullDiff.length > 12_000);
+    assert.match(fullDiff, /\+FINAL_FILE_CHANGE/u);
+    clientConn.send({ jsonrpc: "2.0", id: request.id, result: { decision: "approve" } });
+    await waitForWireValue(clientConn, () =>
+      client.events.find((e) => e.event.type === "turn.completed"),
+    );
+    assert.equal(readFileSync(target, "utf8"), content);
+    const unavailable = await client.requestError(
+      requestId++,
+      RUNTIME_METHODS.approvalPreview,
+      identity,
+    );
+    assert.match(JSON.stringify(unavailable), /APPROVAL_NOT_FOUND/u);
+  },
+);

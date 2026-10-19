@@ -10,6 +10,7 @@ import {
   inspectAgentEnvRequirements,
 } from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
+import { apiSamplingThinkingLevel } from "../../llm/thinking-levels.ts";
 import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import {
   resolveLLMCall,
@@ -576,7 +577,7 @@ function createSamplingLLMCall(config: RollConfig): ResolvedLLMCall | undefined 
         providerConfig.apiKey,
         "sampling",
         providerConfig.baseUrl,
-        config.runtime.thinkingLevel,
+        apiSamplingThinkingLevel(config.runtime, providerName, (message) => log.warn(message)),
       )
     : undefined;
 }

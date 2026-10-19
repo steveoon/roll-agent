@@ -18,6 +18,7 @@ export interface SessionPickerProps {
   readonly width: number;
   readonly maxRows: number;
   readonly busy: boolean;
+  readonly cancelWhileBusy?: boolean;
   readonly error?: string;
   readonly labels?: SessionPickerLabels;
   readonly onSelect: (threadId: string) => void;
@@ -78,11 +79,11 @@ export function SessionPicker(props: SessionPickerProps): ReactElement {
   const boundedCursor = Math.min(cursor, Math.max(0, items.length - 1));
 
   useInput((input, key) => {
-    if (busy) {
+    if (key.escape && (!busy || props.cancelWhileBusy)) {
+      onCancel();
       return;
     }
-    if (key.escape) {
-      onCancel();
+    if (busy) {
       return;
     }
     if (items.length === 0) {

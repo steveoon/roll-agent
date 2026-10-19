@@ -7,18 +7,18 @@ import {
   parseRelayRequestParamsForVersion,
   parseRelayRequestResultForVersion,
   relayAckSchemaV11,
-  relayMessageSchemaV12,
+  relayMessageSchemaV13,
   relayRequestIdSchema,
-  relayRequestMethodSchemasV12,
+  relayRequestMethodSchemasV13,
   relayRuntimeRequestSchemaV12,
   type RelayInteractionCancelledV11,
   type RelayInteractionRequestV11,
   type RelayInteractionResolvedV11,
-  type RelayMessageV12 as RelayMessageV11,
+  type RelayMessageV13 as RelayMessageV11,
   type RelayRequestMethodForVersion,
   type RelayRequestParamsForVersion,
   type RelayRequestResultForVersion,
-  type RelayRuntimeEventV12 as RelayRuntimeEventV11,
+  type RelayRuntimeEventV13 as RelayRuntimeEventV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 import {
@@ -49,20 +49,24 @@ import {
 } from "./transport.ts";
 
 type RelayMethodV11 = RelayRequestMethodForVersion<"1.2">;
-type ThreadListWireInput = z.input<(typeof relayRequestMethodSchemasV12)["thread.list"]["params"]>;
+type ThreadListWireInput = z.input<(typeof relayRequestMethodSchemasV13)["thread.list"]["params"]>;
 type ThreadCreateWireInput = z.input<
-  (typeof relayRequestMethodSchemasV12)["thread.create"]["params"]
+  (typeof relayRequestMethodSchemasV13)["thread.create"]["params"]
 >;
-type ThreadListWireResult = RelayRequestResultForVersion<"1.2", "thread.list">;
-type ThreadCreateWireResult = RelayRequestResultForVersion<"1.2", "thread.create">;
-type ThreadOpenWireResult = RelayRequestResultForVersion<"1.2", "thread.open">;
-type ThreadSnapshotWireResult = RelayRequestResultForVersion<"1.2", "thread.snapshot">;
-type TurnStartWireResult = RelayRequestResultForVersion<"1.2", "turn.start">;
-type TurnCancelWireResult = RelayRequestResultForVersion<"1.2", "turn.cancel">;
-type InteractionCandidateWireResult = RelayRequestResultForVersion<"1.2", "interaction.candidate">;
+type ThreadListWireResult = RelayRequestResultForVersion<"1.3", "thread.list">;
+type ThreadCreateWireResult = RelayRequestResultForVersion<"1.3", "thread.create">;
+type ThreadOpenWireResult =
+  | RelayRequestResultForVersion<"1.3", "thread.open">
+  | RelayRequestResultForVersion<"1.2", "thread.open">;
+type ThreadSnapshotWireResult =
+  | RelayRequestResultForVersion<"1.3", "thread.snapshot">
+  | RelayRequestResultForVersion<"1.2", "thread.snapshot">;
+type TurnStartWireResult = RelayRequestResultForVersion<"1.3", "turn.start">;
+type TurnCancelWireResult = RelayRequestResultForVersion<"1.3", "turn.cancel">;
+type InteractionCandidateWireResult = RelayRequestResultForVersion<"1.3", "interaction.candidate">;
 
-export type RelayOperationResult = RelayRequestResultForVersion<"1.2", "operation.result.get">;
-export type RelayThreadCapabilities = RelayRequestResultForVersion<"1.2", "thread.capabilities">;
+export type RelayOperationResult = RelayRequestResultForVersion<"1.3", "operation.result.get">;
+export type RelayThreadCapabilities = RelayRequestResultForVersion<"1.3", "thread.capabilities">;
 export type RelayThreadId = ThreadOpenWireResult["thread"]["id"];
 export type RelayTurnId = RelayRequestParamsForVersion<"1.2", "turn.cancel">["turnId"];
 export type RelayInteractionId = RelayInteractionRequestV11["interactionId"];
@@ -79,7 +83,7 @@ export type RelayInteractionCandidateResult = InteractionCandidateWireResult;
 
 export interface RelaySessionProviderInput {
   readonly signal: AbortSignal;
-  readonly supportedRelayProtocolVersions: readonly ["1.2", "1.1"];
+  readonly supportedRelayProtocolVersions: readonly ("1.3" | "1.2" | "1.1")[];
 }
 
 export type RelaySessionProvider = (input: RelaySessionProviderInput) => Promise<unknown>;
@@ -91,6 +95,8 @@ export interface RelayRequestOptions {
 
 export interface CreateRelayClientOptions {
   readonly getSession: RelaySessionProvider;
+  /** Opt into 1.3 only after the Relay service and Companion support it. */
+  readonly relayProtocolVersions?: readonly ("1.3" | "1.2" | "1.1")[];
   readonly requestTimeoutMs?: number;
 }
 
@@ -384,6 +390,7 @@ class RelayThreadImpl implements RelayThread {
       liveAssistantMessages: [],
       interactions: this.#view.interactions,
       turn: getTurnStateFromSnapshot(snapshot),
+      contextRecovery: "contextRecovery" in snapshot ? snapshot.contextRecovery : null,
     });
   }
 
@@ -395,6 +402,7 @@ class RelayThreadImpl implements RelayThread {
       liveAssistantMessages: this.#view.liveAssistantMessages,
       interactions: this.#view.interactions,
       turn: this.#view.turn,
+      contextRecovery: this.#view.contextRecovery,
       error,
     });
   }
@@ -435,7 +443,13 @@ class RelayThreadImpl implements RelayThread {
       turn = { status: "failed", turnId, stage: event.stage };
     }
 
-    this.#publishReadyFields({ liveAssistantMessages: messages, turn });
+    this.#publishReadyFields({
+      liveAssistantMessages: messages,
+      turn,
+      ...(event.type === "context.recovery.changed"
+        ? { contextRecovery: event.contextRecovery }
+        : {}),
+    });
     if (
       event.type === "turn.completed" ||
       event.type === "turn.cancelled" ||
@@ -504,6 +518,7 @@ class RelayThreadImpl implements RelayThread {
     readonly liveAssistantMessages?: readonly RelayLiveAssistantMessage[];
     readonly interactions?: readonly RelayInteractionState[];
     readonly turn?: RelayTurnState;
+    readonly contextRecovery?: RelayThreadView["contextRecovery"];
   }): void {
     const shared = {
       threadId: this.id,
@@ -511,6 +526,8 @@ class RelayThreadImpl implements RelayThread {
       liveAssistantMessages: fields.liveAssistantMessages ?? this.#view.liveAssistantMessages,
       interactions: fields.interactions ?? this.#view.interactions,
       turn: fields.turn ?? this.#view.turn,
+      contextRecovery:
+        fields.contextRecovery === undefined ? this.#view.contextRecovery : fields.contextRecovery,
     } as const;
     this.#publish(
       this.#view.snapshot === null
@@ -537,7 +554,7 @@ export class RelayClientImpl implements RelayClient {
   #connectionState: RelayConnectionState = { status: "idle" };
   #socket: RelayWebSocketLike | undefined;
   #workspaceId: WorkspaceId | undefined;
-  #protocolVersion: "1.1" | "1.2" = "1.1";
+  #protocolVersion: "1.1" | "1.2" | "1.3" = "1.1";
   readonly #resultReads = new Map<string, Promise<RelayOperationResult>>();
   #connectPromise: Promise<void> | undefined;
   #sessionAbortController: AbortController | undefined;
@@ -700,7 +717,7 @@ export class RelayClientImpl implements RelayClient {
     operationId: string,
     options?: RelayRequestOptions,
   ): Promise<RelayOperationResult> {
-    if (this.#protocolVersion !== "1.2") {
+    if (this.#protocolVersion === "1.1") {
       return Promise.reject(
         transportError(
           RELAY_CLIENT_TRANSPORT_ERROR_CODES.protocolError,
@@ -794,7 +811,7 @@ export class RelayClientImpl implements RelayClient {
       try {
         rawSession = await this.#options.getSession({
           signal,
-          supportedRelayProtocolVersions: ["1.2", "1.1"],
+          supportedRelayProtocolVersions: this.#options.relayProtocolVersions ?? ["1.2", "1.1"],
         });
       } catch (error) {
         if (signal.aborted) {
@@ -937,7 +954,7 @@ export class RelayClientImpl implements RelayClient {
       return;
     }
 
-    const wire = relayMessageSchemaV12.safeParse(value);
+    const wire = relayMessageSchemaV13.safeParse(value);
     if (!wire.success) {
       throw transportError(
         RELAY_CLIENT_TRANSPORT_ERROR_CODES.protocolError,
@@ -1295,7 +1312,7 @@ export class RelayClientImpl implements RelayClient {
     method: TMethod,
     params: unknown,
     options?: RelayRequestOptions,
-  ): Promise<RelayRequestResultForVersion<"1.2", TMethod>> {
+  ): Promise<RelayRequestResultForVersion<"1.3", TMethod>> {
     if (
       this.#connectionState.status !== "connected" ||
       this.#connectionState.workspaceStatus !== "online" ||
@@ -1339,7 +1356,7 @@ export class RelayClientImpl implements RelayClient {
     }
     const mutation = RELAY_REQUEST_METHOD_DISPOSITIONS_V12[method] === "mutation";
 
-    return new Promise<RelayRequestResultForVersion<"1.2", TMethod>>((resolve, reject) => {
+    return new Promise<RelayRequestResultForVersion<"1.3", TMethod>>((resolve, reject) => {
       const abortListener = options?.signal
         ? () => {
             const pending = this.#pendingRequests.get(requestId);
@@ -1368,7 +1385,7 @@ export class RelayClientImpl implements RelayClient {
         mutation,
         sent: false,
         resolve: (value) => {
-          resolve(value as RelayRequestResultForVersion<"1.2", TMethod>);
+          resolve(value as RelayRequestResultForVersion<"1.3", TMethod>);
         },
         reject,
         signal: options?.signal,

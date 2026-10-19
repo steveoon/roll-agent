@@ -8,14 +8,16 @@ import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  contextRecoveryViewSchema,
   getApprovalDiffPreview,
   getApprovalExplanation,
   getFileChangeDisplay,
   parseRuntimeMethodResultForVersion,
   requestIdSchema,
+  turnIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
   type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -99,7 +101,10 @@ function execution(): ToolExecutionRecord {
   });
 }
 
-function createFixture(store: ThreadStore): {
+function createFixture(
+  store: ThreadStore,
+  review?: { readonly text: string; readonly expiresAt: string },
+): {
   readonly engine: RuntimeServiceEngine;
   readonly session: RuntimeServiceSession;
   readonly sendCount: () => number;
@@ -120,6 +125,11 @@ function createFixture(store: ThreadStore): {
       ]);
       yield { type: "message-start", messageId: IDS.message };
       yield {
+        type: "tool-input-activity",
+        calls: [{ toolCallId: "ephemeral-generation-sentinel", name: "demo-agent.write" }],
+      };
+      yield { type: "tool-input-activity", calls: [] };
+      yield {
         type: "confirmation-required",
         approvalId: IDS.approval,
         agentName: "demo-agent",
@@ -129,7 +139,8 @@ function createFixture(store: ThreadStore): {
           apiKey: "secret-preview",
           providerOptions: { configuration: APPROVAL_PROVIDER_OPTIONS_SENTINEL },
         },
-        expiresAt: "2026-07-28T12:05:00.000Z",
+        expiresAt: review?.expiresAt ?? "2026-07-28T12:05:00.000Z",
+        ...(review !== undefined ? { fullDiff: review.text } : {}),
         reason: "requires approval",
         explanation: "写入用户请求的文件，以完成当前任务。",
         diff: {
@@ -284,7 +295,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -393,6 +404,12 @@ test("RuntimeService respondApproval 不带 scope 时 session.approve 收到 und
     );
     await nextTick();
 
+    const wire = store.resumeRuntimeEvents(IDS.thread, null);
+    assert.doesNotMatch(JSON.stringify(wire), /ephemeral-generation-sentinel|tool-input-activity/);
+    assert.doesNotMatch(
+      JSON.stringify(store.listTranscriptMessages(IDS.thread)),
+      /ephemeral-generation-sentinel|tool-input-activity/,
+    );
     await service.respondApproval(
       runtimeMethodSchemas["approval.respond"].params.parse({
         requestId: IDS.requestApprove,
@@ -415,7 +432,7 @@ test("RuntimeService redacts approval rejection reasons before durable replay", 
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   service.onEvent((event) => events.push(event));
   try {
     service.initialize({
@@ -479,7 +496,7 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -613,7 +630,7 @@ for (const terminal of ["error", "cancel"] as const) {
     const store = new ThreadStore(dir);
     const fixture = createMultiStreamFailureFixture(store, terminal);
     const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-    const events: RuntimeEventEnvelopeV15[] = [];
+    const events: RuntimeEventEnvelopeV16[] = [];
     service.onEvent((event) => events.push(event));
     try {
       service.initialize({
@@ -648,12 +665,66 @@ for (const terminal of ["error", "cancel"] as const) {
   });
 }
 
+for (const terminal of ["finish", "error", "cancel"] as const) {
+  test(`RuntimeService pairs a stream across denied preparations and partial-text rebuilds: ${terminal}`, async () => {
+    const dir = tempDir();
+    const store = new ThreadStore(dir);
+    const fixture = createFixture(store);
+    Object.defineProperty(fixture.session, "send", {
+      value: async function* () {
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "compaction-start", reason: "auto" };
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "text-delta", delta: "before " };
+        yield { type: "message-start", messageId: IDS.message };
+        yield { type: "text-delta", delta: "after" };
+        if (terminal === "finish") yield { type: "message-finish", text: "after" };
+        else if (terminal === "error") yield { type: "error", stage: "plan", message: "blocked" };
+        else yield { type: "turn-cancelled", reason: "user", message: "cancelled" };
+      },
+    });
+    const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+    const events: RuntimeEventEnvelopeV16[] = [];
+    service.onEvent((event) => events.push(event));
+    try {
+      service.initialize({
+        protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+        client: { name: "maintenance-stream", version: "1" },
+      });
+      await service.createThread(
+        runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+      );
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "continue" },
+        }),
+      );
+      await nextTick();
+      const starts = events.flatMap((e) => (e.event.type === "message.started" ? [e.event] : []));
+      const finishes = events.flatMap((e) =>
+        e.event.type === "message.completed" ? [e.event] : [],
+      );
+      assert.equal(starts.length, 1);
+      assert.equal(finishes.length, 1);
+      assert.equal(finishes[0]?.streamId, starts[0]?.streamId);
+      assert.equal(finishes[0]?.text, "before after");
+    } finally {
+      await service.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("RuntimeService isolates event listeners before starting and completing a Turn", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const eventsAfterThrow: RuntimeEventEnvelopeV15[] = [];
+  const eventsAfterThrow: RuntimeEventEnvelopeV16[] = [];
   service.onEvent(() => {
     throw new Error("listener failed");
   });
@@ -976,7 +1047,7 @@ test("RuntimeService durable event Store 失败时不发布 live 且回滚 turn.
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   service.onEvent((event) => events.push(event));
   try {
     await service.createThread(
@@ -1027,7 +1098,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1089,7 +1160,7 @@ test("RuntimeService approval resolution durable 写盘失败会触发 fatal shu
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1149,7 +1220,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV15[] = [];
+  const events: RuntimeEventEnvelopeV16[] = [];
   let terminalSnapshotHadActiveTurn = false;
   service.onEvent((event) => {
     events.push(event);
@@ -1499,7 +1570,7 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
     });
     assert.equal("executionState" in (snapshot.operations.items[0]?.outcome ?? {}), false);
     assert.doesNotThrow(() =>
-      parseRuntimeMethodResultForVersion("1.5", "thread.snapshot", {
+      parseRuntimeMethodResultForVersion("1.6", "thread.snapshot", {
         ...snapshot,
         pendingInteractions: [],
       }),
@@ -2053,6 +2124,153 @@ test("RuntimeService 未配置附件存储时 attachments 能力关闭且方法�
       (error: unknown) =>
         error instanceof RuntimeServiceError && error.rollCode === "CAPABILITY_UNAVAILABLE",
     );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService replays legacy recovery events while current snapshots have no gate", async () => {
+  const dir = tempDir();
+  let store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  Object.defineProperty(fixture.session, "send", {
+    value: async function* () {
+      // A legacy session fixture may still emit V1.6 events. They remain readable
+      // and durable without recreating a ledger or enabling a current recovery gate.
+      const legacyState = contextRecoveryViewSchema.parse({
+        checkpointId: "00000000-0000-4000-8000-000000000201",
+        required: true,
+        unextracted: true,
+        requiredItemCount: 2,
+      });
+      yield { type: "context-recovery", state: legacyState };
+      yield { type: "context-recovery", state: { ...legacyState, required: false } };
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "message-finish", text: "recovered" };
+    },
+  });
+  let service = new RuntimeService(fixture.engine, store);
+  const seen: RuntimeEventEnvelopeV16[] = [];
+  const snapshots: unknown[] = [];
+  service.onEvent((event) => {
+    seen.push(event);
+    if (event.event.type === "context.recovery.changed") {
+      snapshots.push(
+        service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
+          .contextRecovery,
+      );
+    }
+  });
+  try {
+    const initialized = service.initialize({
+      protocolVersions: ["1.6"],
+      client: { name: "recovery", version: "1" },
+    });
+    assert.equal(initialized.protocolVersion, "1.6");
+    assert.ok(!initialized.features.includes("context-recovery"));
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "continue" },
+      }),
+    );
+    await nextTick();
+    assert.deepEqual(snapshots, [null, null]);
+    const changes = seen.filter((event) => event.event.type === "context.recovery.changed");
+    assert.equal(changes.length, 2);
+    assert.ok(changes.every((event) => event.durability === "durable"));
+    assert.doesNotMatch(JSON.stringify(changes), /MODEL_NOTES/);
+    await service.close();
+    store.close();
+    store = new ThreadStore(dir);
+    service = new RuntimeService(createFixture(store).engine, store);
+    service.initialize({ protocolVersions: ["1.6"], client: { name: "reopened", version: "1" } });
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 1 })
+        .contextRecovery,
+      null,
+    );
+    const replay = service.resumeEvents({
+      threadId: threadIdSchema.parse(IDS.thread),
+      afterCursor: null,
+    });
+    assert.deepEqual(
+      replay.events
+        .filter((entry) => entry.event.type === "context.recovery.changed")
+        .map((entry) => entry.event),
+      changes.map((entry) => entry.event),
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("完整审批预览按页返回同一快照，不进入持久事件，审批结束即不可读", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fullDiff = `${"unchanged context\n".repeat(1000)}LAST_REVIEW_CHANGE\nAuthorization: Bearer approval-secret-value-123456789`;
+  const fixture = createFixture(store, { text: fullDiff, expiresAt: "2099-01-01T00:00:00.000Z" });
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "test" });
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "review-test", version: "1" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "edit" },
+      }),
+    );
+    await nextTick();
+    const params = runtimeMethodSchemas["approval.preview"].params.parse({
+      threadId: IDS.thread,
+      turnId: IDS.firstTurn,
+      approvalId: IDS.approval,
+      maxChars: 17,
+    });
+    let offset: number | null = 0;
+    let joined = "";
+    while (offset !== null) {
+      const page = service.getApprovalPreview({ ...params, offset });
+      assert.ok(page.text.length <= 17);
+      joined += page.text;
+      offset = page.nextOffset;
+    }
+    assert.match(joined, /LAST_REVIEW_CHANGE/u);
+    assert.doesNotMatch(joined, /approval-secret-value-123456789/u);
+    assert.equal(service.getApprovalPreview(params).text, joined.slice(0, 17));
+    const wire = JSON.stringify(store.resumeRuntimeEvents(IDS.thread, null));
+    assert.match(wire, /fullDiffAvailable/u);
+    assert.doesNotMatch(wire, /LAST_REVIEW_CHANGE/u);
+    assert.throws(
+      () => service.getApprovalPreview({ ...params, turnId: turnIdSchema.parse(IDS.secondTurn) }),
+      /不存在或已失效/u,
+    );
+    await service.respondApproval(
+      runtimeMethodSchemas["approval.respond"].params.parse({
+        requestId: IDS.requestApprove,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        approvalId: IDS.approval,
+        decision: "reject",
+      }),
+    );
+    assert.throws(() => service.getApprovalPreview(params), /不存在或已失效/u);
   } finally {
     await service.close();
     store.close();

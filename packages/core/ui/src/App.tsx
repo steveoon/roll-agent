@@ -12,6 +12,7 @@ import {
 import { AgentEnvironmentEditor } from "./components/AgentEnvironmentEditor.tsx";
 import { ApplyDialog } from "./components/ApplyDialog.tsx";
 import { CatalogEditor } from "./components/CatalogEditor.tsx";
+import { ChatGptAccountPanel } from "./components/ChatGptAccountPanel.tsx";
 import { CompanionPanel } from "./components/CompanionPanel.tsx";
 import { SchedulePanel } from "./components/SchedulePanel.tsx";
 import { Navigation } from "./components/Navigation.tsx";
@@ -25,7 +26,13 @@ import {
 import { isCompanionUnavailableError } from "./lib/companion-state.ts";
 import { isScheduleUnavailableError } from "./lib/schedule-state.ts";
 import { createConfiguredSecretPathKeys } from "./lib/config-secret.ts";
-import { cloneObject, deleteAtPath, setAtPath } from "./lib/config-value.ts";
+import { cloneObject, deleteAtPath, setAtPath, getAtPath } from "./lib/config-value.ts";
+import { selectChatGptAccount, selectChatGptModel } from "./lib/chatgpt-selection.ts";
+import {
+  thinkingCatalogForDraft,
+  thinkingFieldValidity,
+  type ChatGptModelCatalog,
+} from "./lib/thinking-catalog.ts";
 import type {
   AgentRuntimeStatus,
   AgentActivationResult,
@@ -63,6 +70,10 @@ export function App() {
   const [active, setActive] = useState<NavigationTarget>({ type: "roll", key: "llm" });
   const [query, setQuery] = useState("");
   const [persistedDraft, setPersistedDraft] = useState<JsonObject>({});
+  const [subscriptionCatalog, setSubscriptionCatalog] = useState<ChatGptModelCatalog>({
+    models: [],
+    status: "loading",
+  });
   const [yamlDraft, setYamlDraft] = useState("");
   const [preview, setPreview] = useState<ConfigApplicationPreview | null>(null);
   const [issues, setIssues] = useState<readonly ConfigValidationIssue[]>([]);
@@ -113,6 +124,13 @@ export function App() {
       return { ...current, [key]: issue };
     });
   }, []);
+
+  useEffect(() => {
+    if (mode !== "form" || loadState.status !== "ready") return;
+    for (const { path, message } of thinkingFieldValidity(persistedDraft, subscriptionCatalog)) {
+      handleValidityChange(path, message);
+    }
+  }, [mode, loadState.status, persistedDraft, subscriptionCatalog, handleValidityChange]);
 
   const handleInvalidJsonDraftChange = useCallback((path: ConfigPath, draft?: string): void => {
     const key = JSON.stringify(path);
@@ -652,19 +670,53 @@ export function App() {
                   没有匹配“{query}”的配置。
                 </div>
               ) : selectedRollNode !== undefined && visibleActive.type === "roll" ? (
-                <CatalogEditor
-                  node={selectedRollNode}
-                  path={[visibleActive.key]}
-                  persisted={persistedDraft}
-                  baseline={currentSnapshot.persisted}
-                  searchQuery={normalizedQuery}
-                  onSet={setConfigValue}
-                  onDelete={deleteConfigValue}
-                  onValidityChange={handleValidityChange}
-                  configuredSecretPathKeys={configuredSecretPathKeys}
-                  invalidJsonDraftsByPath={invalidJsonDraftsByPath}
-                  onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
-                />
+                <>
+                  {(visibleActive.key === "runtime" || visibleActive.key === "llm") && (
+                    <ChatGptAccountPanel
+                      api={api}
+                      enabled={getAtPath(persistedDraft, ["runtime", "provider"]) === "chatgpt"}
+                      {...(typeof getAtPath(persistedDraft, ["runtime", "chatgptAccountId"]) ===
+                      "string"
+                        ? {
+                            accountId: String(
+                              getAtPath(persistedDraft, ["runtime", "chatgptAccountId"]),
+                            ),
+                          }
+                        : {})}
+                      {...(typeof getAtPath(persistedDraft, ["runtime", "model"]) === "string"
+                        ? { model: String(getAtPath(persistedDraft, ["runtime", "model"])) }
+                        : {})}
+                      onModels={setSubscriptionCatalog}
+                      onAccount={(accountId) => {
+                        setPersistedDraft((current) => selectChatGptAccount(current, accountId));
+                        markEdited();
+                      }}
+                      onModel={(model, accountId) => {
+                        setPersistedDraft((current) =>
+                          selectChatGptModel(current, model, accountId),
+                        );
+                        markEdited();
+                      }}
+                    />
+                  )}
+                  <CatalogEditor
+                    node={thinkingCatalogForDraft(
+                      selectedRollNode,
+                      persistedDraft,
+                      subscriptionCatalog,
+                    )}
+                    path={[visibleActive.key]}
+                    persisted={persistedDraft}
+                    baseline={currentSnapshot.persisted}
+                    searchQuery={normalizedQuery}
+                    onSet={setConfigValue}
+                    onDelete={deleteConfigValue}
+                    onValidityChange={handleValidityChange}
+                    configuredSecretPathKeys={configuredSecretPathKeys}
+                    invalidJsonDraftsByPath={invalidJsonDraftsByPath}
+                    onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
+                  />
+                </>
               ) : selectedAgent !== undefined ? (
                 <AgentEnvironmentEditor
                   agent={selectedAgent}

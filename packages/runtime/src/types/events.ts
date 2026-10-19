@@ -1,6 +1,11 @@
 import type { SessionCancellationReason } from "./cancellation.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
-import type { AppOutputDescriptor, FileChangeDiff, UserInputForm } from "@roll-agent/protocol";
+import type {
+  AppOutputDescriptor,
+  FileChangeDiff,
+  UserInputForm,
+  ContextRecoveryView,
+} from "@roll-agent/protocol";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 
 export interface SessionTokenUsage {
@@ -17,6 +22,7 @@ export type SessionDebugStage = "turn" | "compaction" | "model" | "persist";
 export type SessionDebugData = Readonly<Record<string, string | number | boolean>>;
 
 export type SessionEvent =
+  | { readonly type: "context-recovery"; readonly state: ContextRecoveryView | null }
   | {
       readonly type: "debug";
       readonly stage: SessionDebugStage;
@@ -33,6 +39,11 @@ export type SessionEvent =
       readonly delta: string;
     }
   | { readonly type: "reasoning-end"; readonly reasoningId: string }
+  | {
+      /** Ephemeral generation metadata, not execution; never projected onto Runtime wire events. */
+      readonly type: "tool-input-activity";
+      readonly calls: readonly { readonly toolCallId: string; readonly name?: string }[];
+    }
   | {
       readonly type: "tool-call";
       readonly toolCallId: string;
@@ -76,6 +87,8 @@ export type SessionEvent =
       readonly explanation?: string;
       readonly sessionGrantLabel?: string;
       readonly diff?: FileChangeDiff;
+      /** Ephemeral review text; remote transports expose it only through approval.preview. */
+      readonly fullDiff?: string;
     }
   | {
       /** Engine-internal request; Runtime Protocol assigns a separate InteractionId. */
@@ -116,6 +129,7 @@ export type SessionEvent =
       readonly kept: number;
       readonly truncatedTools?: number;
       readonly beforeInputTokens?: number;
+      readonly recoveryNotice?: string;
       readonly checkpointId?: string;
       readonly checkpointGeneration?: number;
       readonly checkpointSummaryStatus?: "valid" | "fallback" | "skipped";

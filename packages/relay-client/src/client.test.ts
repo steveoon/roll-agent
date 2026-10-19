@@ -150,13 +150,19 @@ function createHarness(
   requestTimeoutMs = 5_000,
   scheduler?: RelayScheduler,
   reconnectDelayMs = 0,
+  relayProtocolVersions?: readonly ("1.3" | "1.2" | "1.1")[],
 ): TestHarness {
   const sockets: FakeRelayWebSocket[] = [];
   let sessionNumber = 0;
   const client = createRelayClientForTesting(
     {
       requestTimeoutMs,
-      getSession: async () => {
+      ...(relayProtocolVersions ? { relayProtocolVersions } : {}),
+      getSession: async (input) => {
+        assert.deepEqual(
+          input.supportedRelayProtocolVersions,
+          relayProtocolVersions ?? ["1.2", "1.1"],
+        );
         sessionNumber += 1;
         return {
           connectUrl: `wss://relay.example.test/browser?ticket=${sessionNumber}`,
@@ -1328,5 +1334,47 @@ test("Wire 1.1 result API reports unsupported without sending new methods", asyn
     );
   } finally {
     harness.client.close();
+  }
+});
+
+test("Wire 1.3 recovery state follows snapshot, live events and reconnect refresh", async () => {
+  const h = createHarness(5_000, undefined, 0, ["1.3", "1.2", "1.1"]);
+  try {
+    const connecting = h.client.connect();
+    await eventually(() => h.sockets.length > 0, "socket");
+    const socket = h.sockets[0]!;
+    socket.serverOpen();
+    socket.serverMessage({ ...sessionReady(), relayProtocolVersion: "1.3" });
+    await connecting;
+    const state = {
+      checkpointId: APPROVAL_ID,
+      required: true,
+      unextracted: true,
+      requiredItemCount: 24,
+    };
+    const opening = h.client.openThread(THREAD_ID);
+    respond(socket, lastRequest(socket, "thread.open"), {
+      ...createSnapshot(),
+      contextRecovery: state,
+    });
+    const thread = await opening;
+    assert.deepEqual(thread.getSnapshot().contextRecovery, state);
+    socket.serverMessage(
+      runtimeEvent(0, {
+        type: "context.recovery.changed",
+        contextRecovery: { ...state, required: false },
+      }),
+    );
+    assert.equal(thread.getSnapshot().contextRecovery?.required, false);
+    const refreshing = thread.refresh();
+    respond(socket, lastRequest(socket, "thread.snapshot"), {
+      ...createSnapshot(),
+      contextRecovery: state,
+    });
+    await refreshing;
+    assert.equal(thread.getSnapshot().contextRecovery?.required, true);
+    assert.deepEqual(ackSequences(socket), [-1, 0]);
+  } finally {
+    h.client.close();
   }
 });

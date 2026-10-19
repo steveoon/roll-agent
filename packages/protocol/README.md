@@ -94,7 +94,7 @@ function handleEvent(event: RuntimeEventEnvelopeV13): void {
 
 协议版本与 npm 包版本相互独立。`RUNTIME_PROTOCOL_VERSION` 表示这个包提供的最新 wire
 schema，并不代表调用方已实现对应 Client 能力。当前支持顺序为
-`["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
+`["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
 `"1.3"` 或 `"1.4"` 后，
 Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
 返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按
@@ -171,6 +171,22 @@ Protocol `"1.0"` / `"1.1"` 的 strict 顶层结构不变，旧 GUI 可以继续�
 `operation.get`）沿用台账信封 `{ version, encoding, value }`，`value` 才是同一 `{ text, diff }` 对象，
 读取时传 `display.value`。两者同样刻意放在既有 JSON 槽位内：strict 顶层结构不变，旧客户端把它们当
 普通 JSON 忽略；`unified` 缺席表示只有统计（超大文件），`truncated: true` 表示正文按上限截断。
+
+文件审批绑定生成预览时的完整文件版本。其他调用刷新 read tracker 不会刷新这份审批；执行前版本
+变化时，`edit_file` / `write_file` 返回失败，需要重新读取并提交。单次 `edits` 仍按顺序规划，
+任一编辑失败则不写入。
+
+Runtime 1.6 的待审批 `preview.fullDiffAvailable: true` 表示可通过只读 `approval.preview` 读取
+完整预览。参数为 `{ threadId, turnId, approvalId, offset?, maxChars? }`；`offset` 默认 0，
+`maxChars` 默认 12,000、最大 32,000。返回 `{ text, totalChars, nextOffset }`，`nextOffset: null`
+表示结束，偏移以 UTF-16 code units 计数。各页来自审批时的同一份快照，先整体脱敏再切页，不重新读取文件。
+完整正文仅保留到审批结束，不进入持久事件、账本或模型上下文；失效或跨 thread/turn 的读取返回
+`APPROVAL_NOT_FOUND`。旧版协议及 legacy `--server` 不提供此方法，客户端须协商 1.6 后接入。
+
+首屏仍最多 12,000 字符；大文件可省略首屏正文，但完整预览可读。`coarse: true` 表示逐行 diff
+计算超时/失败，完整预览改为明确标记的原文/新文对照，此时 `removed` / `added` 分别是原文/新文
+总行数，不能显示为精细改动统计。Ink 审批使用 PgUp/PgDn 查看完整变更，基础 REPL 使用确认菜单的
+“查看完整变更”；原有批准、拒绝和会话授权方式保留。
 
 ## 文档
 

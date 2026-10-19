@@ -5,6 +5,30 @@ import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
 
 const FIXED_AT = 1_700_000_000_000;
 
+test("ctx follows latest completed step even when a later dispatch fails without message-finish", () => {
+  let state = createInitialState("fixture", 500000);
+  state = event(state, "previous", {
+    type: "message-finish",
+    text: "",
+    contextInputTokens: 259900,
+  });
+  state = event(state, "latest", {
+    type: "step-finish",
+    finishReason: "tool-calls",
+    usage: { inputTokens: 310000, outputTokens: 42, totalTokens: 310042 },
+  });
+  state = event(state, "failed", { type: "error", stage: "plan", message: "budget denied" });
+  assert.equal(state.status.contextInputTokens, 310000);
+  state = event(state, "missing", { type: "step-finish", finishReason: "stop" });
+  assert.equal(state.status.contextInputTokens, 310000);
+  state = event(state, "smaller", {
+    type: "step-finish",
+    finishReason: "stop",
+    usage: { inputTokens: 150000, outputTokens: 1, totalTokens: 150001 },
+  });
+  assert.equal(state.status.contextInputTokens, 150000, "latest occupancy, not a high-water mark");
+});
+
 function event(state: ChatUiState, id: string, e: SessionEvent, at = FIXED_AT): ChatUiState {
   return chatReducer(state, { type: "session-event", id, at, event: e });
 }

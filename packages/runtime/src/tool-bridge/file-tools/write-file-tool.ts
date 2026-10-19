@@ -1,7 +1,6 @@
 import { statSync } from "node:fs";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { FileChangeKind } from "@roll-agent/protocol";
 import type { ToolRegistry } from "../naming.ts";
 import type { ToolBridgeContext } from "../build-tools.ts";
 import { gateToolCall } from "../build-tools.ts";
@@ -21,7 +20,6 @@ import { renderNumberedLines } from "./match-pipeline.ts";
 import {
   canonicalFileKey,
   canonicalResourcePath,
-  captureFilePathAdmission,
   escapesWorkdir,
   formatPathForApproval,
   loadTextFile,
@@ -35,7 +33,19 @@ import {
 import { rejectInvalidTextPayload } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
-import { describeFileChange, fileChangeToolResult } from "./file-change-result.ts";
+import {
+  describeFileChange,
+  describeFileChangePreview,
+  fileChangeToolResult,
+} from "./file-change-result.ts";
+import {
+  captureFileWriteState,
+  isFileWriteExecutionState,
+  fileWriteVersionGuard,
+  fileWritePolicyGuard,
+  requireFileWriteApproval,
+  type FileWriteApproval,
+} from "./file-write-state.ts";
 
 export const WRITE_FILE_TOOL_NAME = "write_file";
 
@@ -108,6 +118,7 @@ export function executeWriteFile(
   settings: ResolvedFileToolsSettings,
   tracker: FileStateTracker,
   input: WriteFileInput,
+  approval?: FileWriteApproval,
 ): NormalizedToolResult {
   const contentRejected = rejectInvalidTextPayload("content", input.content);
   if (contentRejected !== undefined) {
@@ -124,11 +135,16 @@ export function executeWriteFile(
     if (!loaded.ok) {
       return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
     }
+    const changed = fileWriteVersionGuard(path, approval?.baselineDigest, loaded.digest);
+    if (changed !== undefined) return changed;
     const guarded = overwriteGuard(tracker, path, loaded);
     if (guarded !== undefined) {
       return guarded;
     }
     before = loaded.content;
+  } else {
+    const changed = fileWriteVersionGuard(path, approval?.baselineDigest, null);
+    if (changed !== undefined) return changed;
   }
   const { content, hadBom } = splitUtf8Bom(input.content);
   saveTextFile(path, content, hadBom);
@@ -142,13 +158,15 @@ export function executeWriteFile(
   if (lines.length > PREVIEW_LINES) {
     parts.push(`（预览前 ${String(PREVIEW_LINES)} 行）`);
   }
-  const diff = describeFileChange({
-    workdir: settings.workdir,
-    inputPath: input.file_path,
-    change: before === undefined ? "create" : "modify",
-    before: before ?? "",
-    after: content,
-  });
+  const diff =
+    approval?.diff ??
+    describeFileChange({
+      workdir: settings.workdir,
+      inputPath: input.file_path,
+      change: before === undefined ? "create" : "modify",
+      before: before ?? "",
+      after: content,
+    });
   return fileChangeToolResult(parts.join("\n"), diff);
 }
 
@@ -162,7 +180,7 @@ export function buildWriteFileTool(
     annotations: WRITE_ANNOTATIONS,
   });
   const plan: ToolExecutionPlan = {
-    prepare: async (rawInput) => {
+    prepare: async (rawInput, capturedState) => {
       const parsed = writeFileInputSchema.safeParse(rawInput);
       if (!parsed.success) {
         return failedToolResult(
@@ -174,41 +192,33 @@ export function buildWriteFileTool(
       if (contentRejected !== undefined) {
         return contentRejected;
       }
+      const denied = fileWritePolicyGuard(ctx, WRITE_FILE_TOOL_NAME, parsed.data);
+      if (denied !== undefined) return denied;
+      if (!isFileWriteExecutionState(capturedState)) {
+        return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, "文件审批状态缺失，请重新提交写入");
+      }
       const newLineCount = parsed.data.content.split("\n").length;
       const path = resolveFilePath(settings.workdir, parsed.data.file_path);
       const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
-      const loaded = external
-        ? undefined
-        : loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
-      if (loaded?.ok === true) {
+      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      if (loaded.ok) {
         const guarded = overwriteGuard(tracker, path, loaded);
         if (guarded !== undefined) {
           return guarded;
         }
+      } else if (loaded.code !== "not-found") {
+        return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
       }
-      const { shrinking, warning } =
-        loaded !== undefined
-          ? detectShrink(newLineCount, loaded)
-          : { shrinking: false, warning: undefined };
+      const { shrinking, warning } = detectShrink(newLineCount, loaded);
       const { content: newContent } = splitUtf8Bom(parsed.data.content);
-      const change: FileChangeKind | undefined =
-        loaded === undefined
-          ? undefined
-          : loaded.ok
-            ? "modify"
-            : loaded.code === "not-found"
-              ? "create"
-              : undefined;
-      const diff =
-        change === undefined
-          ? undefined
-          : describeFileChange({
-              workdir: settings.workdir,
-              inputPath: parsed.data.file_path,
-              change,
-              before: loaded?.ok === true ? loaded.content : "",
-              after: newContent,
-            });
+      const { diff, fullDiff } = describeFileChangePreview({
+        workdir: settings.workdir,
+        inputPath: parsed.data.file_path,
+        change: loaded.ok ? "modify" : "create",
+        before: loaded.ok ? loaded.content : "",
+        after: newContent,
+      });
+      capturedState.approval = { baselineDigest: loaded.ok ? loaded.digest : null, diff };
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const explanation = `写入 ${displayPath}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
       const memoryKey = shrinking || external ? undefined : `${WRITE_FILE_TOOL_NAME}:workdir`;
@@ -220,7 +230,8 @@ export function buildWriteFileTool(
         WRITE_ANNOTATIONS,
         {
           explanation,
-          ...(diff !== undefined ? { diff } : {}),
+          diff,
+          fullDiff,
           ...(memoryKey !== undefined
             ? {
                 memoryKey,
@@ -243,7 +254,7 @@ export function buildWriteFileTool(
     captureExecutionState: (rawInput) => {
       const parsed = writeFileInputSchema.safeParse(rawInput);
       return parsed.success
-        ? captureFilePathAdmission(settings.workdir, parsed.data.file_path)
+        ? captureFileWriteState(settings.workdir, parsed.data.file_path)
         : undefined;
     },
     revalidateExecution: (rawInput, capturedState) => {
@@ -269,7 +280,10 @@ export function buildWriteFileTool(
           options.toolCallId,
           input,
           options.abortSignal,
-          () => Promise.resolve(executeWriteFile(settings, tracker, input)),
+          (capturedState) =>
+            Promise.resolve(
+              executeWriteFile(settings, tracker, input, requireFileWriteApproval(capturedState)),
+            ),
         ),
     }),
   };

@@ -2,8 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import type { SessionEvent } from "@roll-agent/runtime";
-import { ChatRenderer, type ChatApprover } from "./chat-renderer.ts";
+import { ChatRenderer, paginateApprovalReview, type ChatApprover } from "./chat-renderer.ts";
 import type { ChatUserInputPrompt } from "./user-input-prompts.ts";
+import stringWidth from "string-width";
+
+test("clack review pages preserve long changes and fit terminal rows and columns", () => {
+  const review = "context\n".repeat(2000) + "界".repeat(200) + "FINAL_REVIEW_MARKER";
+  for (const [columns, rows] of [
+    [40, 16],
+    [80, 24],
+  ]) {
+    assert.ok(columns !== undefined && rows !== undefined);
+    const pages = paginateApprovalReview(review, columns, rows);
+    assert.ok(pages.length > 1);
+    assert.equal(pages.join("\n").replaceAll("\n", ""), review.replaceAll("\n", ""));
+    for (const page of pages) {
+      assert.ok(page.split("\n").length <= rows - 10);
+      assert.ok(page.split("\n").every((line) => stringWidth(line) <= columns - 4));
+    }
+    assert.ok(pages.at(-1)?.includes("FINAL_REVIEW_MARKER"));
+  }
+});
 
 type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
 
@@ -151,8 +170,10 @@ for (const reason of ["auto", "manual"] as const) {
 
 test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits JSON", async () => {
   let message = "";
-  const renderer = new ChatRenderer(async (m) => {
+  let fullReview: string | undefined;
+  const renderer = new ChatRenderer(async (m, _signal, fullDiff) => {
     message = m;
+    fullReview = fullDiff;
     return false;
   });
   await renderer.handle(
@@ -164,6 +185,7 @@ test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits J
       input: { file_path: "a.txt", edits: [{ old_string: "old", new_string: "new" }] },
       explanation: "修改 a.txt：1 处编辑",
       diff: DIFF_FIXTURE,
+      fullDiff: `${"context\n".repeat(2000)}FINAL_CHANGE`,
     },
     { approve() {}, reject() {} },
   );
@@ -175,6 +197,8 @@ test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits J
   assert.match(plain, /1 - old/u);
   assert.match(plain, /1 \+ new/u);
   assert.doesNotMatch(plain, /old_string/u);
+  assert.ok(fullReview !== undefined && fullReview.length > 12_000);
+  assert.match(fullReview, /FINAL_CHANGE/u);
 });
 
 test("tool-result 的 {text, diff} display 在 stderr 打印 diff，且受 /diff 折叠模式控制", async () => {

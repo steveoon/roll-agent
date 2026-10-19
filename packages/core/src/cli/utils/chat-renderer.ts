@@ -9,9 +9,11 @@ import {
   formatApprovalDetails,
   formatApprovalExplanation,
   formatToolInput,
+  sanitizeForDisplay,
 } from "./tool-format.ts";
 import { formatDebugEvent } from "./debug-format.ts";
 import { formatFileChangeDiffLines } from "./unified-diff.ts";
+import stringWidth from "string-width";
 import { DIFF_INLINE_MAX_LINES, type DiffDisplayMode } from "../chat/diff-display.ts";
 import type { ChatUserInputPrompt, ChatUserInputResult } from "./user-input-prompts.ts";
 
@@ -27,7 +29,11 @@ export interface ChatApprover {
   cancelUserInput?(requestId: UserInputRequiredEvent["requestId"], reason?: string): boolean;
 }
 
-export type ChatConfirm = (message: string, signal?: AbortSignal) => Promise<boolean>;
+export type ChatConfirm = (
+  message: string,
+  signal?: AbortSignal,
+  fullDiff?: string,
+) => Promise<boolean>;
 
 const USER_INPUT_TIMEOUT_REASON = "用户输入请求已超时";
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
@@ -85,17 +91,69 @@ function createUserInputPromptSignalScope(
   };
 }
 
-export const clackConfirm: ChatConfirm = async (message, signal) => {
-  const answer = await select({
-    message,
-    options: [
-      { value: "yes", label: "Yes" },
-      { value: "no", label: "No" },
-    ],
-    initialValue: "no",
-    ...(signal !== undefined ? { signal } : {}),
-  });
-  return !isCancel(answer) && answer === "yes";
+export function paginateApprovalReview(text: string, columns: number, rows: number): string[] {
+  const width = Math.max(2, Math.min(160, columns - 4));
+  const height = Math.max(1, Math.min(20, rows - 10));
+  const lines: string[] = [];
+  for (const line of sanitizeForDisplay(text).replaceAll("\t", "  ").split("\n")) {
+    let current = "";
+    let cells = 0;
+    for (const character of line) {
+      const size = stringWidth(character);
+      if (current.length > 0 && cells + size > width) {
+        lines.push(current);
+        current = "";
+        cells = 0;
+      }
+      current += character;
+      cells += size;
+    }
+    lines.push(current);
+  }
+  const pages: string[] = [];
+  for (let index = 0; index < lines.length; index += height) {
+    pages.push(lines.slice(index, index + height).join("\n"));
+  }
+  return pages;
+}
+
+export const clackConfirm: ChatConfirm = async (message, signal, fullDiff) => {
+  let pages: string[] = [];
+  let page = 0;
+  while (!signal?.aborted) {
+    const answer = await select({
+      message: page === 0 ? message : `完整变更 ${page}/${pages.length}\n${pages[page - 1] ?? ""}`,
+      options:
+        page === 0
+          ? [
+              { value: "yes", label: "Yes" },
+              { value: "no", label: "No" },
+              ...(fullDiff !== undefined ? [{ value: "review", label: "查看完整变更" }] : []),
+            ]
+          : [
+              ...(page < pages.length ? [{ value: "next", label: "下一页" }] : []),
+              ...(page > 1 ? [{ value: "previous", label: "上一页" }] : []),
+              { value: "summary", label: "返回审批" },
+              { value: "no", label: "No" },
+            ],
+      initialValue: page === 0 ? "no" : page < pages.length ? "next" : "summary",
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (isCancel(answer) || answer === "no") return false;
+    if (answer === "yes") return true;
+    if (answer === "review" && fullDiff !== undefined) {
+      pages = paginateApprovalReview(
+        fullDiff,
+        process.stdout.columns || 80,
+        process.stdout.rows || 24,
+      );
+      page = 1;
+    }
+    if (answer === "next") page += 1;
+    if (answer === "previous") page -= 1;
+    if (answer === "summary") page = 0;
+  }
+  return false;
 };
 
 export class ChatRenderer {
@@ -213,7 +271,7 @@ export class ChatRenderer {
               }).join("\n")
             : formatApprovalDetails(event.input);
         const message = [header, explanation, body].filter((line) => line.length > 0).join("\n");
-        const approved = await this.confirm(message, this.signal);
+        const approved = await this.confirm(message, this.signal, event.fullDiff);
         if (approved) {
           responder.approve(event.approvalId);
         } else {
@@ -269,9 +327,10 @@ export class ChatRenderer {
           ? `，精简 ${String(event.truncatedTools)} 个工具结果`
           : "";
         const text =
-          event.removed === 0 && !event.truncatedTools
+          event.recoveryNotice ??
+          (event.removed === 0 && !event.truncatedTools
             ? `${GLYPHS.compact} ${label}：未减少上下文（保留策略或安全检查限制了裁剪）`
-            : `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+            : `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`);
         process.stderr.write(`${chalk.gray(text)}\n`);
         break;
       }

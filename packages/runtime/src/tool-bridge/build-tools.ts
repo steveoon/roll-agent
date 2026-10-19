@@ -71,6 +71,7 @@ export interface ApprovalRequest {
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
   readonly diff?: FileChangeDiff;
+  readonly fullDiff?: string;
 }
 
 export interface ToolBridgeContext {
@@ -87,6 +88,7 @@ interface ApprovalDisplayOptions {
   readonly memoryKey?: string;
   readonly sessionGrantLabel?: string;
   readonly diff?: FileChangeDiff;
+  readonly fullDiff?: string;
 }
 
 export interface BuiltToolset {
@@ -443,6 +445,7 @@ export async function gateToolCall(
       reason: display?.includePolicyReason === false ? undefined : decision.reason,
       ...(display?.explanation !== undefined ? { explanation: display.explanation } : {}),
       ...(display?.diff !== undefined ? { diff: display.diff } : {}),
+      ...(display?.fullDiff !== undefined ? { fullDiff: display.fullDiff } : {}),
       ...(memoryKey !== undefined && display?.sessionGrantLabel !== undefined
         ? { sessionGrantLabel: display.sessionGrantLabel }
         : {}),

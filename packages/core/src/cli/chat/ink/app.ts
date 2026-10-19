@@ -1,9 +1,15 @@
+import { ConnectionNotice } from "./connection-notice.ts";
+import {
+  chatGptConnectionError,
+  type ChatConnection,
+} from "../../../runtime-host/chatgpt-connection.ts";
 import { randomUUID } from "node:crypto";
-import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
+import { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import type { AgentSession, ContextWindowSource } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import { isThinkingLevel, legacyThinkingLevels } from "../../../llm/thinking-levels.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../diff-display.ts";
 import { useSession } from "./use-session.ts";
@@ -47,6 +53,8 @@ import { resolveChatLayout } from "./layout.ts";
 import { TranscriptViewport } from "./transcript-viewport.ts";
 import { ScheduleBrowser } from "./schedule-browser.ts";
 import type { ScheduleBrowserPort } from "../schedule-browser.ts";
+import type { TranscriptHistorySource } from "./transcript-history.ts";
+import { useTranscriptHistory } from "./use-transcript-history.ts";
 
 export interface ChatSessionSwitching {
   readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
@@ -59,6 +67,7 @@ export interface ChatModelSwitchResult {
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly contextWindowSource?: ContextWindowSource;
+  readonly thinkingLevel?: ThinkingLevel;
 }
 
 const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
@@ -78,19 +87,29 @@ export function formatContextWindowNotice(
 }
 
 export interface ChatModelSwitching {
-  readonly loadItems: (currentModel: string) => readonly SessionPickerItem[];
-  readonly switchTo: (input: string) => Promise<ChatModelSwitchResult>;
+  readonly loadItems: (
+    currentModel: string,
+  ) => readonly SessionPickerItem[] | Promise<readonly SessionPickerItem[]>;
+  readonly getThinkingLevels?: (input: string) => Promise<readonly ThinkingLevel[]>;
+  readonly switchTo: (
+    input: string,
+    thinkingLevel?: ThinkingLevel,
+  ) => Promise<ChatModelSwitchResult>;
   readonly setAsDefault: (id: string) => Promise<string>;
 }
 
 export interface ChatAppProps {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly session: AgentSession;
   readonly model: string;
   readonly initialHistory?: readonly HistoryItem[];
+  readonly historySource?: TranscriptHistorySource;
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
+  readonly getThinkingLevels?: () => readonly ThinkingLevel[];
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
   readonly copyToClipboard?: (text: string) => Promise<boolean>;
@@ -106,13 +125,18 @@ interface SessionPickerState {
   readonly error?: string;
 }
 
-const MODEL_PICKER_STAGES = { choose: "choose", confirmDefault: "confirm-default" } as const;
+const MODEL_PICKER_STAGES = {
+  choose: "choose",
+  chooseEffort: "choose-effort",
+  confirmDefault: "confirm-default",
+} as const;
 type ModelPickerStage = (typeof MODEL_PICKER_STAGES)[keyof typeof MODEL_PICKER_STAGES];
 
 interface ModelPickerState {
   readonly stage: ModelPickerStage;
   readonly items: readonly SessionPickerItem[];
   readonly busy: boolean;
+  readonly loading?: boolean;
   readonly chosenId?: string;
 }
 
@@ -141,7 +165,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onOpenPicker: () => boolean;
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
-  readonly onModelChanged: (model: string) => void;
+  readonly onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => void;
   readonly onScheduleContinue: (session: AgentSession) => void;
 }
 
@@ -159,6 +183,17 @@ function helpText(): string {
 export function ChatApp(props: ChatAppProps): ReactElement {
   const [activeSession, setActiveSession] = useState(props.session);
   const [activeModel, setActiveModel] = useState(props.model);
+  const [activeThinkingLevel, setActiveThinkingLevel] = useState<ThinkingLevel>(
+    props.initialThinkingLevel ?? "medium",
+  );
+  const changeThinking = useCallback(
+    (level: ThinkingLevel) => {
+      // Preserve both states when the provider rejects the requested effort.
+      props.onThinkingChange?.(level);
+      setActiveThinkingLevel(level);
+    },
+    [props.onThinkingChange],
+  );
   const [sessionHistory, setSessionHistory] = useState<readonly HistoryItem[] | undefined>(
     props.initialHistory,
   );
@@ -201,7 +236,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       sessionSwitching.resume(threadId).then(
         (next) => {
           retiringRef.current = activeSession;
-          setSessionHistory(messagesToHistory(next.getMessages()));
+          setSessionHistory(
+            props.historySource ? undefined : messagesToHistory(next.getMessages()),
+          );
           setActiveSession(next);
           setPicker(undefined);
         },
@@ -213,7 +250,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         },
       );
     },
-    [sessionSwitching, activeSession],
+    [sessionSwitching, activeSession, props.historySource],
   );
 
   return h(ChatSessionView, {
@@ -223,26 +260,33 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onUserSubmit: props.onUserSubmit,
     onExit: props.onExit,
     ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
+    ...(props.historySource === undefined ? {} : { historySource: props.historySource }),
     ...(props.banner !== undefined ? { banner: props.banner } : {}),
-    ...(props.initialThinkingLevel !== undefined
-      ? { initialThinkingLevel: props.initialThinkingLevel }
-      : {}),
+    initialThinkingLevel: activeThinkingLevel,
     ...(props.initialThinkingDisplay !== undefined
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
-    ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
+    onThinkingChange: changeThinking,
+    ...(props.getThinkingLevels !== undefined
+      ? { getThinkingLevels: props.getThinkingLevels }
+      : {}),
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
+    ...(props.connection ? { connection: props.connection } : {}),
+    ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
-    onModelChanged: setActiveModel,
+    onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => {
+      setActiveModel(model);
+      setActiveThinkingLevel(thinkingLevel);
+    },
     onScheduleContinue: (next: AgentSession) => {
       retiringRef.current = activeSession;
-      setSessionHistory(messagesToHistory(next.getMessages()));
+      setSessionHistory(props.historySource ? undefined : messagesToHistory(next.getMessages()));
       setActiveSession(next);
     },
   });
@@ -253,9 +297,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const windowSize = useWindowSize();
   const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
   const contextWindow = session.getContextWindow();
+  const submittedAttachments = useRef<readonly PendingChatAttachment[]>([]);
   const availableSkills = session.getSkillSummaries();
+  const archivedHistory = useTranscriptHistory(session.id, props.historySource);
+  const initialHistory = props.historySource ? archivedHistory.items : (props.initialHistory ?? []);
   const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
-    (props.initialHistory ?? []).reduce<readonly string[]>(
+    initialHistory.reduce<readonly string[]>(
       (history, item) => (item.kind === "user" ? appendInputHistory(history, item.text) : history),
       [],
     ),
@@ -279,34 +326,67 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     toggleAutoMode,
     commitHistory,
   } = useSession(session, {
+    ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
-    ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
+    ...(!props.historySource && props.initialHistory
+      ? { initialHistory: props.initialHistory }
+      : {}),
     ...(props.initialThinkingLevel ? { initialThinkingLevel: props.initialThinkingLevel } : {}),
     ...(props.initialThinkingDisplay
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+  const displayHistory = useMemo(
+    () => [...archivedHistory.items, ...state.history],
+    [archivedHistory.items, state.history],
+  );
+
+  useEffect(() => {
+    const synchronizeWindow = () => setModel(model, session.getContextWindow());
+    synchronizeWindow();
+    return props.connection?.subscribe(synchronizeWindow);
+  }, [props.connection, session, model, setModel]);
 
   const [modelPicker, setModelPicker] = useState<ModelPickerState | undefined>(undefined);
+  const modelPickerRequest = useRef(0);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const modelSwitching = props.modelSwitching;
   const notice = (text: string): void => {
     commitHistory({ kind: "notice", id: randomUUID(), text });
   };
+  const connectionNotice = useCallback(
+    (text: string): void => {
+      commitHistory({ kind: "notice", id: randomUUID(), text }, true);
+    },
+    [commitHistory],
+  );
   const openModelPicker = (): boolean => {
     if (!modelSwitching) {
       return false;
     }
-    setModelPicker({
-      stage: MODEL_PICKER_STAGES.choose,
-      items: modelSwitching.loadItems(state.status.model),
-      busy: false,
-    });
+    const request = ++modelPickerRequest.current;
+    setModelPicker({ stage: MODEL_PICKER_STAGES.choose, items: [], busy: true, loading: true });
+    Promise.resolve()
+      .then(() => modelSwitching.loadItems(state.status.model))
+      .then(
+        (items) => {
+          if (request !== modelPickerRequest.current) return;
+          setModelPicker({ stage: MODEL_PICKER_STAGES.choose, items, busy: false });
+        },
+        (error: unknown) => {
+          if (request !== modelPickerRequest.current) return;
+          setModelPicker(undefined);
+          notice(`加载模型失败：${errorText(error)}`);
+        },
+      );
     return true;
   };
-  const switchModelTo = (input: string): void => {
+  const thinkingLevels = (): readonly ThinkingLevel[] =>
+    props.getThinkingLevels?.() ?? legacyThinkingLevels;
+  const switchModelTo = (input: string, chosenEffort?: ThinkingLevel): void => {
     if (!modelSwitching) {
       notice("当前界面不支持切换模型");
       return;
@@ -316,21 +396,51 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       items: current?.items ?? [],
       busy: true,
     }));
-    modelSwitching.switchTo(input).then(
+    const request = ++modelPickerRequest.current;
+    const prepare = async (): Promise<ChatModelSwitchResult | undefined> => {
+      if (chosenEffort === undefined && modelSwitching.getThinkingLevels !== undefined) {
+        const levels = await modelSwitching.getThinkingLevels(input);
+        if (request !== modelPickerRequest.current) return undefined;
+        if (!levels.includes(state.status.thinkingLevel)) {
+          if (levels.length === 0) throw new Error("目标模型没有可用推理档位");
+          setModelPicker({
+            stage: MODEL_PICKER_STAGES.chooseEffort,
+            items: levels.map((level) => ({
+              id: level,
+              title: level,
+              meta: "选择后应用模型与推理强度",
+            })),
+            chosenId: input,
+            busy: false,
+          });
+          return undefined;
+        }
+      }
+      return modelSwitching.switchTo(input, chosenEffort);
+    };
+    prepare().then(
       (result) => {
-        setModel(result.model, result.contextWindow);
-        props.onModelChanged(result.model);
+        if (result === undefined || request !== modelPickerRequest.current) return;
+        setModel(result.model, result.contextWindow, result.thinkingLevel);
+        props.onModelChanged(result.model, result.thinkingLevel ?? state.status.thinkingLevel);
         notice(
           `已切换到 ${result.id}（${formatContextWindowNotice(result.contextWindow, result.contextWindowSource)}，仅本次 roll chat 生效）`,
         );
         setModelPicker({
           stage: MODEL_PICKER_STAGES.confirmDefault,
-          items: DEFAULT_CHOICE_ITEMS,
+          items: result.id.startsWith("chatgpt/")
+            ? DEFAULT_CHOICE_ITEMS.map((item) =>
+                item.id === "set-default"
+                  ? { ...item, meta: "聊天及定时任务使用订阅；Runtime 服务 / Companion 暂不可用" }
+                  : item,
+              )
+            : DEFAULT_CHOICE_ITEMS,
           busy: false,
           chosenId: result.id,
         });
       },
       (error: unknown) => {
+        if (request !== modelPickerRequest.current) return;
         setModelPicker(undefined);
         notice(`切换模型失败：${errorText(error)}`);
       },
@@ -345,6 +455,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     const chosenId = modelPicker.chosenId;
+    if (modelPicker.stage === MODEL_PICKER_STAGES.chooseEffort) {
+      if (chosenId !== undefined && isThinkingLevel(id)) switchModelTo(chosenId, id);
+      return;
+    }
     if (id !== "set-default" || chosenId === undefined) {
       setModelPicker(undefined);
       return;
@@ -362,7 +476,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     );
   };
 
-  const animateBanner = props.banner !== undefined && (props.initialHistory?.length ?? 0) === 0;
+  const animateBanner = props.banner !== undefined && initialHistory.length === 0;
   const [bannerSettled, setBannerSettled] = useState(!animateBanner);
   const handleBannerSettled = useCallback(() => {
     setBannerSettled(true);
@@ -380,7 +494,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const hintFlags = props.hintFlags ?? fallbackHintFlagsRef.current;
   const { stdout } = useStdout();
   const copyLastRound = (): void => {
-    const text = lastRoundCopyText(state.history);
+    const text = lastRoundCopyText(displayHistory);
     if (text === undefined) {
       commitHistory({ kind: "notice", id: randomUUID(), text: "暂无可复制的消息" });
       return;
@@ -445,9 +559,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     } else if (key.tab && key.shift) {
       toggleAutoMode();
     } else if (key.meta && input === ".") {
-      setThinking(cycleThinking(state.status.thinkingLevel, 1));
+      setThinking(cycleThinking(state.status.thinkingLevel, 1, thinkingLevels()));
     } else if (key.meta && input === ",") {
-      setThinking(cycleThinking(state.status.thinkingLevel, -1));
+      setThinking(cycleThinking(state.status.thinkingLevel, -1, thinkingLevels()));
     } else if (key.ctrl && input === "t") {
       setMouseTracking((current) => !current);
     } else if (key.ctrl && input === "y") {
@@ -563,6 +677,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
     onUserSubmit(text.length > 0 ? text : "[图片]");
+    submittedAttachments.current = attachments;
     submit(text, attachments);
     attachmentEpochRef.current += 1;
     setAttachments([]);
@@ -578,6 +693,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     const name = parts[0] ?? "";
     const arg = (parts[1] ?? "").toLowerCase();
     const level = state.status.thinkingLevel;
+    if (name === "/reconnect") {
+      if (props.connection) {
+        props.connection.retry().catch((error: unknown) => notice(chatGptConnectionError(error)));
+      } else notice("当前连接无需 ChatGPT 授权恢复。");
+      return;
+    }
     if (name === "/compact") {
       compact();
       return;
@@ -593,13 +714,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     if (name === "/effort") {
-      if (arg === "low" || arg === "medium" || arg === "high") {
+      const levels = thinkingLevels();
+      if (arg === "") {
+        notice(`当前推理强度：${level}；可选档位：${levels.join(" · ") || "无"}`);
+      } else if (arg !== "off" && isThinkingLevel(arg) && levels.includes(arg)) {
         setThinking(arg);
       } else {
         commitHistory({
           kind: "notice",
           id: randomUUID(),
-          text: "用法: /effort low | medium | high",
+          text: `用法: /effort ${levels.filter((item) => item !== "off").join(" | ")}；/think off 请求关闭推理`,
         });
       }
       return;
@@ -741,17 +865,34 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(SessionPicker, {
             items: modelPicker.items,
             busy: modelPicker.busy,
+            cancelWhileBusy: modelPicker.loading === true,
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
             labels:
               modelPicker.stage === MODEL_PICKER_STAGES.choose
-                ? MODEL_PICKER_LABELS
-                : DEFAULT_CHOICE_LABELS,
+                ? modelPicker.loading
+                  ? {
+                      ...MODEL_PICKER_LABELS,
+                      busy: "加载模型… · Esc 取消",
+                      empty: "正在获取可用模型…",
+                    }
+                  : MODEL_PICKER_LABELS
+                : modelPicker.stage === MODEL_PICKER_STAGES.chooseEffort
+                  ? {
+                      ...MODEL_PICKER_LABELS,
+                      title: "目标模型不支持当前强度，请选择推理档位",
+                      select: "Enter 应用模型与强度",
+                    }
+                  : DEFAULT_CHOICE_LABELS,
             onSelect: onModelPickerSelect,
-            onCancel: () => setModelPicker(undefined),
+            onCancel: () => {
+              modelPickerRequest.current++;
+              setModelPicker(undefined);
+            },
           })
         : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
           ? h(ConfirmSelect, {
+              key: state.pendingConfirm.approvalId,
               prompt: state.pendingConfirm.prompt,
               args: state.pendingConfirm.args,
               ...(state.pendingConfirm.explanation !== undefined
@@ -762,6 +903,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                 : {}),
               ...(state.pendingConfirm.diff !== undefined
                 ? { diff: state.pendingConfirm.diff }
+                : {}),
+              ...(state.pendingConfirm.fullDiff !== undefined
+                ? { fullDiff: state.pendingConfirm.fullDiff }
                 : {}),
               width: layout.columns,
               maxRows: layout.promptRows + layout.popupRows,
@@ -848,7 +992,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     },
     h(TranscriptViewport, {
       width: layout.columns,
-      history: state.history,
+      history: displayHistory,
+      ...(props.historySource === undefined
+        ? {}
+        : {
+            historyNotice: archivedHistory.notice,
+            onLoadOlder:
+              archivedHistory.hasMore && !archivedHistory.loading
+                ? archivedHistory.loadOlder
+                : undefined,
+          }),
       live: state.live,
       mouseTracking,
       onWheelScroll: handleWheelScroll,
@@ -870,6 +1023,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(StatusLine, { status: state.status, width: layout.columns })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
+    props.connection
+      ? h(ConnectionNotice, { connection: props.connection, onNotice: connectionNotice })
+      : null,
     slashPopupActive
       ? h(SlashPopup, {
           matches,

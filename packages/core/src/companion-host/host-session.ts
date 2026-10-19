@@ -59,15 +59,19 @@ export interface CompanionSessionFactory {
 
 export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
   private readonly invocation: BundledRollInvocation;
+  private readonly relayProtocolVersion: "1.2" | "1.3";
   private readonly configStore: FileCompanionConfigStore;
   private readonly createWebSocket: CompanionWebSocketFactory;
 
   constructor(options: {
     readonly invocation: BundledRollInvocation;
+    /** Enable 1.3 only with a matching Relay deployment. Defaults to frozen Wire 1.2. */
+    readonly relayProtocolVersion?: "1.2" | "1.3";
     readonly configPath?: string;
     readonly createWebSocket?: CompanionWebSocketFactory;
   }) {
     this.invocation = options.invocation;
+    this.relayProtocolVersion = options.relayProtocolVersion ?? "1.2";
     this.configStore = new FileCompanionConfigStore(
       options.configPath ?? createCompanionPaths().configPath,
     );
@@ -117,7 +121,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       const bridge = new CompanionRelayBridgeV11({
         deviceId: config.deviceId,
         pairingToken: credential,
-        protocolVersion: "1.2",
+        protocolVersion: this.relayProtocolVersion,
         workspaces,
       });
       const requestPolicy = createP0RemoteRequestPolicy(config.workspaceId);

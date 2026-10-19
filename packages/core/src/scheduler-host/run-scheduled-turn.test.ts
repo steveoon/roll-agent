@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { InvocationRecord, ScheduleRecord } from "@roll-agent/runtime";
 import * as runtime from "@roll-agent/runtime";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { simulateReadableStream } from "ai";
@@ -11,10 +11,211 @@ import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { DEFAULT_CONFIG } from "../config/defaults.ts";
 import { computeAuthorityDigest } from "./authority.ts";
 import type { RollConfig } from "../config/schema.ts";
+import { resolveInteractiveChatLlm, type ChatGptAuth } from "../runtime-host/chatgpt-resolution.ts";
+import { createChatGptModel } from "../llm/chatgpt-model.ts";
 import {
   createScheduledTurnRunner,
   type CreateScheduledTurnRunnerInput,
 } from "./run-scheduled-turn.ts";
+
+test("scheduled subscription turn streams Responses, executes local tools and replays their results", async () => {
+  const f = scheduledRunnerFixture();
+  const previousCwd = process.cwd();
+  process.chdir(f.dir);
+  const accountId = "25ecece0-b713-4296-8931-a2ea002f3775";
+  const marker = "scheduled-tool-marker";
+  const path = join(f.dir, "marker.txt");
+  writeFileSync(path, marker);
+  const config: RollConfig = {
+    ...f.config,
+    runtime: {
+      ...f.config.runtime,
+      provider: "chatgpt",
+      model: "gpt-6.1-sol",
+      chatgptAccountId: accountId,
+      thinkingLevel: "low",
+      compaction: { ...f.config.runtime.compaction, thinkingLevel: "low" },
+    },
+  };
+  let tokenReads = 0;
+  let requests = 0;
+  const auth: ChatGptAuth = {
+    status: async () => ({
+      accounts: [],
+      currentAccountId: accountId,
+      usageUrl: "https://chatgpt.com/settings/usage",
+    }),
+    models: async (id) => {
+      assert.equal(id, accountId);
+      return [
+        {
+          slug: "gpt-6.1-sol",
+          displayName: "Fixture",
+          contextWindow: 8192,
+          reasoningEfforts: ["low", "high"],
+        },
+      ];
+    },
+    getAccessToken: async (id) => {
+      assert.equal(id, accountId);
+      return `fixture-${++tokenReads}`;
+    },
+  };
+  class IsolatedEngine extends runtime.ConversationEngine {
+    constructor(options: ConstructorParameters<typeof runtime.ConversationEngine>[0]) {
+      assert.equal(options.config.runtime.provider, "chatgpt");
+      assert.equal(options.modelCatalog?.lookup("chatgpt", "gpt-6.1-sol"), 8192);
+      assert.deepEqual(options.structuredOutputProviderOptions, {
+        openai: { reasoningEffort: "low" },
+      });
+      super({ ...options, sources: [], skillLibrary: null, workspaceInstructions: null });
+    }
+  }
+  try {
+    const runner = createScheduledTurnRunner({
+      config,
+      runtime: {
+        ...runtime,
+        ConversationEngine: IsolatedEngine,
+        defaultModelCatalogCachePath: () => join(f.dir, "catalog.json"),
+      },
+      ledgerDir: f.dir,
+      registerThreadReference: (input) =>
+        f.store.registerThreadReference({ ...input, ownershipToken: f.token }) !== undefined,
+      resolveLlm: async (config) => {
+        const selection = await resolveInteractiveChatLlm(config, { auth });
+        return {
+          ...selection,
+          model: createChatGptModel({
+            modelId: selection.modelName,
+            getAccessToken: () => auth.getAccessToken(selection.accountId),
+            fetch: async (_url, init) => {
+              const body: unknown = JSON.parse(String(init?.body));
+              assert.ok(
+                body &&
+                  typeof body === "object" &&
+                  "stream" in body &&
+                  "store" in body &&
+                  "reasoning" in body,
+              );
+              assert.equal(body.stream, true);
+              assert.equal(body.store, false);
+              assert.deepEqual(body.reasoning, { effort: "low", summary: "detailed" });
+              assert.equal("background" in body, false);
+              requests++;
+              const created = {
+                type: "response.created",
+                response: { id: `resp-${requests}`, created_at: 1700000000, model: "gpt-6.1-sol" },
+              };
+              const completed = {
+                type: "response.completed",
+                response: { status: "completed", usage: { input_tokens: 7, output_tokens: 4 } },
+              };
+              const tool = {
+                type: "function_call",
+                id: "function-1",
+                call_id: "call-1",
+                name: "roll__read_file",
+                namespace: "roll",
+              };
+              const events =
+                requests === 1
+                  ? [
+                      created,
+                      {
+                        type: "response.output_item.added",
+                        output_index: 0,
+                        item: { ...tool, arguments: "" },
+                      },
+                      {
+                        type: "response.function_call_arguments.delta",
+                        item_id: tool.id,
+                        output_index: 0,
+                        delta: JSON.stringify({ path }),
+                      },
+                      {
+                        type: "response.output_item.done",
+                        output_index: 0,
+                        item: { ...tool, status: "completed", arguments: JSON.stringify({ path }) },
+                      },
+                      completed,
+                    ]
+                  : [
+                      created,
+                      {
+                        type: "response.output_item.added",
+                        output_index: 0,
+                        item: { type: "message", id: "msg-1" },
+                      },
+                      {
+                        type: "response.output_text.delta",
+                        item_id: "msg-1",
+                        output_index: 0,
+                        delta: marker,
+                      },
+                      {
+                        type: "response.output_item.done",
+                        output_index: 0,
+                        item: { type: "message", id: "msg-1" },
+                      },
+                      completed,
+                    ];
+              if (requests > 1) assert.match(JSON.stringify(body), /scheduled-tool-marker/);
+              return new Response(
+                events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            },
+          }),
+        };
+      },
+    });
+    const result = await runner(f.schedule, f.invocation);
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.status === "completed" ? result.output : "", marker);
+    assert.equal(requests, 2);
+    assert.equal(tokenReads, 2);
+  } finally {
+    process.chdir(previousCwd);
+    f.close();
+  }
+});
+
+test("scheduled subscription failure and cancellation cannot fall back to an API-key engine", async () => {
+  for (const stop of [false, true]) {
+    const f = scheduledRunnerFixture();
+    const controller = new AbortController();
+    let registered = false;
+    try {
+      const runner = createScheduledTurnRunner({
+        config: f.config,
+        runtime,
+        ledgerDir: f.dir,
+        stopSignal: controller.signal,
+        registerThreadReference: () => {
+          registered = true;
+          return false;
+        },
+        resolveLlm: async () => {
+          if (stop) {
+            controller.abort();
+            return {
+              provider: "chatgpt",
+              modelName: "fixture",
+              model: new MockLanguageModelV4({}),
+            };
+          }
+          throw new Error("subscription_sharing_usage_limit_exceeded");
+        },
+      });
+      if (stop) assert.equal((await runner(f.schedule, f.invocation)).status, "failed");
+      else await assert.rejects(runner(f.schedule, f.invocation), /usage_limit_exceeded/);
+      assert.equal(registered, false);
+    } finally {
+      f.close();
+    }
+  }
+});
 
 test("scheduled turn refuses to start when the exec stop signal is already aborted", async () => {
   const controller = new AbortController();

@@ -1,4 +1,6 @@
 import {
+  contextRecoveryViewSchema,
+  contextRecoveryChangedEventSchema,
   RUNTIME_SERVER_REQUEST_METHODS,
   TOOL_OUTCOME_KINDS,
   approvalIdSchema,
@@ -36,7 +38,7 @@ import {
 } from "@roll-agent/protocol";
 import { z } from "zod/v4";
 
-export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.2", "1.1", "1.0"] as const;
+export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.3", "1.2", "1.1", "1.0"] as const;
 export type RelayProtocolVersion = (typeof SUPPORTED_RELAY_PROTOCOL_VERSIONS)[number];
 export const LATEST_RELAY_PROTOCOL_VERSION = SUPPORTED_RELAY_PROTOCOL_VERSIONS[0];
 
@@ -687,6 +689,7 @@ type RuntimeEventForRelayProjection = z.output<typeof runtimeEventEnvelopeSchema
 function projectRelayTimelineEventV11(
   event: RuntimeEventForRelayProjection,
 ): z.output<typeof relayTimelineEventSchemaV11> | undefined {
+  if (event.type === "context.recovery.changed") return { type: "capabilities.changed" };
   if (event.type === "tool.output") {
     return undefined;
   }
@@ -784,6 +787,9 @@ function redactRelayPendingApprovalV11(approval: PendingApproval): PendingApprov
 
 /** Projects a Runtime snapshot into the allowlisted Relay Wire 1.1 query shape. */
 export function projectRelayThreadSnapshotV11(value: unknown): ThreadSnapshotV11 {
+  if (typeof value === "object" && value !== null && "contextRecovery" in value) {
+    value = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "contextRecovery"));
+  }
   const legacySnapshot = z
     .union([threadSnapshotV11Schema, relayThreadSnapshotSchemaV12])
     .safeParse(value);
@@ -1155,7 +1161,101 @@ export function projectRelayMessageV12ToV11(message: RelayMessageV12): RelayMess
   return relayMessageSchemaV11.parse(message);
 }
 
+/** Wire 1.3 carries bounded context recovery state; older wire contracts stay frozen. */
+export const relayThreadSnapshotSchemaV13 = relayThreadSnapshotSchemaV12.def.innerType
+  .extend({
+    contextRecovery: contextRecoveryViewSchema.nullable(),
+  })
+  .readonly();
+export const relayRequestMethodSchemasV13 = {
+  ...relayRequestMethodSchemasV12,
+  "thread.open": {
+    ...relayRequestMethodSchemasV12["thread.open"],
+    result: relayThreadSnapshotSchemaV13,
+  },
+  "thread.snapshot": {
+    ...relayRequestMethodSchemasV12["thread.snapshot"],
+    result: relayThreadSnapshotSchemaV13,
+  },
+} as const;
+export const relayRuntimeEventEnvelopeSchemaV13 = relayRuntimeEventEnvelopeSchemaV12.def.innerType
+  .extend({
+    event: z.union([
+      relayTimelineEventSchemaV11,
+      relayToolCompletedSchemaV12,
+      contextRecoveryChangedEventSchema,
+    ]),
+  })
+  .readonly();
+export const relayDeviceConnectSchemaV13 = relayDeviceConnectSchemaV12.def.innerType
+  .extend({ protocolVersion: z.literal("1.3") })
+  .readonly();
+export const relayRuntimeEventSchemaV13 = relayRuntimeEventSchemaV12.def.innerType
+  .extend({ event: relayRuntimeEventEnvelopeSchemaV13 })
+  .readonly();
+export const relayMessageSchemaV13 = z.discriminatedUnion("type", [
+  relayDeviceConnectSchemaV13,
+  relayRuntimeRequestSchemaV12,
+  relayRuntimeResponseSchemaV11,
+  relayRuntimeEventSchemaV13,
+  relayAckSchemaV11,
+  relayGapSchemaV11,
+  relayEncryptedMessageSchemaV11,
+  relayInteractionRequestSchemaV11,
+  relayInteractionResolvedSchemaV11,
+  relayInteractionCancelledSchemaV11,
+]);
+export type RelayMessageV13 = z.output<typeof relayMessageSchemaV13>;
+export type RelayRuntimeEventV13 = z.output<typeof relayRuntimeEventSchemaV13>;
+export type RelayRuntimeEventEnvelopeV13 = z.output<typeof relayRuntimeEventEnvelopeSchemaV13>;
+export function projectRelayThreadSnapshotV13(
+  value: unknown,
+): z.output<typeof relayThreadSnapshotSchemaV13> {
+  const source = z
+    .object({ contextRecovery: contextRecoveryViewSchema.nullable().optional() })
+    .parse(value);
+  // Strip the extension before using the frozen 1.2 redaction pipeline.
+  const legacySource =
+    typeof value === "object" && value !== null
+      ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "contextRecovery"))
+      : value;
+  return relayThreadSnapshotSchemaV13.parse({
+    ...projectRelayThreadSnapshotV12(legacySource),
+    contextRecovery: source.contextRecovery ?? null,
+  });
+}
+export function projectRuntimeEventEnvelopeForRelayV13(
+  value: unknown,
+): RelayRuntimeEventEnvelopeV13 | undefined {
+  const source = runtimeEventEnvelopeSchema.parse(value);
+  const base = projectRuntimeEventEnvelopeForRelayV12(value);
+  return base && source.event.type === "context.recovery.changed"
+    ? relayRuntimeEventEnvelopeSchemaV13.parse({ ...base, event: source.event })
+    : base;
+}
+export function projectRelayMessageV13ToV12(message: RelayMessageV13): RelayMessageV12 {
+  if (message.type === "device.connect") {
+    return relayDeviceConnectSchemaV12.parse({ ...message, protocolVersion: "1.2" });
+  }
+  if (message.type === "runtime.event" && message.event.event.type === "context.recovery.changed") {
+    return relayMessageSchemaV12.parse({
+      ...message,
+      event: { ...message.event, event: { type: "capabilities.changed" } },
+    });
+  }
+  return relayMessageSchemaV12.parse(message);
+}
+
 export const RELAY_PROTOCOL_REGISTRY = {
+  "1.3": {
+    messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
+    messageSchema: relayMessageSchemaV13,
+    requestMethods: RELAY_REQUEST_METHOD_VALUES_V12,
+    requestMethodSchemas: relayRequestMethodSchemasV13,
+    requestMethodDispositions: RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
+    mutationMethods: RELAY_MUTATION_REQUEST_METHODS_V11,
+    localOnlyMethods: RELAY_LOCAL_ONLY_REQUEST_METHODS_V11,
+  },
   "1.2": {
     messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
     messageSchema: relayMessageSchemaV12,

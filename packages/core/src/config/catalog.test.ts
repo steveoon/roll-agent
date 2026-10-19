@@ -90,7 +90,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 70);
+    assert.equal(leaves.length, 71);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -193,7 +193,14 @@ describe("buildRollConfigCatalog", () => {
     assert.equal(compactionThinking.persistedRequired, false);
     assert.match(compactionThinking.defaultBehavior ?? "", /继承 `runtime\.thinking-level`/u);
     if (compactionThinking.kind === "enum") {
-      assert.deepEqual(compactionThinking.options, ["off", "low", "medium", "high"]);
+      assert.deepEqual(compactionThinking.options, [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
     }
 
     const compactionOutput = findNode(catalog.root, ["runtime", "compaction", "maxOutputTokens"]);
@@ -268,7 +275,7 @@ describe("buildRollConfigCatalog", () => {
 
     const runtimeProvider = findNode(catalog.root, ["runtime", "provider"]);
     assert.ok(runtimeProvider.kind === "enum");
-    assert.deepEqual(runtimeProvider.options, [...LLM_PROVIDER_OPTIONS]);
+    assert.deepEqual(runtimeProvider.options, [...LLM_PROVIDER_OPTIONS, "chatgpt"]);
 
     const approvalOverrides = findNode(catalog.root, ["runtime", "approval", "overrides"]);
     assert.ok(approvalOverrides.kind === "record");

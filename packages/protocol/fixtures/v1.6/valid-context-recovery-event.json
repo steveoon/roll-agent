@@ -1,0 +1,23 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime.event",
+  "params": {
+    "protocolVersion": "1.6",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "sequence": 0,
+    "timestamp": "2026-10-13T00:00:00.000Z",
+    "durability": "durable",
+    "eventId": "00000000-0000-4000-8000-000000000003",
+    "cursor": "rte1:00000000-0000-4000-8000-000000000001:0:00000000-0000-4000-8000-000000000003",
+    "event": {
+      "type": "context.recovery.changed",
+      "contextRecovery": {
+        "checkpointId": "00000000-0000-4000-8000-000000000003",
+        "required": true,
+        "unextracted": true,
+        "requiredItemCount": 24
+      }
+    }
+  }
+}

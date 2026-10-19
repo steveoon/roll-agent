@@ -20,13 +20,13 @@ import {
   projectThreadSnapshotForVersion,
   projectOperationViewForVersion,
   runtimeMethodSchemas,
-  runtimeDurableEventV15Schema,
+  runtimeDurableEventV16Schema,
   turnIdSchema,
   type ApprovalResolution,
   type ClientCapabilitiesSetResult,
   type LatestRuntimeMethod,
   type PendingInteractionProjection,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
   type RuntimeEventsResumeResult,
   type RuntimeProtocolVersion,
   type ThreadId,
@@ -61,7 +61,7 @@ const MAX_REPLAY_LIVE_BUFFER_BYTES = RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES;
 
 interface RuntimeEventReplayGate {
   readonly threadId: ThreadId;
-  readonly buffered: RuntimeEventEnvelopeV15[];
+  readonly buffered: RuntimeEventEnvelopeV16[];
   bufferedBytes: number;
 }
 
@@ -161,7 +161,8 @@ export class RuntimeProtocolAdapter {
     if (
       this.protocolVersion !== "1.3" &&
       this.protocolVersion !== "1.4" &&
-      this.protocolVersion !== "1.5"
+      this.protocolVersion !== "1.5" &&
+      this.protocolVersion !== "1.6"
     ) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -187,8 +188,8 @@ export class RuntimeProtocolAdapter {
     try {
       const replay: RuntimeEventReplayBatch = this.service.resumeEvents(params);
       for (const stored of replay.events) {
-        const replayEnvelope: RuntimeEventEnvelopeV15 = {
-          protocolVersion: "1.5",
+        const replayEnvelope: RuntimeEventEnvelopeV16 = {
+          protocolVersion: "1.6",
           runtimeInstanceId: this.service.runtimeInstanceId,
           sequence: this.eventSequence,
           timestamp: stored.timestamp,
@@ -197,7 +198,7 @@ export class RuntimeProtocolAdapter {
           durability: "durable",
           eventId: stored.eventId,
           cursor: stored.cursor,
-          event: runtimeDurableEventV15Schema.parse(stored.event),
+          event: runtimeDurableEventV16Schema.parse(stored.event),
         };
         if (!this.sendEvent(replayEnvelope)) {
           throw new Error("Runtime Event replay transport write failed");
@@ -371,7 +372,8 @@ export class RuntimeProtocolAdapter {
         const recoveryProjection =
           (this.protocolVersion === "1.3" ||
             this.protocolVersion === "1.4" ||
-            this.protocolVersion === "1.5") &&
+            this.protocolVersion === "1.5" ||
+            this.protocolVersion === "1.6") &&
           "recovery" in params &&
           params.recovery === true;
         return this.projectThreadSnapshot(
@@ -423,6 +425,10 @@ export class RuntimeProtocolAdapter {
             RUNTIME_METHODS.approvalRespond,
             request.params,
           ),
+        );
+      case RUNTIME_METHODS.approvalPreview:
+        return this.service.getApprovalPreview(
+          runtimeMethodSchemas[RUNTIME_METHODS.approvalPreview].params.parse(request.params),
         );
       case RUNTIME_METHODS.operationGet: {
         const result = this.service.getOperation(
@@ -497,7 +503,7 @@ export class RuntimeProtocolAdapter {
     this.unsubscribeUserInput();
   }
 
-  private handleServiceEvent(envelope: RuntimeEventEnvelopeV15): void {
+  private handleServiceEvent(envelope: RuntimeEventEnvelopeV16): void {
     if (!this.initialized || this.closing || this.protocolVersion === undefined) {
       return;
     }
@@ -511,7 +517,7 @@ export class RuntimeProtocolAdapter {
     this.deliverLiveEvent(envelope);
   }
 
-  private deliverLiveEvent(envelope: RuntimeEventEnvelopeV15): boolean {
+  private deliverLiveEvent(envelope: RuntimeEventEnvelopeV16): boolean {
     if (!this.initialized || this.closing || this.protocolVersion === undefined) {
       return false;
     }
@@ -528,7 +534,7 @@ export class RuntimeProtocolAdapter {
     return this.sendEvent(envelope);
   }
 
-  private sendEvent(envelope: RuntimeEventEnvelopeV15): boolean {
+  private sendEvent(envelope: RuntimeEventEnvelopeV16): boolean {
     if (this.protocolVersion === undefined) {
       return false;
     }
@@ -538,7 +544,7 @@ export class RuntimeProtocolAdapter {
     ) {
       return true;
     }
-    const sequenced: RuntimeEventEnvelopeV15 = {
+    const sequenced: RuntimeEventEnvelopeV16 = {
       ...envelope,
       sequence: Math.max(this.eventSequence, envelope.sequence),
     };
@@ -559,7 +565,7 @@ export class RuntimeProtocolAdapter {
 
   private bufferReplayLiveEvent(
     gate: RuntimeEventReplayGate,
-    envelope: RuntimeEventEnvelopeV15,
+    envelope: RuntimeEventEnvelopeV16,
   ): boolean {
     const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
     if (
@@ -757,7 +763,7 @@ export class RuntimeProtocolAdapter {
   private requestApproval(
     threadId: RuntimeApprovalIdentity["threadId"],
     approval: Extract<
-      RuntimeEventEnvelopeV15["event"],
+      RuntimeEventEnvelopeV16["event"],
       { readonly type: "approval.required" }
     >["approval"],
   ): void {

@@ -21,7 +21,7 @@ import {
   normalizeUserInputResultForForm,
   operationIdSchema,
   parseLatestRuntimeMethodResult,
-  runtimeDurableEventV15Schema,
+  runtimeDurableEventV16Schema,
   runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
@@ -35,7 +35,7 @@ import {
   type JsonValue,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelopeV15,
+  type RuntimeEventEnvelopeV16,
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
@@ -45,7 +45,7 @@ import {
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
   type RuntimeProtocolErrorDataV14,
-  type ThreadSnapshotV15Full,
+  type ThreadSnapshotV16Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
@@ -164,6 +164,7 @@ interface PendingApprovalState {
   readonly session: RuntimeServiceSession;
   readonly approval: PendingApproval;
   readonly expiresAt: string | undefined;
+  readonly fullDiff: string | undefined;
 }
 
 interface PendingUserInputState {
@@ -175,7 +176,7 @@ interface PendingUserInputState {
   readonly expiresAt: string;
 }
 
-export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV15Full, "pendingInteractions">;
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV16Full, "pendingInteractions">;
 
 export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
   readonly events: readonly StoredRuntimeEvent[];
@@ -512,6 +513,7 @@ function toPendingApproval(
           ? { [APPROVAL_EXPLANATION_PREVIEW_KEY]: parsedExplanation.data }
           : {}),
         ...(safeDiff !== undefined ? { [APPROVAL_DIFF_PREVIEW_KEY]: safeDiff } : {}),
+        ...(event.fullDiff !== undefined ? { fullDiffAvailable: true } : {}),
       }
     : safePreview;
   return {
@@ -544,7 +546,7 @@ export class RuntimeService {
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
   private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV15) => void>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV16) => void>();
   private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
   private readonly userInputListeners = new Set<
     (event: RuntimeUserInputInteractionEvent) => void
@@ -612,7 +614,7 @@ export class RuntimeService {
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
-    if (protocolVersion === "1.4" || protocolVersion === "1.5") {
+    if (protocolVersion === "1.4" || protocolVersion === "1.5" || protocolVersion === "1.6") {
       const storeLimits = this.attachmentStore?.limits;
       return initializeResultSchema.parse({
         ...commonResult,
@@ -620,7 +622,9 @@ export class RuntimeService {
         features: [
           ...legacyFeatures,
           ...(this.attachmentStore !== undefined ? ["attachments" as const] : []),
-          ...(protocolVersion === "1.5" ? ["app-output" as const] : []),
+          ...(protocolVersion === "1.5" || protocolVersion === "1.6"
+            ? ["app-output" as const]
+            : []),
         ],
         limits: {
           ...commonResult.limits,
@@ -647,7 +651,7 @@ export class RuntimeService {
         };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelopeV15) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV16) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -777,6 +781,8 @@ export class RuntimeService {
         .map((pending) => pending.approval),
       transcriptCompleteness: this.store.getTranscriptCompleteness(params.threadId),
       eventCursor: this.store.getRuntimeEventCursor(params.threadId),
+      // V1.6 remains readable for legacy event replay; new sessions have no recovery gate.
+      contextRecovery: null,
     };
   }
 
@@ -1274,6 +1280,29 @@ export class RuntimeService {
     return cancelled;
   }
 
+  getApprovalPreview(
+    params: LatestRuntimeMethodParams<"approval.preview">,
+  ): LatestRuntimeMethodResult<"approval.preview"> {
+    this.assertOpen();
+    const pending = this.requirePendingApproval(params);
+    if (
+      pending.fullDiff === undefined ||
+      (pending.expiresAt !== undefined && Date.parse(pending.expiresAt) <= Date.now())
+    ) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.approvalNotFound,
+        "完整预览不存在或审批已失效",
+      );
+    }
+    const text = pending.fullDiff.slice(params.offset, params.offset + params.maxChars);
+    const end = params.offset + text.length;
+    return {
+      text,
+      totalChars: pending.fullDiff.length,
+      nextOffset: end < pending.fullDiff.length ? end : null,
+    };
+  }
+
   getOperation(
     params: RuntimeMethodParams<"operation.get">,
   ): LatestRuntimeMethodResult<"operation.get"> {
@@ -1379,8 +1408,8 @@ export class RuntimeService {
       threadId,
       ...(turnId !== undefined ? { turnId } : {}),
     } as const;
-    const durableEvent = runtimeDurableEventV15Schema.safeParse(event);
-    const envelope: RuntimeEventEnvelopeV15 = durableEvent.success
+    const durableEvent = runtimeDurableEventV16Schema.safeParse(event);
+    const envelope: RuntimeEventEnvelopeV16 = durableEvent.success
       ? (() => {
           let stored: StoredRuntimeEvent;
           try {
@@ -1464,6 +1493,14 @@ export class RuntimeService {
       }
       this.settleTurnOwner(state);
     }
+    // A denied SDK preparation or cancellation may end an open presentation stream.
+    // Completing the message only closes that stream; the turn retains its own outcome.
+    if (projection.streamId !== undefined) {
+      this.projectSessionEvent(state, projection, {
+        type: "message-finish",
+        text: projection.text,
+      });
+    }
     this.emitTurnTerminal(state, terminalEvent);
   }
 
@@ -1505,6 +1542,9 @@ export class RuntimeService {
   ): void {
     switch (event.type) {
       case "message-start": {
+        // Internal context maintenance rebuilds the SDK stream without ending the
+        // logical message. Keep its identity and already displayed text.
+        if (projection.streamId !== undefined) return;
         const streamId = streamIdSchema.parse(randomUUID());
         projection.streamId = streamId;
         projection.text = "";
@@ -1533,11 +1573,16 @@ export class RuntimeService {
       }
       case "message-finish": {
         const streamId = projection.streamId ?? streamIdSchema.parse(randomUUID());
+        if (projection.streamId === undefined) {
+          this.emit(state.threadId, state.turnId, { type: "message.started", streamId });
+        }
         this.emit(state.threadId, state.turnId, {
           type: "message.completed",
           streamId,
-          text: redactSecretText(event.text || projection.text),
+          text: redactSecretText(projection.text || event.text),
         });
+        projection.streamId = undefined;
+        projection.text = "";
         return;
       }
       case "reasoning-delta": {
@@ -1598,6 +1643,8 @@ export class RuntimeService {
           session: state.session,
           approval,
           expiresAt: event.expiresAt,
+          // Redact the whole snapshot once, before pagination, so page boundaries cannot reveal secrets.
+          fullDiff: event.fullDiff === undefined ? undefined : redactSecretText(event.fullDiff),
         });
         this.emit(state.threadId, state.turnId, {
           type: "approval.required",
@@ -1677,7 +1724,14 @@ export class RuntimeService {
           message: redactSecretText(event.message),
         };
         break;
+      case "context-recovery":
+        this.emit(state.threadId, state.turnId, {
+          type: "context.recovery.changed",
+          contextRecovery: event.state,
+        });
+        break;
       case "debug":
+      case "tool-input-activity": // UI-only metadata: not durable Runtime Protocol events.
       case "reasoning-start":
       case "reasoning-end":
       case "step-finish":

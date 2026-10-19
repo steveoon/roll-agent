@@ -47,6 +47,7 @@ export {
   DEFAULT_COMPANION_RELAY_FRAME_MAX_EVENTS,
   materializeRelayFrameV11,
   materializeRelayFrameV12,
+  materializeRelayFrameV13,
 } from "./relay-frame-buffer.ts";
 export type {
   BufferedRelayInteractionFrameV11,

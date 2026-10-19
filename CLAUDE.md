@@ -180,6 +180,12 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 
 `packages/runtime/src/engine/model-catalog.ts` 打包了 models.dev 官方 provider（openai/anthropic/google/deepseek/xai/alibaba-cn/alibaba）的裁剪快照，`resolveModelContextWindow()` 按「配置覆盖 → 目录（`limit.input ?? limit.context`）→ 内置家族规则」解析并带来源。引擎默认只读快照；chat 入口传入 `defaultModelCatalogCachePath()` 并后台 `refreshIfStale()`。新模型上线后 `pnpm catalog:refresh` 重新生成 `model-catalog-snapshot.ts`（生成物，勿手改）。
 
+### 长上下文恢复契约
+
+- `roll__context` 是免审批的内建回查工具：list/search/read 读取账本或归档原文，ready 只解除恢复门禁，不赋予额外权限。完整读取当前 checkpoint 的所有活跃约束与当前目标版本后，下一次模型调度才恢复工具集；未提取原文还需完整读取相关原始消息或工具记录。
+- Receipt 仅本轮有效，preview、旧版本和未完成的分块读取不能充当覆盖；模型 notes/ready 内容不写入权威约束。内建回查的纯工具副本不再作为新事实重复提取，原文仍归档。
+- V1 散文按 `historical_unknown` 归档，不能自动升级为当前不确定事项。Runtime Protocol 1.6 提供有界恢复状态和 durable 事件；Relay Wire 1.3 显式启用前必须协调服务端升级，默认保持 1.2。
+
 ### 日志输出约定
 
 - **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）

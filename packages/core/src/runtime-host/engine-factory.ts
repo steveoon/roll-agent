@@ -114,6 +114,11 @@ export function resolveChatLlmSwitch(
   choice: { readonly provider: string; readonly model: string },
   thinkingLevel: RollConfig["runtime"]["thinkingLevel"],
 ): EngineModelSwitch {
+  if (choice.provider === "chatgpt") {
+    throw new Error(
+      "ChatGPT 订阅模型切换仅支持普通 roll chat；Runtime 服务和 Companion 暂不支持。",
+    );
+  }
   const readiness = inspectLlmConfigReadiness(config, choice);
   if (!readiness.configured || !readiness.providerConfig) {
     throw new Error(readiness.message);
@@ -146,6 +151,17 @@ export async function loadRuntime(): Promise<RuntimeModule> {
 }
 
 export function resolveChatLlmReadiness(config: RollConfig): LlmConfigReadiness {
+  if ((config.runtime.provider ?? config.llm.defaultProvider) === "chatgpt") {
+    return {
+      configured: false,
+      status: "missing-provider",
+      provider: "chatgpt",
+      model: config.runtime.model ?? "",
+      summary: "ChatGPT 订阅（实验）",
+      message:
+        "ChatGPT 订阅支持 roll chat 和 scheduler；暂不支持 Runtime 服务或 Companion。请为这些入口选择 API Key provider。",
+    };
+  }
   return inspectLlmConfigReadiness(config, {
     provider: config.runtime.provider ?? config.llm.defaultProvider,
     model: config.runtime.model ?? config.llm.defaultModel,

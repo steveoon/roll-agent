@@ -6,6 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import { ChatGptAuthError } from "../auth/chatgpt/service.ts";
 import {
   CONFIG_ACTIVATION_KINDS,
   ConfigApplicationValidationError,
@@ -21,6 +22,7 @@ import {
 import { RollUiCompanionBusyError, RollUiCompanionRequestError } from "./companion-controller.ts";
 import { RollUiScheduleBusyError, RollUiScheduleRequestError } from "./schedule-controller.ts";
 import type {
+  RollUiChatGptController,
   RollUiApplyEffectsRequest,
   RollUiCompanionController,
   RollUiConfigRequest,
@@ -173,6 +175,7 @@ export interface StartRollUiServerOptions {
   readonly staticAssets: RollUiStaticAssetProvider;
   readonly companionController?: RollUiCompanionController;
   readonly scheduleController?: RollUiScheduleController;
+  readonly chatGptController?: RollUiChatGptController;
   readonly signal?: AbortSignal;
   readonly onError?: (error: unknown) => void;
   readonly bodyLimitBytes?: number;
@@ -346,6 +349,10 @@ async function handleApiRequest(
   }
 
   const session = requireSession(request.headers, runtime);
+  if (pathname.startsWith("/api/auth/chatgpt/")) {
+    await handleChatGptRequest(request, response, pathname, method, runtime, session, options);
+    return;
+  }
   if (pathname === "/api/config" && method === "GET") {
     sendData(response, await controller.getConfig());
     return;
@@ -395,6 +402,61 @@ async function handleApiRequest(
 
   if (isKnownApiPath(pathname)) throw methodNotAllowed(allowedMethods(pathname));
   throw new RollUiHttpError(404, "not_found", "Not found.");
+}
+
+const CHATGPT_READS: Readonly<Record<string, keyof RollUiChatGptController>> = {
+  "/api/auth/chatgpt/status": "status",
+  "/api/auth/chatgpt/models": "models",
+  "/api/auth/chatgpt/login/status": "loginStatus",
+};
+const CHATGPT_MUTATIONS: Readonly<Record<string, keyof RollUiChatGptController>> = {
+  "/api/auth/chatgpt/login": "login",
+  "/api/auth/chatgpt/login/cancel": "cancelLogin",
+  "/api/auth/chatgpt/refresh": "refresh",
+  "/api/auth/chatgpt/logout": "logout",
+};
+
+async function handleChatGptRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  method: string,
+  runtime: RequestRuntime,
+  session: SessionState,
+  options: StartRollUiServerOptions,
+): Promise<void> {
+  const controller = options.chatGptController;
+  if (controller === undefined) {
+    throw new RollUiHttpError(404, "chatgpt_unavailable", "当前配置台未启用 ChatGPT 登录。");
+  }
+  const read = CHATGPT_READS[pathname];
+  const mutation = CHATGPT_MUTATIONS[pathname];
+  const action = read ?? mutation;
+  if (action === undefined) throw new RollUiHttpError(404, "not_found", "Not found.");
+  if (method !== (read !== undefined ? "GET" : "POST")) {
+    throw methodNotAllowed(read !== undefined ? "GET" : "POST");
+  }
+  let body: unknown;
+  if (read !== undefined) {
+    const query = new URL(request.url ?? "/", runtime.origin).searchParams;
+    body = Object.fromEntries(query);
+  } else {
+    requireCsrf(request.headers, session);
+    body = await readJsonBody(request, runtime.bodyLimitBytes);
+  }
+  try {
+    sendData(response, await controller[action](body));
+  } catch (error) {
+    if (error instanceof ChatGptAuthError) {
+      throw new RollUiHttpError(error.status ?? 400, error.code, error.message);
+    }
+    // Never forward OAuth response bodies, URLs, or credential-bearing exceptions to logs/UI.
+    throw new RollUiHttpError(
+      400,
+      "chatgpt_operation_failed",
+      "ChatGPT 操作未完成，请检查授权状态后重试。",
+    );
+  }
 }
 
 async function handleScheduleRequest(

@@ -24,6 +24,7 @@ import type {
   RollUiController,
   RollUiSaveConfigRequest,
 } from "./contracts.ts";
+import { validateUiThinkingConfig } from "./thinking-validation.ts";
 
 interface AgentLifecyclePort {
   inspectAll(): Promise<readonly AgentLifecycleInspection[]>;
@@ -39,6 +40,7 @@ export interface RollUiRuntimeControllerOptions {
   readonly configPath: string;
   readonly createLifecycle?: (dataDir: string) => AgentLifecyclePort;
   readonly now?: () => Date;
+  readonly getChatGptModels?: Parameters<typeof validateUiThinkingConfig>[1];
 }
 
 export class RollUiActivationInProgressError extends Error {
@@ -99,6 +101,8 @@ export function createRollUiRuntimeController(
       configPath: options.configPath,
       agentEnvFields: collectAgentEnvFieldPolicies(agents),
       redactUnknownAgentEnv: true,
+      validateEffectiveConfig: (config) =>
+        validateUiThinkingConfig(config, options.getChatGptModels),
     });
   };
 

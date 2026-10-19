@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   ENV_REFERENCE_TEMPLATE,
+  isEnvironmentReferenceDraft,
+  validateEnumInput,
   isCompleteEnvReference,
   validateEnvironmentReference,
   validateAgentScalarInput,
@@ -35,6 +37,28 @@ describe("Roll UI input validation", () => {
     assert.equal(isCompleteEnvReference(`prefix-${ENV_REFERENCE_TEMPLATE}`), false);
     assert.equal(validateEnvironmentReference(envReference("ROLL_MODE")), undefined);
     assert.match(validateEnvironmentReference("ROLL_MODE") ?? "", /完整/u);
+  });
+
+  it("distinguishes enum literals, pending capabilities, unavailable catalogs and ENV drafts", () => {
+    const node = { options: ["low", "medium", "high"] };
+    assert.equal(isEnvironmentReferenceDraft("max"), false);
+    assert.equal(isEnvironmentReferenceDraft("${"), true);
+    assert.equal(validateEnumInput("max", { ...node, optionsStatus: "loading" }), undefined);
+    assert.equal(validateEnumInput("max", { ...node, optionsStatus: "unavailable" }), undefined);
+    assert.match(
+      validateEnumInput("max", { ...node, optionsStatus: "ready" }) ?? "",
+      /不支持.*max/,
+    );
+    assert.equal(
+      validateEnumInput("max", { options: [...node.options, "max"], optionsStatus: "ready" }),
+      undefined,
+    );
+    assert.equal(validateEnumInput(envReference("EFFORT"), node), undefined);
+    assert.match(
+      validateEnumInput("${EFFORT", { ...node, optionsStatus: "loading" }) ?? "",
+      /完整/,
+    );
+    assert.equal(validateEnumInput(undefined, node), undefined);
   });
 
   it("allows Agent scalar literals or a complete environment reference only", () => {

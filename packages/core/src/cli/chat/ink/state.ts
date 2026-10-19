@@ -48,7 +48,7 @@ export type HistoryItem =
       readonly id: string;
       readonly name: string;
       readonly args: string;
-      readonly ok: boolean;
+      readonly ok: boolean | undefined;
       readonly diff?: FileChangeDiff;
     }
   | {
@@ -81,6 +81,7 @@ export interface LiveState {
   readonly reasoningStartedAt: number | undefined;
   readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
+  readonly generatingTools: Extract<SessionEvent, { type: "tool-input-activity" }>["calls"];
   readonly compacting: boolean;
   readonly producedOutput: boolean;
 }
@@ -113,6 +114,7 @@ export interface PendingConfirm {
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
   readonly diff?: FileChangeDiff;
+  readonly fullDiff?: string;
 }
 
 export interface ConfirmDecision {
@@ -150,7 +152,11 @@ export type ChatUiAction =
     }
   | { readonly type: "set-thinking-display"; readonly value: ChatThinkingDisplay }
   | { readonly type: "set-auto"; readonly value: boolean }
-  | { readonly type: "commit-history"; readonly item: HistoryItem }
+  | {
+      readonly type: "commit-history";
+      readonly item: HistoryItem;
+      readonly preserveDraft?: boolean;
+    }
   | { readonly type: "start-compaction" }
   | {
       readonly type: "session-event";
@@ -179,6 +185,7 @@ const EMPTY_LIVE: LiveState = {
   reasoningStartedAt: undefined,
   thinkTagOpen: false,
   activeTools: [],
+  generatingTools: [],
   compacting: false,
   producedOutput: false,
 };
@@ -224,6 +231,7 @@ export function buildConfirmPrompt(
 function buildCompactionNotice(
   event: Extract<SessionEvent, { type: "context-compacted" }>,
 ): string {
+  if (event.recoveryNotice) return `${GLYPHS.compact} ${event.recoveryNotice}`;
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
   const checkpoint = event.checkpointGeneration
@@ -376,7 +384,21 @@ function applySessionEvent(
 ): ChatUiState {
   switch (event.type) {
     case "message-start":
-      return state;
+      return { ...state, live: { ...state.live, generatingTools: [] } };
+    case "tool-input-activity":
+      if (state.phase === CHAT_PHASES.idle || state.phase === CHAT_PHASES.cancelling) return state;
+      return { ...state, live: { ...state.live, generatingTools: event.calls } };
+    case "step-finish":
+      return {
+        ...state,
+        live: { ...state.live, generatingTools: [] },
+        status: {
+          ...state.status,
+          ...(event.usage?.inputTokens === undefined
+            ? {}
+            : { contextInputTokens: event.usage.inputTokens }),
+        },
+      };
     case "reasoning-start":
       return beginReasoning(state, id, event.reasoningId, at);
     case "reasoning-delta": {
@@ -416,6 +438,9 @@ function applySessionEvent(
         live: {
           ...current.live,
           producedOutput: true,
+          generatingTools: current.live.generatingTools.filter(
+            (call) => call.toolCallId !== event.toolCallId,
+          ),
           activeTools: [
             ...current.live.activeTools,
             {
@@ -458,8 +483,10 @@ function applySessionEvent(
             ? { sessionGrantLabel: event.sessionGrantLabel }
             : {}),
           ...(event.diff !== undefined ? { diff: event.diff } : {}),
+          ...(event.fullDiff !== undefined ? { fullDiff: event.fullDiff } : {}),
         },
         pendingUserInput: undefined,
+        live: { ...state.live, generatingTools: [] },
       };
     }
     case "user-input-required":
@@ -474,7 +501,7 @@ function applySessionEvent(
         ? { ...state, phase: CHAT_PHASES.busy, pendingUserInput: undefined }
         : state;
     case "compaction-start":
-      return { ...state, live: { ...state.live, compacting: true } };
+      return { ...state, live: { ...state.live, compacting: true, generatingTools: [] } };
     case "context-compacted":
       return {
         ...state,
@@ -584,7 +611,11 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
     case "set-auto":
       return { ...state, status: { ...state.status, autoApprove: action.value } };
     case "commit-history":
-      return { ...state, history: [...state.history, action.item], draft: "" };
+      return {
+        ...state,
+        history: [...state.history, action.item],
+        draft: action.preserveDraft ? state.draft : "",
+      };
     case "start-compaction":
       return {
         ...state,
@@ -605,6 +636,7 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return {
         ...state,
         phase: "cancelling",
+        live: { ...state.live, generatingTools: [] },
         pendingConfirm: undefined,
         pendingUserInput: undefined,
       };

@@ -36,6 +36,17 @@ export interface RollUiApplyEffectsRequest {
 
 type Awaitable<T> = T | Promise<T>;
 
+/** The authentication service owns secrets; this boundary returns public summaries only. */
+export interface RollUiChatGptController {
+  status(request: unknown): Awaitable<unknown>;
+  models(request: unknown): Awaitable<unknown>;
+  login(request: unknown): Awaitable<unknown>;
+  loginStatus(request: unknown): Awaitable<unknown>;
+  cancelLogin(request: unknown): Awaitable<unknown>;
+  refresh(request: unknown): Awaitable<unknown>;
+  logout(request: unknown): Awaitable<unknown>;
+}
+
 /**
  * HTTP-independent application boundary used by the local UI server.
  * Implementations can be tested without opening a socket.

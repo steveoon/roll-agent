@@ -14,6 +14,16 @@ test("cycleThinking clamps at the ends", () => {
   assert.equal(cycleThinking("off", -1), "off");
 });
 
+test("cycleThinking follows model capabilities and skips unsupported off", () => {
+  const levels = ["low", "medium", "high", "xhigh", "max"] as const;
+  assert.equal(cycleThinking("low", -1, levels), "low");
+  assert.equal(cycleThinking("high", 1, levels), "xhigh");
+  assert.equal(cycleThinking("xhigh", 1, levels), "max");
+  assert.equal(cycleThinking("max", 1, levels), "max");
+  assert.equal(cycleThinking("high", 1, ["high", "max"]), "max");
+  assert.equal(cycleThinking("medium", 1, []), "medium");
+});
+
 test("thinkingLabel renders the brain glyph", () => {
   assert.equal(thinkingLabel("medium"), "🧠 medium");
   assert.equal(thinkingLabel("off"), "🧠 off");

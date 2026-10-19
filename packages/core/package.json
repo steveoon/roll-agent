@@ -139,6 +139,7 @@
     "gray-matter": "^4.0.3",
     "ink": "7.0.1",
     "is-unicode-supported": "2.1.0",
+    "jose": "6.2.2",
     "marked": "18.0.5",
     "ora": "^8.1.0",
     "react": "19.2.7",

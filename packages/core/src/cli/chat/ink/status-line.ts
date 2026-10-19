@@ -26,6 +26,8 @@ const COMPACT_THINKING: Record<ThinkingLevel, string> = {
   low: "low",
   medium: "med",
   high: "high",
+  xhigh: "xhigh",
+  max: "max",
 };
 
 const DROP_ORDER = ["tps", "session", "turn", "think"] as const;

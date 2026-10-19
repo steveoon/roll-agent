@@ -20,6 +20,7 @@ const ACTIVITY_COLORS: Record<TurnActivityKind, string> = {
   [TURN_ACTIVITY_KINDS.reasoning]: "magenta",
   [TURN_ACTIVITY_KINDS.replying]: "green",
   [TURN_ACTIVITY_KINDS.tool]: "cyan",
+  [TURN_ACTIVITY_KINDS.toolInput]: "cyan",
   [TURN_ACTIVITY_KINDS.compacting]: "yellow",
   [TURN_ACTIVITY_KINDS.waitingUser]: "yellow",
   [TURN_ACTIVITY_KINDS.cancelling]: "yellow",

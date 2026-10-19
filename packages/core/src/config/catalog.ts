@@ -220,7 +220,15 @@ function buildCatalogNode(
 
   if (unwrapped instanceof z.ZodString) {
     if (PROVIDER_SELECT_PATHS.has(path.join("."))) {
-      return { ...base, kind: "enum", widget: "select", options: [...LLM_PROVIDER_OPTIONS] };
+      return {
+        ...base,
+        kind: "enum",
+        widget: "select",
+        options:
+          path.join(".") === "runtime.provider"
+            ? [...LLM_PROVIDER_OPTIONS, "chatgpt"]
+            : [...LLM_PROVIDER_OPTIONS],
+      };
     }
     return { ...base, kind: "string", widget: inferStringWidget(path) };
   }

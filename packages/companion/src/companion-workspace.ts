@@ -721,7 +721,7 @@ export class CompanionWorkspace {
     switch (request.method) {
       case "operation.result.get": {
         if (
-          this.client.getInitializationResult?.().protocolVersion !== "1.5" ||
+          !["1.5", "1.6"].includes(this.client.getInitializationResult?.().protocolVersion ?? "") ||
           !this.client.getOperationResult
         ) {
           throw new LocalApprovalDeniedError("Runtime does not support App results");
@@ -796,7 +796,7 @@ export class CompanionWorkspace {
             RUNTIME_METHODS.threadCapabilities,
             parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCapabilities, request.params),
           ),
-          this.client.getInitializationResult?.().protocolVersion === "1.5" &&
+          ["1.5", "1.6"].includes(this.client.getInitializationResult?.().protocolVersion ?? "") &&
             this.client.getOperationResult !== undefined,
           async (agent, tool) =>
             !context.signal.aborted && (await this.remoteAppOutputPolicy(agent, tool)),

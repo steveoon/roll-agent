@@ -98,12 +98,14 @@ function occurrences(value: string, fragment: string): number {
 
 test("显式 Skill 只持久化原始输入与轻量 checkpoint，内部和公开历史都不保存正文", async () => {
   const persisted: ModelMessage[][] = [];
+  const references: unknown[] = [];
   const session = new AgentSession({
     id: "explicit-skill-public-history",
     model: textModel("done"),
     sources: [],
     maxSteps: 2,
     skillLibrary: demoLibrary("PRIVATE_SKILL_BODY"),
+    onRecordInputSkillCheckpoint: (_inputId, checkpoint) => references.push(checkpoint),
     onPersist: (messages) => persisted.push([...messages]),
   });
 
@@ -113,8 +115,9 @@ test("显式 Skill 只持久化原始输入与轻量 checkpoint，内部和公�
     const stored = JSON.stringify(persisted);
     const visible = JSON.stringify(session.getMessages());
     assert.equal(persisted[0]?.[0]?.content, "/demo 修一下类型");
-    assert.match(stored, /explicitSkillCheckpoint/u);
-    assert.match(stored, /contentSha256/u);
+    assert.doesNotMatch(stored, /explicitSkillCheckpoint/u);
+    assert.match(JSON.stringify(references), /contentSha256/u);
+    assert.equal(references.length, 1);
     assert.doesNotMatch(stored, /PRIVATE_SKILL_BODY/u);
     assert.equal(session.getMessages()[0]?.content, "/demo 修一下类型");
     assert.doesNotMatch(visible, /PRIVATE_SKILL_BODY|explicitSkillCheckpoint|rollHarness/u);
@@ -172,7 +175,11 @@ test("resume 不向后续普通 Turn 注入已完成 Turn 的持久化 Skill 快
 
       const storedAfterFirstTurn = store.getMessages(threadId);
       assert.equal(storedAfterFirstTurn[0]?.content, "/demo first request");
-      assert.match(JSON.stringify(storedAfterFirstTurn), /contentSha256/u);
+      assert.match(JSON.stringify(store.listTurnInputs(threadId)), /contentSha256/u);
+      assert.doesNotMatch(
+        JSON.stringify(store.listTurnInputs(threadId)),
+        /SNAPSHOT_BODY_V1|userPrompt|modelUserContent/u,
+      );
       assert.doesNotMatch(JSON.stringify(storedAfterFirstTurn), /SNAPSHOT_BODY_V1/u);
       assert.equal(initialLoads, 1);
 
@@ -220,6 +227,7 @@ test("context overflow 重试复用同一 checkpoint，Skill 正文只加载和�
   let modelCalls = 0;
   const prompts: string[] = [];
   const persisted: ModelMessage[][] = [];
+  let referenceWrites = 0;
   const model = new MockLanguageModelV4({
     doStream: async (options) => {
       prompts.push(JSON.stringify(options.prompt));
@@ -229,6 +237,9 @@ test("context overflow 重试复用同一 checkpoint，Skill 正文只加载和�
   });
   const session = new AgentSession({
     id: "explicit-skill-overflow-checkpoint",
+    onRecordInputSkillCheckpoint: () => {
+      referenceWrites += 1;
+    },
     model,
     sources: [],
     maxSteps: 2,
@@ -237,7 +248,7 @@ test("context overflow 重试复用同一 checkpoint，Skill 正文只加载和�
     }),
     initialMessages: [
       { role: "user", content: "old-1" },
-      { role: "assistant", content: "answer-1" },
+      { role: "assistant", content: "answer-1".repeat(2000) },
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ],
@@ -261,9 +272,10 @@ test("context overflow 重试复用同一 checkpoint，Skill 正文只加载和�
       [1, 1],
     );
     assert.ok(prompts.every((prompt) => !prompt.includes("rollHarness")));
-    assert.equal(occurrences(JSON.stringify(persisted), "explicitSkillCheckpoint"), 1);
+    assert.equal(referenceWrites, 1);
+    assert.equal(persisted.flat().filter((message) => message.role === "user").length, 1);
     assert.doesNotMatch(JSON.stringify(persisted), /OVERFLOW_SKILL_BODY/u);
-    assert.equal(persisted.at(-1)?.[0]?.content, "/demo retry");
+    assert.equal(persisted[0]?.[0]?.content, "/demo retry");
   } finally {
     await session.close();
   }

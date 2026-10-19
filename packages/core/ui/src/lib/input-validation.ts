@@ -1,10 +1,26 @@
-import type { ConfigNumberConstraints } from "../types.ts";
+import type { ConfigEnumCatalogNode, ConfigNumberConstraints } from "../types.ts";
 
 const ENV_REFERENCE_PREFIX = "$";
 export const ENV_REFERENCE_TEMPLATE = `${ENV_REFERENCE_PREFIX}{ENV_VAR}`;
 
 export function isCompleteEnvReference(value: string): boolean {
   return /^\$\{[^{}\s]+\}$/u.test(value);
+}
+
+export function isEnvironmentReferenceDraft(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith(ENV_REFERENCE_PREFIX);
+}
+
+export function validateEnumInput(
+  value: unknown,
+  node: Pick<ConfigEnumCatalogNode, "options" | "optionsStatus">,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (isEnvironmentReferenceDraft(value)) return validateEnvironmentReference(value);
+  if (node.optionsStatus === "loading" || node.optionsStatus === "unavailable") return undefined;
+  return typeof value === "string" && node.options.includes(value)
+    ? undefined
+    : `当前选项不支持 ${String(value)}，请调整。`;
 }
 
 export function validateEnvironmentReference(value: string): string | undefined {

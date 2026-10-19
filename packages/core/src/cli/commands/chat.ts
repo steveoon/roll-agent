@@ -1,11 +1,28 @@
+import {
+  ChatGptConnection,
+  chatGptConnectionError,
+  type ChatConnection,
+} from "../../runtime-host/chatgpt-connection.ts";
+import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-session-preparation.ts";
 import { basename, join } from "node:path";
 import { defineCommand } from "citty";
-import type { AgentSession } from "@roll-agent/runtime";
+import { isCancel, select } from "@clack/prompts";
+import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { chatGptThinkingLevels, legacyThinkingLevels } from "../../llm/thinking-levels.ts";
 import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
 import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
-import { buildModelPickerItems } from "../chat/model-picker-format.ts";
+import { getChatGptAuthService } from "../../auth/chatgpt/service.ts";
+import {
+  resolveInteractiveChatLlm,
+  resolveInteractiveChatSwitch,
+  chatGptModelChoices,
+  chatModelPickerItems,
+  chatGptThinkingOptions,
+  loadAuthenticatedChatGptModels,
+  type ChatGptModels,
+} from "../../runtime-host/chatgpt-resolution.ts";
 import type { ChatModelSwitching } from "../chat/ink/app.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
@@ -60,6 +77,7 @@ import {
   type ThreadStoreInstance,
 } from "../../runtime-host/engine-factory.ts";
 import { runJsonTurn } from "../../runtime-host/json-turn.ts";
+import { createChatGptCatalog } from "../../runtime-host/chatgpt-catalog.ts";
 
 export {
   CHAT_ENGINE_SURFACES,
@@ -80,6 +98,8 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
+  readonly beforeSend?: (signal?: AbortSignal) => Promise<void>;
+  readonly connection?: ChatConnection;
   readonly input: Readable;
   readonly output: Writable;
   readonly confirm?: ChatConfirm;
@@ -316,6 +336,11 @@ export async function runRepl(
   session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
+  const unsubscribeConnection = io.connection?.subscribe(() => {
+    const message = io.connection?.getSnapshot();
+    if (message) log.info(message);
+  });
+  io.connection?.start();
   let titled = !isNewSession;
   const initial = { id: session.id, isNew: isNewSession, submitted: false };
   try {
@@ -330,6 +355,13 @@ export async function runRepl(
       }
       if (input === "exit" || input === "quit") {
         break;
+      }
+      if (input === "/reconnect") {
+        if (io.connection) {
+          // Recovery never queues/replays user turns or tools.
+          io.connection.retry().catch((error: unknown) => log.warn(chatGptConnectionError(error)));
+        } else log.info("当前连接无需 ChatGPT 授权恢复。");
+        continue;
       }
       if (input === "/compact") {
         log.debug("chat.repl manual compact requested");
@@ -469,6 +501,7 @@ export async function runRepl(
         initial.submitted = true;
       }
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
+      await io.beforeSend?.(io.signal);
       for await (const event of session.send(input)) {
         await renderer.handle(event, session);
       }
@@ -478,6 +511,7 @@ export async function runRepl(
     try {
       session.setUserInputAvailable(false);
     } finally {
+      unsubscribeConnection?.();
       rl.close();
       if (
         initial.isNew &&
@@ -498,6 +532,9 @@ export default defineCommand({
   args: {
     message: { type: "positional", description: "起始消息", required: false },
     session: { type: "string", description: "继续已有会话的 session ID" },
+    provider: { type: "string", description: "本次聊天模型提供商（chatgpt 为实验订阅通道）" },
+    model: { type: "string", description: "本次聊天模型；ChatGPT 使用订阅目录的 slug" },
+    account: { type: "string", description: "ChatGPT 订阅注册 ID（优先于配置）" },
     "from-run": { type: "string", description: "基于指定定时运行的快照开始普通对话" },
     attempt: { type: "string", description: "--from-run 的尝试序号（默认最新有关联的尝试）" },
     last: { type: "boolean", description: "继续最近一个会话", default: false },
@@ -515,6 +552,22 @@ export default defineCommand({
   },
   async run({ args }) {
     let { config } = loadConfig();
+    const applyLlmOverrides = (loaded: RollConfig): RollConfig => {
+      const runtime = { ...loaded.runtime };
+      if (args.provider !== undefined) {
+        if (
+          args.provider !== (runtime.provider ?? loaded.llm.defaultProvider) &&
+          args.model === undefined
+        ) {
+          delete runtime.model;
+        }
+        runtime.provider = args.provider;
+      }
+      if (args.model !== undefined) runtime.model = args.model;
+      if (args.account !== undefined) runtime.chatgptAccountId = args.account;
+      return { ...loaded, runtime };
+    };
+    config = applyLlmOverrides(config);
     const fromRun = args["from-run"];
     let requestedAttempt: number | undefined;
     try {
@@ -558,32 +611,17 @@ export default defineCommand({
       return;
     }
 
-    let llmStatus = resolveChatLlmReadiness(config);
-    if (!llmStatus.configured) {
-      const canPrompt = process.stdin.isTTY === true && process.stderr.isTTY === true && !args.json;
-      if (canPrompt && (await runChatOnboardingFlow(llmStatus.provider, llmStatus.model))) {
-        config = loadConfig().config;
-        llmStatus = resolveChatLlmReadiness(config);
+    const canPrompt = process.stdin.isTTY === true && process.stderr.isTTY === true && !args.json;
+    if ((config.runtime.provider ?? config.llm.defaultProvider) !== "chatgpt") {
+      const status = resolveChatLlmReadiness(config);
+      if (
+        !status.configured &&
+        canPrompt &&
+        (await runChatOnboardingFlow(status.provider, status.model))
+      ) {
+        config = applyLlmOverrides(loadConfig().config);
       }
     }
-    if (!llmStatus.configured || !llmStatus.providerConfig) {
-      log.error(llmStatus.message);
-      process.exitCode = 1;
-      return;
-    }
-    const providerConfig = llmStatus.providerConfig;
-    const provider = llmStatus.provider;
-    const modelName = llmStatus.model;
-    let currentProvider = provider;
-    let currentModel = modelName;
-    let currentThinkingLevel = config.runtime.thinkingLevel;
-
-    if (args.json && !args.message) {
-      log.error('--json 模式需要消息：roll chat "<message>" --json');
-      process.exitCode = 1;
-      return;
-    }
-
     const presentationDecision = args.message
       ? undefined
       : resolveChatPresentation({
@@ -609,21 +647,88 @@ export default defineCommand({
     ) {
       log.debug(`chat 自动选择基础 REPL：${presentationDecision.reason}`);
     }
+    const needsStartupModel =
+      presentationDecision?.presentation === CHAT_PRESENTATIONS.inline &&
+      (config.runtime.provider ?? config.llm.defaultProvider) === "chatgpt" &&
+      config.runtime.model === undefined;
+    if (needsStartupModel && !canPrompt) {
+      log.error("基础模式需要指定 ChatGPT 模型：请使用 --model <slug>，或配置 runtime.model。");
+      process.exitCode = 1;
+      return;
+    }
+    let selection: Awaited<ReturnType<typeof resolveInteractiveChatLlm>>;
+    try {
+      selection = await resolveInteractiveChatLlm(config, {
+        deferConnection: !args.message && !args.json && !needsStartupModel,
+        ...(canPrompt
+          ? {
+              selectModel: async (models: ChatGptModels) => {
+                if (models.length === 0) throw new Error("当前账号没有可用的 ChatGPT 订阅模型。");
+                const selected = await select<string>({
+                  message: "选择 ChatGPT 订阅模型",
+                  options: models.map(({ slug, displayName }) => ({
+                    value: slug,
+                    label: displayName,
+                    hint: slug,
+                  })),
+                });
+                return isCancel(selected) ? undefined : selected;
+              },
+            }
+          : {}),
+      });
+    } catch (error) {
+      log.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+      return;
+    }
+    const provider = selection.provider;
+    const modelName = selection.modelName;
+    config = {
+      ...config,
+      runtime: {
+        ...config.runtime,
+        provider,
+        model: modelName,
+        ...(selection.accountId ? { chatgptAccountId: selection.accountId } : {}),
+      },
+    };
+    let subscriptionModels = selection.models ?? [];
+    let subscriptionAccountId = selection.accountId ?? config.runtime.chatgptAccountId;
+    let currentProvider = provider;
+    let currentModel = modelName;
+    let currentThinkingLevel = config.runtime.thinkingLevel;
+    const chatConnection =
+      selection.connection ??
+      new ChatGptConnection(
+        {
+          status: () => getChatGptAuthService().status(),
+          models: (account, signal) => getChatGptAuthService().models(account, signal),
+          getAccessToken: (account, signal) =>
+            getChatGptAuthService().getAccessToken(account, signal),
+        },
+        subscriptionAccountId,
+        subscriptionModels,
+      );
+    chatConnection.setEnabled(provider === "chatgpt");
+    let activeSelection: EngineModelSwitch = selection;
+
+    if (args.json && !args.message) {
+      log.error('--json 模式需要消息：roll chat "<message>" --json');
+      process.exitCode = 1;
+      return;
+    }
 
     const runtime = await loadRuntime();
     const { ThreadStore } = runtime;
     const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
-      resolveChatLlmCalls(
-        provider,
-        modelName,
-        providerConfig.apiKey,
-        providerConfig.baseUrl,
-        config.runtime.thinkingLevel,
-        config.runtime.compaction.thinkingLevel,
-        config.runtime.compaction.strategy === "summarize",
-      );
+      selection;
     const store = new ThreadStore(config.runtime.threadsDir);
-    const modelCatalog = runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath());
+    const modelCatalog = createChatGptCatalog(
+      runtime,
+      runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath()),
+      () => chatConnection.models,
+    );
     const catalogRefreshController = new AbortController();
     const surface = args.message
       ? args.json
@@ -636,6 +741,7 @@ export default defineCommand({
     let engine: ConversationEngineInstance | undefined;
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
+    let sessionPreparation: ReturnType<typeof createChatGptSessionPreparation> | undefined;
     try {
       backfillScheduledThreads(config, runtime, store);
       if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
@@ -672,6 +778,15 @@ export default defineCommand({
       });
       signalScope.setEngine(engine);
       const chatEngine = engine;
+      sessionPreparation = createChatGptSessionPreparation({
+        connection: chatConnection,
+        engine: chatEngine,
+        getSession: () => sessionForCleanup,
+        getSelection: () => activeSelection,
+        ...(config.runtime.contextWindow !== undefined
+          ? { contextWindowOverride: config.runtime.contextWindow }
+          : {}),
+      });
       const scheduleBrowser = createScheduleBrowserPort({ config, runtime, engine: chatEngine });
       const resumeSession = async (threadId: string): Promise<AgentSession> => {
         if (store.getThread(threadId)?.origin.kind === "scheduled") {
@@ -709,6 +824,7 @@ export default defineCommand({
         );
       }
       sessionForCleanup = session;
+      sessionPreparation.synchronize();
 
       if (args.json && args.message) {
         const result = await runJsonTurn(session, args.message);
@@ -760,6 +876,8 @@ export default defineCommand({
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
               model: modelName,
+              connection: chatConnection,
+              beforeSend: sessionPreparation.prepare,
               banner,
               initialThinkingLevel: config.runtime.thinkingLevel,
               initialThinkingDisplay: config.chat.thinkingDisplay,
@@ -767,11 +885,23 @@ export default defineCommand({
                 usedInk = true;
               },
               signal: signalScope.signal,
+              getThinkingLevels: () =>
+                currentProvider === "chatgpt"
+                  ? chatGptThinkingLevels(
+                      chatConnection.models.find(({ slug }) => slug === currentModel),
+                    )
+                  : legacyThinkingLevels,
               onThinkingChange: (level) => {
+                const nextOptions =
+                  currentProvider === "chatgpt"
+                    ? chatGptThinkingOptions(
+                        level,
+                        chatConnection.models.find(({ slug }) => slug === currentModel),
+                      )
+                    : thinkingProviderOptions(currentProvider, currentModel, level);
+                session.setProviderOptions(nextOptions);
+                activeSelection = { ...activeSelection, providerOptions: nextOptions ?? {} };
                 currentThinkingLevel = level;
-                session.setProviderOptions(
-                  thinkingProviderOptions(currentProvider, currentModel, level),
-                );
               },
               resumeSession,
               scheduleBrowser,
@@ -780,18 +910,74 @@ export default defineCommand({
                 sessionForCleanup = next;
               },
               modelSwitching: {
-                loadItems: (current) => buildModelPickerItems(listLlmModelChoices(config), current),
-                switchTo: async (input) => {
-                  const choice = findLlmModelChoice(listLlmModelChoices(config), input);
+                loadItems: async (current) => {
+                  try {
+                    const choices = await loadAuthenticatedChatGptModels(
+                      getChatGptAuthService(),
+                      subscriptionAccountId,
+                    );
+                    subscriptionModels = choices.models;
+                    subscriptionAccountId = choices.accountId;
+                    chatConnection.updateCatalog(choices.models, choices.accountId);
+                  } catch (error) {
+                    log.warn(error instanceof Error ? error.message : String(error));
+                  }
+                  return chatModelPickerItems(config, subscriptionModels, current);
+                },
+                getThinkingLevels: async (input) => {
+                  const selected = findLlmModelChoice(
+                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
+                    input,
+                  );
+                  if (selected?.provider !== "chatgpt" && !input.startsWith("chatgpt/")) {
+                    return legacyThinkingLevels;
+                  }
+                  const choices = await loadAuthenticatedChatGptModels(
+                    getChatGptAuthService(),
+                    subscriptionAccountId,
+                  );
+                  subscriptionModels = choices.models;
+                  subscriptionAccountId = choices.accountId;
+                  chatConnection.updateCatalog(choices.models, choices.accountId);
+                  const model = subscriptionModels.find(
+                    ({ slug }) => `chatgpt/${slug}` === input || slug === selected?.model,
+                  );
+                  if (!model) throw new Error(`当前账号不提供模型 "${input}"`);
+                  return chatGptThinkingLevels(model);
+                },
+                switchTo: async (input, selectedEffort) => {
+                  if (input.startsWith("chatgpt/") && subscriptionModels.length === 0) {
+                    const choices = await loadAuthenticatedChatGptModels(
+                      getChatGptAuthService(),
+                      subscriptionAccountId,
+                    );
+                    subscriptionModels = choices.models;
+                    subscriptionAccountId = choices.accountId;
+                    chatConnection.updateCatalog(choices.models, choices.accountId);
+                  }
+                  const choice = findLlmModelChoice(
+                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
+                    input,
+                  );
                   if (!choice) {
                     throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
                   }
-                  const resolution = chatEngine.switchModel(
-                    resolveChatLlmSwitch(config, choice, currentThinkingLevel),
+                  const nextSelection = await resolveInteractiveChatSwitch(
+                    config,
+                    choice,
+                    selectedEffort ?? currentThinkingLevel,
+                    subscriptionAccountId,
+                    undefined,
+                    chatConnection,
                   );
+                  const resolution = chatEngine.switchModel(nextSelection);
+                  activeSelection = nextSelection;
                   currentProvider = choice.provider;
+                  chatConnection.setEnabled(choice.provider === "chatgpt");
                   currentModel = choice.model;
+                  currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
                   return {
+                    thinkingLevel: currentThinkingLevel,
                     id: choice.id,
                     model: choice.model,
                     contextWindow: resolution?.window,
@@ -799,11 +985,18 @@ export default defineCommand({
                   };
                 },
                 setAsDefault: async (id) => {
-                  const choice = findLlmModelChoice(listLlmModelChoices(config), id);
+                  const choice = findLlmModelChoice(
+                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
+                    id,
+                  );
                   if (!choice) {
                     throw new Error(`未知模型 "${id}"`);
                   }
-                  const written = writeDefaultLlm(choice);
+                  const written = writeDefaultLlm({
+                    ...choice,
+                    thinkingLevel: currentThinkingLevel,
+                    ...(subscriptionAccountId ? { chatgptAccountId: subscriptionAccountId } : {}),
+                  });
                   return `已将默认 LLM 设为 ${choice.id}（写入 ${written.configPath}）`;
                 },
               } satisfies ChatModelSwitching,
@@ -825,6 +1018,8 @@ export default defineCommand({
           await runRepl(session, store, isNewSession, {
             input: process.stdin,
             output: process.stdout,
+            connection: chatConnection,
+            beforeSend: sessionPreparation.prepare,
             signal: signalScope.signal,
             resumeSession,
             scheduleBrowser,
@@ -841,6 +1036,8 @@ export default defineCommand({
         process.exitCode = 1;
       }
     } finally {
+      sessionPreparation?.dispose();
+      chatConnection.dispose();
       catalogRefreshController.abort();
       signalScope?.dispose();
       try {

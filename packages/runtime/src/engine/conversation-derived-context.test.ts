@@ -56,11 +56,11 @@ const usage = {
   inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
-function answer(): LanguageModelV4StreamPart[] {
+function answer(text = "已解释结果"): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "text" },
-    { type: "text-delta", id: "text", delta: "已解释结果" },
+    { type: "text-delta", id: "text", delta: text },
     { type: "text-end", id: "text" },
     { type: "finish", usage, finishReason: { unified: "stop", raw: "stop" } },
   ];
@@ -104,7 +104,7 @@ test("derived source reminder is model-only across fork, real compaction, and re
       model: new MockLanguageModelV4({
         doStream: async (options) => {
           calls.push(options);
-          return stream(answer());
+          return stream(answer(`已解释结果 ${"完整原始分析 ".repeat(1_000)}`));
         },
       }),
       agents: [],
@@ -120,9 +120,9 @@ test("derived source reminder is model-only across fork, real compaction, and re
     const source = store.createThread({ origin });
     store.appendMessages(source, [
       { role: "user", content: "旧任务" },
-      { role: "assistant", content: "旧结果" },
+      { role: "assistant", content: "旧结果".repeat(2_000) },
       { role: "user", content: "请检查依赖并保存报告" },
-      { role: "assistant", content: "依赖报告已保存" },
+      { role: "assistant", content: "依赖报告已保存".repeat(2_000) },
     ]);
     const snapshot = store.readSnapshot(source);
     // Old callers cannot smuggle the removed harness context field back into user history.
@@ -134,14 +134,24 @@ test("derived source reminder is model-only across fork, real compaction, and re
     assert.equal(store.countMessages(fork.id), snapshot.messages.length);
     await drain(fork.compact("manual"));
     assert.equal(calls.length, 0, "truncate compaction does not make an extra model call");
-    assert.equal(store.getLatestCheckpoint(fork.id)?.goal?.verbatimRequest, "请检查依赖并保存报告");
+    const firstCheckpoint = store.getLatestCheckpoint(fork.id);
+    assert.ok(firstCheckpoint?.version === 3);
+    assert.ok(firstCheckpoint.taskSummary.length > 0);
+    assert.equal(
+      fork.getMessages().findLast((message) => message.role === "user")?.content,
+      "请检查依赖并保存报告",
+    );
     await drain(fork.send("请解释依赖检查结果"));
     assertReminder(calls.at(-1), snapshot.capturedAt);
     assert.equal(fork.getCapabilityTurnContext()?.dynamic.origin, undefined);
     await drain(fork.compact("manual"));
     const firstGeneration = store.getLatestCheckpoint(fork.id)?.generation ?? 0;
     assert.ok(firstGeneration >= 2);
-    assert.equal(store.getLatestCheckpoint(fork.id)?.goal?.verbatimRequest, "请解释依赖检查结果");
+    assert.equal(store.getLatestCheckpoint(fork.id)?.version, 3);
+    assert.equal(
+      fork.getMessages().findLast((message) => message.role === "user")?.content,
+      "请解释依赖检查结果",
+    );
     const forkId = fork.id;
     await engine.dispose();
     store.close();

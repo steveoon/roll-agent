@@ -16,6 +16,8 @@ import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
+  readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
+  readonly onPreparationCancelled?: () => void;
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
@@ -40,12 +42,16 @@ export interface UseSessionResult {
   ) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
-  readonly setModel: (model: string, contextWindow: number | undefined) => void;
+  readonly setModel: (
+    model: string,
+    contextWindow: number | undefined,
+    thinkingLevel?: ThinkingLevel,
+  ) => void;
   readonly setThinkingDisplay: (value: ChatThinkingDisplay) => void;
   readonly setDiffDisplay: (value: DiffDisplayMode) => void;
   readonly setAutoMode: (value: boolean) => void;
   readonly toggleAutoMode: () => void;
-  readonly commitHistory: (item: HistoryItem) => void;
+  readonly commitHistory: (item: HistoryItem, preserveDraft?: boolean) => void;
 }
 
 const STREAM_FLUSH_MS = 32;
@@ -78,10 +84,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   const userInputDecisionRef = useRef<PendingUserInputDecision | null>(null);
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
+  const preparationRef = useRef<AbortController | undefined>(undefined);
+  const beforeSend = options.beforeSend;
+  const onPreparationCancelled = options.onPreparationCancelled;
 
   useEffect(() => {
     session.setUserInputAvailable?.(true);
     return () => {
+      preparationRef.current?.abort();
       userInputDecisionRef.current?.resolve({
         status: "cancelled",
         reason: "用户输入界面已关闭",
@@ -237,9 +247,28 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
               })),
             }
           : text;
-      drive(session.send(input)).catch(() => undefined);
+      if (!beforeSend) {
+        drive(session.send(input)).catch(() => undefined);
+        return;
+      }
+      const preparation = new AbortController();
+      preparationRef.current = preparation;
+      async function* preparedTurn(): AsyncIterable<SessionEvent> {
+        try {
+          await beforeSend?.(preparation.signal);
+          preparation.signal.throwIfAborted();
+        } catch (error) {
+          dispatch({ type: "set-draft", value: text });
+          onPreparationCancelled?.();
+          throw error;
+        } finally {
+          preparationRef.current = undefined;
+        }
+        yield* session.send(input);
+      }
+      drive(preparedTurn()).catch(() => undefined);
     },
-    [drive, session],
+    [drive, session, beforeSend, onPreparationCancelled],
   );
 
   const compact = useCallback(() => {
@@ -253,6 +282,11 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
 
   const cancel = useCallback(() => {
     if (!busyRef.current) {
+      return;
+    }
+    if (preparationRef.current) {
+      preparationRef.current.abort();
+      dispatch({ type: "cancel-requested" });
       return;
     }
     if (session.cancel()) {
@@ -280,15 +314,30 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
 
   const setThinking = useCallback(
     (level: ThinkingLevel) => {
-      dispatch({ type: "set-thinking", level });
-      onThinkingChange?.(level);
+      try {
+        onThinkingChange?.(level);
+        dispatch({ type: "set-thinking", level });
+      } catch (error) {
+        dispatch({
+          type: "commit-history",
+          item: {
+            kind: "notice",
+            id: randomUUID(),
+            text: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
     },
     [onThinkingChange],
   );
 
-  const setModel = useCallback((model: string, contextWindow: number | undefined) => {
-    dispatch({ type: "set-model", model, contextWindow });
-  }, []);
+  const setModel = useCallback(
+    (model: string, contextWindow: number | undefined, thinkingLevel?: ThinkingLevel) => {
+      dispatch({ type: "set-model", model, contextWindow });
+      if (thinkingLevel !== undefined) dispatch({ type: "set-thinking", level: thinkingLevel });
+    },
+    [],
+  );
 
   const setThinkingDisplay = useCallback((value: ChatThinkingDisplay) => {
     dispatch({ type: "set-thinking-display", value });
@@ -310,8 +359,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     setAutoMode(!autoModeRef.current);
   }, [setAutoMode]);
 
-  const commitHistory = useCallback((item: HistoryItem) => {
-    dispatch({ type: "commit-history", item });
+  const commitHistory = useCallback((item: HistoryItem, preserveDraft = false) => {
+    dispatch({ type: "commit-history", item, preserveDraft });
   }, []);
 
   return {

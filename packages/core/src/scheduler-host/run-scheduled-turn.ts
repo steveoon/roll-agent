@@ -8,10 +8,10 @@ import {
   CHAT_ENGINE_SURFACES,
   createChatEngine,
   createToolPolicy,
-  resolveChatLlmCalls,
-  resolveChatLlmReadiness,
   type RuntimeModule,
 } from "../runtime-host/engine-factory.ts";
+import { resolveInteractiveChatLlm } from "../runtime-host/chatgpt-resolution.ts";
+import { createChatGptCatalog } from "../runtime-host/chatgpt-catalog.ts";
 import { runJsonTurn } from "../runtime-host/json-turn.ts";
 import { computeAuthorityDigest, describeAuthorityDrift } from "./authority.ts";
 import {
@@ -28,6 +28,7 @@ export interface CreateScheduledTurnRunnerInput {
   readonly shellEnv?: NodeJS.ProcessEnv;
   readonly stopSignal?: AbortSignal;
   readonly onShellCommandSpawn?: (child: ChildProcess) => void;
+  readonly resolveLlm?: typeof resolveInteractiveChatLlm;
 }
 
 function mapTurnResult(result: ChatCommandResult, denied: readonly string[]): ScheduledTurnOutcome {
@@ -73,7 +74,7 @@ export function createScheduledTurnRunner(
   input: CreateScheduledTurnRunnerInput,
 ): ScheduledTurnRunner {
   return async (schedule, invocation) => {
-    if (input.stopSignal?.aborted === true) {
+    if (input.stopSignal?.aborted) {
       return { status: SCHEDULED_TURN_STATUSES.failed, error: "本轮执行已收到停止请求" };
     }
     const currentAuthority = computeAuthorityDigest(input.config);
@@ -84,19 +85,19 @@ export function createScheduledTurnRunner(
         terminal: true,
       };
     }
-    const readiness = resolveChatLlmReadiness(input.config);
-    if (!readiness.configured || !readiness.providerConfig) {
-      return { status: SCHEDULED_TURN_STATUSES.failed, error: readiness.message };
+    const llm = await (input.resolveLlm ?? resolveInteractiveChatLlm)(input.config);
+    if (input.stopSignal?.aborted) {
+      return { status: SCHEDULED_TURN_STATUSES.failed, error: "本轮执行已收到停止请求" };
     }
-    const llm = resolveChatLlmCalls(
-      readiness.provider,
-      readiness.model,
-      readiness.providerConfig.apiKey,
-      readiness.providerConfig.baseUrl,
-      input.config.runtime.thinkingLevel,
-      input.config.runtime.compaction.thinkingLevel,
-      input.config.runtime.compaction.strategy === "summarize",
-    );
+    const config: RollConfig = {
+      ...input.config,
+      runtime: {
+        ...input.config.runtime,
+        provider: llm.provider,
+        model: llm.modelName,
+        ...(llm.accountId ? { chatgptAccountId: llm.accountId } : {}),
+      },
+    };
     const threadId = randomUUID();
     const threadsDir = resolve(input.runtime.expandTilde(input.config.runtime.threadsDir));
     if (
@@ -123,13 +124,15 @@ export function createScheduledTurnRunner(
       );
       engine = createChatEngine({
         runtime: input.runtime,
-        config: input.config,
+        config,
         model: llm.model,
         store,
         surface: CHAT_ENGINE_SURFACES.background,
         policy,
-        modelCatalog: input.runtime.createDefaultModelCatalog(
-          input.runtime.defaultModelCatalogCachePath(),
+        modelCatalog: createChatGptCatalog(
+          input.runtime,
+          input.runtime.createDefaultModelCatalog(input.runtime.defaultModelCatalogCachePath()),
+          () => llm.models ?? [],
         ),
         resolveDynamicCapabilityContext: () => ({
           origin: {

@@ -7,6 +7,7 @@ import {
 } from "../../config/helpers.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 import { resolveLLMCall, toSamplingConnectOptions } from "../../llm/providers.ts";
+import { apiSamplingThinkingLevel } from "../../llm/thinking-levels.ts";
 import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { routeWithLLM } from "../../router/llm-router.ts";
@@ -61,6 +62,11 @@ export default defineCommand({
   },
   async run({ args }) {
     const { config } = loadConfig();
+    if (config.llm.defaultProvider === "chatgpt") {
+      log.error("roll ask 暂不支持 ChatGPT 订阅。请为 llm.defaultProvider 选择 API Key provider。");
+      process.exitCode = 1;
+      return;
+    }
     const store = new AgentStore(config.agents.dataDir);
     const agents = store.list();
 
@@ -162,7 +168,7 @@ export default defineCommand({
       providerConfig.apiKey,
       "sampling",
       providerConfig.baseUrl,
-      config.runtime.thinkingLevel,
+      apiSamplingThinkingLevel(config.runtime, routerProvider, (message) => log.warn(message)),
     );
 
     const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "ask");

@@ -36,7 +36,7 @@ function fixture(
     maxSteps: 8,
     ...(contextPressure
       ? {
-          contextWindow: 200,
+          contextWindow: 20_000, // Full schedule schema/system overhead fits; measured pressure remains high.
           compaction: {
             enabled: true,
             strategy: "truncate" as const,
@@ -70,7 +70,7 @@ function fixture(
             type: "finish",
             usage: {
               inputTokens: {
-                total: contextPressure ? 180 : 1,
+                total: contextPressure ? 16_000 : 1,
                 noCache: 1,
                 cacheRead: 0,
                 cacheWrite: 0,

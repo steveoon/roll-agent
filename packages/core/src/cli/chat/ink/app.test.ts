@@ -8,6 +8,9 @@ import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
+import type { SessionPickerItem } from "../session-picker-format.ts";
+import type { ThinkingLevel } from "../../../llm/thinking-levels.ts";
+import type { TranscriptHistorySource } from "./transcript-history.ts";
 
 // A failed assertion must not leave Ink mounts/timers alive and hang the test worker.
 afterEach(() => cleanup());
@@ -1602,6 +1605,91 @@ test("ChatApp keeps the switched model in its status after /resume", async () =>
   unmount();
 });
 
+test("ChatApp preserves model-selected and manually changed efforts across resume", async () => {
+  const first = switchableFakeSession("effort-first");
+  const second = switchableFakeSession("effort-second", [
+    { role: "user", content: "恢复第二会话" },
+  ]);
+  const third = switchableFakeSession("effort-third", [{ role: "user", content: "恢复第三会话" }]);
+  let requestEffort: ThinkingLevel = "max";
+  let levels: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "subscription",
+      initialThinkingLevel: "max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      getThinkingLevels: () => levels,
+      onThinkingChange: (effort) => {
+        if (!levels.includes(effort)) throw new Error("unsupported");
+        requestEffort = effort;
+      },
+      sessionSwitching: {
+        loadItems: (id) => [
+          {
+            id: id === "effort-first" ? "effort-second" : "effort-third",
+            title: "下一会话",
+            meta: "历史",
+          },
+        ],
+        resume: async (id) => (id === "effort-second" ? second.session : third.session),
+        onRetired: () => {},
+      },
+      modelSwitching: {
+        loadItems: () => [],
+        getThinkingLevels: async () => ["low", "medium", "high"] as const,
+        switchTo: async (input, effort) => {
+          requestEffort = effort ?? requestEffort;
+          levels = ["low", "medium", "high"];
+          return {
+            id: input,
+            model: "api-target",
+            contextWindow: undefined,
+            thinkingLevel: requestEffort,
+          };
+        },
+        setAsDefault: async () => "saved",
+      },
+    }),
+  );
+  try {
+    await delay(20);
+    stdin.write("/model openai/target\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /是否设为默认/));
+    assert.equal(requestEffort, "low");
+    stdin.write("\u001b");
+    await delay(20);
+    stdin.write("/resume\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第二会话/));
+    assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} low`));
+    await delay(20);
+    stdin.write("/effort\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：low/));
+    assert.equal(requestEffort, "low");
+    stdin.write("\x1b[46;3u");
+    await waitFor(() => assert.equal(requestEffort, "medium"));
+    stdin.write("/resume\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第三会话/));
+    assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} medium`));
+    await delay(20);
+    stdin.write("/effort\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：medium/));
+    assert.match(plain(lastFrame() ?? ""), /api-target/);
+    stdin.write("/model openai/target\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /是否设为默认/));
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /请选择推理档位/);
+  } finally {
+    unmount();
+  }
+});
+
 test("ChatApp keeps current session when resume fails", async () => {
   const first = switchableFakeSession("s1");
   const { stdin, lastFrame, unmount } = render(
@@ -1725,6 +1813,124 @@ test("ChatApp 未知命令提示后保留草稿", async () => {
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /未知命令 \/thnik/));
   assert.match(plain(lastFrame() ?? ""), /\/thnik on/);
   assert.deepEqual(submitted, []);
+  unmount();
+});
+
+test("ChatApp rejects unsupported thinking without changing the displayed or active level", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const selected: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription-model",
+      initialThinkingLevel: "medium",
+      onThinkingChange: (level) => {
+        if (level === "off") throw new Error("模型不支持 off，请使用 low");
+        selected.push(level);
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/think off\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /模型不支持 off/));
+  assert.deepEqual(selected, []);
+  stdin.write("/think on\r");
+  await waitFor(() => assert.deepEqual(selected, ["medium"]));
+  unmount();
+});
+
+test("ChatApp lists subscription efforts and accepts xhigh/max while preserving invalid changes", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const selected: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription",
+      initialThinkingLevel: "high",
+      getThinkingLevels: () => ["low", "medium", "high", "xhigh", "max"] as const,
+      onThinkingChange: (level) => {
+        selected.push(level);
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/effort\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /xhigh.*max/));
+  stdin.write("/effort xhigh\r");
+  await waitFor(() => assert.deepEqual(selected, ["xhigh"]));
+  stdin.write("/effort max\r");
+  await waitFor(() => assert.deepEqual(selected, ["xhigh", "max"]));
+  stdin.write("/effort unknown\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /用法: \/effort/));
+  assert.deepEqual(selected, ["xhigh", "max"]);
+  unmount();
+});
+
+test("ChatApp incompatible model switch requires effort selection and cancellation leaves model intact", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const switches: Array<{ input: string; effort: string | undefined }> = [];
+  let activeLevels: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription",
+      initialThinkingLevel: "max",
+      getThinkingLevels: () => activeLevels,
+      modelSwitching: {
+        loadItems: () => [],
+        getThinkingLevels: async () => ["low", "medium", "high"] as const,
+        switchTo: async (input, effort) => {
+          switches.push({ input, effort });
+          activeLevels = ["low", "medium", "high"];
+          return {
+            id: input,
+            model: "api-target",
+            contextWindow: undefined,
+            ...(effort ? { thinkingLevel: effort } : {}),
+          };
+        },
+        setAsDefault: async () => "saved",
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/model openai/target\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+  assert.deepEqual(switches, []);
+  stdin.write("\u001b");
+  await delay(30);
+  assert.deepEqual(switches, []);
+  assert.match(plain(lastFrame() ?? ""), /subscription/);
+  stdin.write("/model openai/target\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /请选择推理档位/));
+  stdin.write("\r");
+  await waitFor(() => assert.equal(switches.length, 1));
+  assert.deepEqual(switches, [{ input: "openai/target", effort: "low" }]);
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /api-target/));
+  stdin.write("\u001b");
+  await delay(20);
+  stdin.write("/effort\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前推理强度：low/));
+  stdin.write("/effort max\r");
+  await waitFor(() =>
+    assert.match(plain(lastFrame() ?? ""), /用法: \/effort low \| medium \| high/),
+  );
+  assert.equal(switches.length, 1);
   unmount();
 });
 
@@ -2018,6 +2224,91 @@ test("ChatApp switches model via /model picker and offers set-as-default", async
   unmount();
 });
 
+test("subscription model loading is deferred until /model and a cancelled load cannot reopen the picker", async () => {
+  const session = switchableFakeSession("s1");
+  let loads = 0;
+  let complete: ((items: { id: string; title: string; meta: string }[]) => void) | undefined;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "api-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => {
+          loads++;
+          return new Promise<SessionPickerItem[]>((resolve) => {
+            complete = resolve;
+          });
+        },
+        switchTo: async () => ({
+          id: "chatgpt/subscription",
+          model: "subscription",
+          contextWindow: 8192,
+        }),
+        setAsDefault: async () => "saved",
+      },
+    }),
+  );
+  try {
+    await delay(30);
+    assert.equal(loads, 0);
+    assert.match(plain(lastFrame() ?? ""), /api-model/);
+    stdin.write("/model");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.equal(loads, 1));
+    stdin.write("\x1b");
+    await delay(20);
+    complete?.([{ id: "chatgpt/subscription", title: "Subscription", meta: "fixture" }]);
+    await delay(30);
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /切换模型/);
+    assert.match(plain(lastFrame() ?? ""), /api-model/);
+  } finally {
+    unmount();
+  }
+});
+
+test("subscription default confirmation describes service limitations before saving", async () => {
+  const session = switchableFakeSession("s1");
+  let saves = 0;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "api-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [],
+        switchTo: async () => ({
+          id: "chatgpt/subscription",
+          model: "subscription",
+          contextWindow: 8192,
+        }),
+        setAsDefault: async () => {
+          saves++;
+          return "saved";
+        },
+      },
+    }),
+  );
+  try {
+    await delay(20);
+    stdin.write("/model chatgpt/subscription");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() =>
+      assert.match(plain(lastFrame() ?? ""), /Runtime 服务 \/ Companion 暂不可用/),
+    );
+    assert.equal(saves, 0);
+    stdin.write("\r");
+    await delay(20);
+    assert.equal(saves, 0);
+  } finally {
+    unmount();
+  }
+});
+
 test("ChatApp /model with an argument switches directly and reports failures", async () => {
   const session = switchableFakeSession("s1");
   const { stdin, lastFrame, unmount } = render(
@@ -2096,4 +2387,93 @@ test("formatContextWindowNotice renders window with its source", async () => {
   assert.equal(formatContextWindowNotice(1_000_000, "rule"), "ctx 1M · 内置规则");
   assert.equal(formatContextWindowNotice(8_000, "override"), "ctx 8k · 配置覆盖");
   assert.equal(formatContextWindowNotice(undefined, undefined), "ctx 未知");
+});
+
+test("ChatApp pages archived history, retries failures and keeps live output separate", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const session = makeSession(async function* () {
+    yield { type: "text-delta", delta: "live answer" };
+    yield { type: "message-finish", text: "live answer" };
+  }, sink);
+  let attempts = 0;
+  const source: TranscriptHistorySource = () => ({
+    legacy: false,
+    read: (before) => {
+      if (before === undefined) {
+        return {
+          items: [{ kind: "user", id: "saved-2", text: "saved latest" }],
+          nextBeforeSequence: 2,
+        };
+      }
+      attempts++;
+      if (attempts === 1) throw new Error("temporary read failure");
+      assert.equal(before, 2);
+      return {
+        items: [{ kind: "user", id: "saved-1", text: "saved earlier" }],
+        nextBeforeSequence: undefined,
+      };
+    },
+  });
+  const view = render(
+    h(ChatApp, {
+      session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      historySource: source,
+    }),
+  );
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /saved latest/));
+  await delay(60);
+  view.stdin.write("\u001b[5~");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /历史加载失败/));
+  view.stdin.write("\u001b[5~");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /saved earlier/));
+  assert.equal(attempts, 2);
+  assert.deepEqual(sink.sentInputs, undefined);
+  await submitDraft(view, sink, "new prompt");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /live answer/));
+  const frame = plain(view.lastFrame() ?? "");
+  assert.equal(frame.match(/saved latest/g)?.length, 1);
+  assert.equal(frame.match(/saved earlier/g)?.length, 1);
+  assert.deepEqual(sink.sentInputs, ["new prompt"]);
+});
+
+test("ChatApp session switching reads the selected archive instead of active context", async () => {
+  const first = switchableFakeSession("s1", [{ role: "user", content: "active-only-first" }]);
+  const second = switchableFakeSession("s2", [{ role: "user", content: "active-only-second" }]);
+  const opened: string[] = [];
+  const view = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      historySource: (id) => {
+        opened.push(id);
+        return {
+          legacy: false,
+          read: () => ({
+            items: [{ kind: "user", id: `archive-${id}`, text: `archive ${id}` }],
+            nextBeforeSequence: undefined,
+          }),
+        };
+      },
+      sessionSwitching: {
+        loadItems: () => [{ id: "s2", title: "second archive", meta: "" }],
+        resume: async () => second.session,
+        onRetired: () => {},
+      },
+    }),
+  );
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /archive s1/));
+  view.stdin.write("/resume");
+  await delay(30);
+  view.stdin.write("\r");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /second archive/));
+  view.stdin.write("\r");
+  await waitFor(() => assert.match(view.lastFrame() ?? "", /archive s2/));
+  assert.doesNotMatch(view.lastFrame() ?? "", /archive s1|active-only/);
+  assert.deepEqual(opened, ["s1", "s2"]);
+  assert.deepEqual(second.sent(), []);
 });
