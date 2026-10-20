@@ -1,5 +1,12 @@
 # @roll-agent/browser-use-agent
 
+## 0.27.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @roll-agent/sdk@0.7.2
+
 ## 0.27.1
 
 ### Patch Changes
