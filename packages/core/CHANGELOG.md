@@ -1,5 +1,63 @@
 # @roll-agent/core
 
+## 0.43.0
+
+### Minor Changes
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Expose account-supported ChatGPT subscription xhigh/max reasoning efforts through runtime configuration, chat commands and model-aware configuration controls. Preserve existing API four-level mappings, reject unsupported efforts before inference, and require an explicit effort selection when switching to an incompatible model.
+
+### Patch Changes
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Restore chat display history from the persistent transcript after compaction. Load older records when scrolling up, preserve the reading position and tool outcomes across pages, and keep displayed history separate from model context.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Keep interactive ChatGPT chat available during network and authorization failures. Preserve local history and input, recover credentials and the account model catalog in the background or on send, and add `/reconnect` without restarting chat. Retry transient read failures with bounded timeouts while avoiding automatic replay of rotating token exchanges or uncertain inference requests.
+  
+  Finish saving dispatched token rotations independently of chat cancellation, cancel account-lock waits promptly, synchronize recovered context limits before turns, and retain connection recovery across model switches.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - 修复 ChatGPT 基础聊天模式未配置模型时无法继续的问题：进入聊天前完成选模，非交互入口明确提示提供模型，保留已配置模型的离线启动能力。
+  
+  修复配置台推理档位校验：环境变量与模型资料未解析时保留待验证状态；预览和保存按实际生效的 provider、model、默认及继承档位校验，保留原始环境变量引用。
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Add experimental ChatGPT subscription sign-in for roll chat and scheduled tasks, with shared CLI/configuration UI account management, dynamic subscription models, streaming Responses, local tools, Sampling and compaction. Map reasoning controls to supported subscription parameters and load subscription model choices on demand. Keep API-key routing available.
+  
+  ChatGPT subscriptions are not yet supported by Runtime service, Companion or the legacy `roll chat --server` entry point. Saving ChatGPT as the shared `runtime.provider` / `runtime.model` default also affects those entry points on their next startup; use an API-key provider in their configuration. The configuration UI explains this limitation before saving subscription defaults.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Simplify context compaction to one bounded task summary plus recent original messages, with optional chunked transcript lookup for older details. Keep finalized request budgets, accepted-input persistence, settled-tool accounting and atomic checkpoint commits. Failed or non-shrinking summaries retain history; remove semantic coverage scheduling, archive fallback and the context recovery gate.
+  
+  Write V3 summary checkpoints while preserving legacy session data and protocol events. Reopen V1/V2 sessions with their existing bounded reminders and use the normal summary path for their first V3 compaction. Read old checkpoints, ledgers and recovery notes through paginated transcript lookup; archive only removed legacy summary fragments missing from the transcript. Retention gaps affect the requested historical read without blocking the chat. Keep explicit truncate configuration compatible and preserve existing tool approval behavior.
+  
+  Upgrade the thread database schema to v11. Older Roll versions cannot open the upgraded database; back it up before upgrading and restore that pre-upgrade backup when downgrading Roll.
+  
+  Include retained user instructions as budgeted summary context, so compaction within a long turn can see the current request and authorization. Give recent original user messages precedence over conflicting historical summaries.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Correct compatible request token overestimates without reusing calibration across changed opaque payloads. Recheck finalized requests after settled tool work, update CLI context usage after each completed model step, and include numeric budget details when dispatch remains blocked.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Retain Runtime Protocol 1.6 recovery snapshot and durable event compatibility, with bounded projections for older clients and Node Client. New summary-based sessions report no active recovery gate; older persisted recovery events remain readable without restoring mandatory readback behavior.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Bind edit_file and write_file approvals to each call's original file version, preventing stale previews from authorizing writes after another call changes the file. Preserve the existing edit matching and all-or-fail planning behavior.
+  
+  Replace the handwritten diff implementation with bounded jsdiff rendering and retain complete approval review snapshots. Add CLI review navigation and the Runtime 1.6 approval.preview pagination method; render explicit before/after text when line diff generation exceeds its budget.
+  
+  Reuse the approved display snapshot after a successful write and calculate CLI review pages only when opened. Distinguish truncated previews from complete changes and preserve missing-final-newline markers in the full-text fallback.
+  
+  For third-party Runtime UIs, complete review is an optional local Runtime 1.6 integration: check the negotiated version and `preview.fullDiffAvailable`, then follow `nextOffset` to read the stable, redacted snapshot while the approval remains pending. Existing approval control flows for older negotiated versions remain unchanged. This method does not extend the Relay remote-access allowlist; remote Web clients do not gain full file-diff review through this release.
+  
+  File-tool operation displays carry `{ text, diff }` rather than only a string. Render `truncated` previews as incomplete, and treat `coarse: true` as a full-text comparison whose counts describe the whole before/after files rather than precise added/removed lines.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Preserve bounded legacy context recovery event transport through opt-in Relay Wire 1.3. New summary-based sessions have no active recovery gate. Companion continues to use Wire 1.2 by default, and the browser Relay Client continues to advertise Wire 1.2 and 1.1 by default. Enable Wire 1.3 explicitly only after the Relay service, Companion and browser client all support it; upgrading Roll alone does not enable Wire 1.3.
+  
+  Keep remote App-result queries and capability reporting available when Companion negotiates Runtime 1.6, with the existing producer and host permission checks. Runtime Protocol and Relay Wire versions remain independent: the updated Companion projects Runtime 1.6 data to the existing Wire 1.2 contract without requiring a Relay 1.3 rollout.
+  
+  Upgrade and restart the official Companion together with its bundled Runtime. The official host requires the bundled Runtime to negotiate its matching protocol version; mixing releases is not supported, even though ordinary Runtime clients retain older-version negotiation.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Expose body-free, ephemeral tool-argument generation activity from the model stream and show it in normal chat status. Track concurrent calls independently, coalesce UI metadata updates, and clear generation state at terminal boundaries without approving or executing incomplete calls. Runtime wire events and durable history remain unchanged.
+- Updated dependencies [[`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a)]:
+  - @roll-agent/runtime@0.26.0
+  - @roll-agent/protocol@0.9.0
+  - @roll-agent/client-node@0.7.0
+  - @roll-agent/relay-protocol@0.5.0
+  - @roll-agent/companion@0.6.0
+
 ## 0.42.4
 
 ### Patch Changes

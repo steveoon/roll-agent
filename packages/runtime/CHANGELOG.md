@@ -1,5 +1,45 @@
 # @roll-agent/runtime
 
+## 0.26.0
+
+### Minor Changes
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Preserve accepted user inputs before context maintenance, Skill loading and inference, including cancellation, timeout and failure paths. Add idempotent thread-scoped input receipts with append-only transcript storage and body-free Skill references, and retain historical metadata across resume and fork without replaying turns or Tool side effects.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Correct compatible request token overestimates without reusing calibration across changed opaque payloads. Recheck finalized requests after settled tool work, update CLI context usage after each completed model step, and include numeric budget details when dispatch remains blocked.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Add shared session request projection and body-free, process-local estimates from the actual finalized SDK request. Guard inference dispatch with one bounded summary attempt, preserve settled Tool evidence before stream reconstruction, and distinguish latest input occupancy from cumulative billing. Keep unknown capacities, disabled compaction and estimated multimodal overhead explicit.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Expose body-free, ephemeral tool-argument generation activity from the model stream and show it in normal chat status. Track concurrent calls independently, coalesce UI metadata updates, and clear generation state at terminal boundaries without approving or executing incomplete calls. Runtime wire events and durable history remain unchanged.
+
+### Patch Changes
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Restore chat display history from the persistent transcript after compaction. Load older records when scrolling up, preserve the reading position and tool outcomes across pages, and keep displayed history separate from model context.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - 修复带图片历史因 base64 或二进制载荷被当作摘要文本计入预算而无法压缩的问题。摘要输入仅将 SDK 媒体载荷投影为有界省略描述，保留文字、工具业务 JSON 和原始历史，并明确提示摘要模型不能推测未查看的媒体内容。
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Simplify context compaction to one bounded task summary plus recent original messages, with optional chunked transcript lookup for older details. Keep finalized request budgets, accepted-input persistence, settled-tool accounting and atomic checkpoint commits. Failed or non-shrinking summaries retain history; remove semantic coverage scheduling, archive fallback and the context recovery gate.
+  
+  Write V3 summary checkpoints while preserving legacy session data and protocol events. Reopen V1/V2 sessions with their existing bounded reminders and use the normal summary path for their first V3 compaction. Read old checkpoints, ledgers and recovery notes through paginated transcript lookup; archive only removed legacy summary fragments missing from the transcript. Retention gaps affect the requested historical read without blocking the chat. Keep explicit truncate configuration compatible and preserve existing tool approval behavior.
+  
+  Upgrade the thread database schema to v11. Older Roll versions cannot open the upgraded database; back it up before upgrading and restore that pre-upgrade backup when downgrading Roll.
+  
+  Include retained user instructions as budgeted summary context, so compaction within a long turn can see the current request and authorization. Give recent original user messages precedence over conflicting historical summaries.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Retain Runtime Protocol 1.6 recovery snapshot and durable event compatibility, with bounded projections for older clients and Node Client. New summary-based sessions report no active recovery gate; older persisted recovery events remain readable without restoring mandatory readback behavior.
+
+- [#288](https://github.com/steveoon/roll-agent/pull/288) [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a) Thanks [@steveoon](https://github.com/steveoon)! - Bind edit_file and write_file approvals to each call's original file version, preventing stale previews from authorizing writes after another call changes the file. Preserve the existing edit matching and all-or-fail planning behavior.
+  
+  Replace the handwritten diff implementation with bounded jsdiff rendering and retain complete approval review snapshots. Add CLI review navigation and the Runtime 1.6 approval.preview pagination method; render explicit before/after text when line diff generation exceeds its budget.
+  
+  Reuse the approved display snapshot after a successful write and calculate CLI review pages only when opened. Distinguish truncated previews from complete changes and preserve missing-final-newline markers in the full-text fallback.
+  
+  For third-party Runtime UIs, complete review is an optional local Runtime 1.6 integration: check the negotiated version and `preview.fullDiffAvailable`, then follow `nextOffset` to read the stable, redacted snapshot while the approval remains pending. Existing approval control flows for older negotiated versions remain unchanged. This method does not extend the Relay remote-access allowlist; remote Web clients do not gain full file-diff review through this release.
+  
+  File-tool operation displays carry `{ text, diff }` rather than only a string. Render `truncated` previews as incomplete, and treat `coarse: true` as a full-text comparison whose counts describe the whole before/after files rather than precise added/removed lines.
+- Updated dependencies [[`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a)]:
+  - @roll-agent/protocol@0.9.0
+
 ## 0.25.2
 
 ### Patch Changes

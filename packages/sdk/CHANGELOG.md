@@ -1,5 +1,12 @@
 # @roll-agent/sdk
 
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [[`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a), [`e029235`](https://github.com/steveoon/roll-agent/commit/e029235d500347477bf9214310106cf1ab7c0c5a)]:
+  - @roll-agent/protocol@0.9.0
+
 ## 0.7.1
 
 ### Patch Changes
