@@ -1,5 +1,11 @@
 # @roll-agent/sdk
 
+## 0.7.3
+
+### Patch Changes
+
+- [#291](https://github.com/steveoon/roll-agent/pull/291) [`dd747a8`](https://github.com/steveoon/roll-agent/commit/dd747a84fe68f6e9b5ca8846e1316e575097d27b) Thanks [@steveoon](https://github.com/steveoon)! - 更新 MCP SDK 至 1.32.0，并更新配置台开发依赖 Vite 与 launch-editor，以通过高危依赖审计。MCP HTTP 连接现在默认只跟随同源重定向；使用跨源跳转的服务请直接配置最终 MCP 地址。
+
 ## 0.7.2
 
 ### Patch Changes

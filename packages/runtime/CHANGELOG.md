@@ -1,5 +1,27 @@
 # @roll-agent/runtime
 
+## 0.27.0
+
+### Minor Changes
+
+- [#291](https://github.com/steveoon/roll-agent/pull/291) [`dd747a8`](https://github.com/steveoon/roll-agent/commit/dd747a84fe68f6e9b5ca8846e1316e575097d27b) Thanks [@steveoon](https://github.com/steveoon)! - 为交互式 ChatGPT 会话增加同一轮内的有界断网恢复：默认最多恢复五次，依次等待 1、2、4、8、16 秒，保留原输入、截止时间、步数与已完成的工具结果，只重新生成未完成的模型步骤。恢复期间显示低调的“恢复连接中”，丢弃失败步骤的临时文本与推理，不重复添加用户消息或重启后台命令。
+  
+  Runtime 通过显式可选策略启用恢复；存储失败、权限/额度/协议错误、用户拒绝、取消以及结果未结算的工具均不自动重试。重新生成的工具调用仍需校验和审批，非交互入口、其它 provider 和公开 Runtime 协议维持原行为。
+
+### Patch Changes
+
+- [#291](https://github.com/steveoon/roll-agent/pull/291) [`dd747a8`](https://github.com/steveoon/roll-agent/commit/dd747a84fe68f6e9b5ca8846e1316e575097d27b) Thanks [@steveoon](https://github.com/steveoon)! - 修复 ChatGPT 工具参数生成途中 EOF 未进入同轮恢复的问题；收到完成事件后的不完整工具调用仍作为协议错误终止，不放宽审批和副作用结算边界。
+  
+  按结构化错误码区分额度、授权、模型、推理强度与网络问题，提供脱敏后的处理指引，不再把额度或模型错误缓存成连接故障。
+  
+  本轮 token 用量跨网络恢复及上下文维护续跑累计，保留会话用量逐段结算和最近一次请求上下文占用的原有口径。
+
+- [#291](https://github.com/steveoon/roll-agent/pull/291) [`dd747a8`](https://github.com/steveoon/roll-agent/commit/dd747a84fe68f6e9b5ca8846e1316e575097d27b) Thanks [@steveoon](https://github.com/steveoon)! - 修复 ChatGPT 网络恢复因工具结算或持久化失败而停止后，连接状态错误回到未连接的问题；保留已确认的连接故障，恢复成功或用户取消时正常清理。
+  
+  工具取消结果写入账本后同步通知界面，保留“未执行”或“结果待确认”的记录；修复基础 REPL 报错后工具仍转圈的问题，避免中断后丢失工具状态。
+
+- [#291](https://github.com/steveoon/roll-agent/pull/291) [`dd747a8`](https://github.com/steveoon/roll-agent/commit/dd747a84fe68f6e9b5ca8846e1316e575097d27b) Thanks [@steveoon](https://github.com/steveoon)! - 更新 MCP SDK 至 1.32.0，并更新配置台开发依赖 Vite 与 launch-editor，以通过高危依赖审计。MCP HTTP 连接现在默认只跟随同源重定向；使用跨源跳转的服务请直接配置最终 MCP 地址。
+
 ## 0.26.0
 
 ### Minor Changes
