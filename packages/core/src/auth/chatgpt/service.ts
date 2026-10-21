@@ -513,7 +513,7 @@ export class ChatGptAuthService {
     if (!response.ok) {
       throw new ChatGptAuthError(
         "discovery_failed",
-        "无法获取 ChatGPT 授权服务配置，请稍后重试。",
+        `无法获取 ChatGPT 授权服务配置（HTTP ${response.status}）。请检查 Roll 进程的网络/代理设置后重试。`,
         response.status,
       );
     }
