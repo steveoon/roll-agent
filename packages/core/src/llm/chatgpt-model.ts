@@ -2,6 +2,11 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel } from "ai";
 import { APICallError } from "@ai-sdk/provider";
 import { ChatGptAuthError } from "../auth/chatgpt/errors.ts";
+import {
+  ChatGptResponseError,
+  ChatGptStreamInterruptedError,
+  guardChatGptResponseBody,
+} from "./chatgpt-recovery.ts";
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -93,8 +98,9 @@ function streamError(value: unknown): Error {
       return streamError(value.response.error);
     }
     if (typeof value.message === "string") {
-      return new Error(
-        `${typeof value.code === "string" ? `${value.code}: ` : ""}${value.message}`,
+      return new ChatGptResponseError(
+        typeof value.code === "string" ? value.code : undefined,
+        value.message,
       );
     }
   }
@@ -211,11 +217,12 @@ function verifiedStream(
           if (part.type === "tool-input-start") pendingToolCalls.add(part.id);
           if (part.type === "tool-call") pendingToolCalls.delete(part.toolCallId);
           if (part.type === "finish") {
+            // EOF before completion is transport interruption, even during tool arguments.
+            if (!completed) throw new ChatGptStreamInterruptedError();
             if (pendingToolCalls.size !== 0) {
               throw new Error("ChatGPT stream ended with an incomplete local function call.");
             }
             if (
-              !completed ||
               part.finishReason.unified === "error" ||
               part.usage.inputTokens.total === undefined ||
               part.usage.outputTokens.total === undefined
@@ -231,11 +238,12 @@ function verifiedStream(
           );
         },
         flush() {
+          if (!completed) throw new ChatGptStreamInterruptedError();
           if (pendingToolCalls.size !== 0) {
             throw new Error("ChatGPT stream ended with an incomplete local function call.");
           }
-          if (!completed || !finished) {
-            throw new Error("ChatGPT Responses stream ended before successful completion.");
+          if (!finished) {
+            throw new ChatGptStreamInterruptedError();
           }
         },
       }),
@@ -357,7 +365,13 @@ export function createChatGptModel(options: {
     body.store = false;
     body.stream = true;
     try {
-      return await send(url, { ...init, redirect: "error", headers, body: JSON.stringify(body) });
+      const response = await send(url, {
+        ...init,
+        redirect: "error",
+        headers,
+        body: JSON.stringify(body),
+      });
+      return guardChatGptResponseBody(response, init?.signal, options.onNetworkError);
     } catch (cause) {
       init?.signal?.throwIfAborted();
       const error = new ChatGptAuthError(

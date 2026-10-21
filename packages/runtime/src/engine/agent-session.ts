@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import { buildSessionModelRequest } from "./model-request.ts";
+import { ModelRecoveryBudget, type ModelTurnRecovery } from "./model-recovery.ts";
 import {
   ContextMaintenanceRequired,
   RequestBudgetTracker,
@@ -20,6 +21,7 @@ import {
   streamText,
   wrapLanguageModel,
   InvalidToolInputError,
+  NoOutputGeneratedError,
   type LanguageModelUsage,
   type ModelMessage,
   type StopCondition,
@@ -29,6 +31,7 @@ import {
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
+  LanguageModelV4StreamPart,
   SharedV4ProviderOptions,
 } from "@ai-sdk/provider";
 import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
@@ -220,6 +223,7 @@ export interface SessionToolExclusion {
 
 export interface SessionModelSwitch {
   readonly model: LanguageModelV4;
+  readonly modelRecovery?: ModelTurnRecovery;
   readonly contextWindow?: number;
   readonly contextWindowSource?: ContextWindowSource;
   readonly providerOptions?: SharedV4ProviderOptions;
@@ -231,6 +235,7 @@ export interface SessionModelSwitch {
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
+  readonly modelRecovery?: ModelTurnRecovery;
   readonly sources: readonly AgentToolSource[];
   readonly maxSteps: number;
   readonly policy?: ToolPolicy;
@@ -356,6 +361,7 @@ interface ActiveTurn {
   pausedForContextPressure: boolean;
   contextPressureContinuations: number;
   completedStepCount: number;
+  userRejected: boolean;
 }
 
 interface PendingToolCall {
@@ -411,6 +417,7 @@ function createActiveTurn(): ActiveTurn {
     pausedForContextPressure: false,
     contextPressureContinuations: 0,
     completedStepCount: 0,
+    userRejected: false,
   };
 }
 
@@ -664,6 +671,7 @@ function markSessionExecRoles(
 export class AgentSession {
   readonly id: string;
   private model: LanguageModelV4;
+  private modelRecovery: ModelTurnRecovery | undefined;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
   private readonly onPersist:
@@ -760,6 +768,7 @@ export class AgentSession {
   constructor(options: AgentSessionOptions) {
     this.id = options.id;
     this.model = options.model;
+    this.modelRecovery = options.modelRecovery;
     this.contextWindowSource = options.contextWindowSource;
     this.maxSteps = options.maxSteps;
     const initialMessages = options.initialMessages
@@ -1261,6 +1270,10 @@ export class AgentSession {
     input: NormalizedSessionSendInput,
   ): Promise<void> {
     const turnStartedAt = Date.now();
+    const recoveryPolicy = this.modelRecovery;
+    const recoveryBudget =
+      recoveryPolicy === undefined ? undefined : new ModelRecoveryBudget(recoveryPolicy);
+    let terminalModelError: unknown;
     let turnStart: number | undefined;
     let turnTimeout: ReturnType<typeof setTimeout> | undefined;
     const expireTurn = (): void => {
@@ -1274,6 +1287,7 @@ export class AgentSession {
     };
     const userMessageContent = buildUserMessageContent(input.text, input.attachments);
     try {
+      recoveryPolicy?.onTurnStart?.();
       const rawUserMessage: UserModelMessage = { role: "user", content: userMessageContent };
       let inputSequence: number;
       try {
@@ -1398,6 +1412,8 @@ export class AgentSession {
       });
       this.lastCapabilityTurnContext = capabilityTurnContext;
       const capabilityTurnReminder = buildCapabilityTurnReminder(capabilityTurnContext);
+      // Continuations belong to one send; keep turn usage separate from each SDK stream total.
+      let turnUsage: SessionTokenUsage | undefined;
       while (true) {
         turnStart = this.messages.length;
         activeTurn.pausedForContextPressure = false;
@@ -1438,6 +1454,7 @@ export class AgentSession {
         let ownedPause: ContextMaintenanceRequired | undefined;
         let dispatchedBudget: RequestBudgetSnapshot | undefined;
         let streamMeasuredUsage: SessionTokenUsage | undefined;
+        let providerStepFinished = false;
         const guardedModel = wrapLanguageModel({
           model: this.model,
           middleware: {
@@ -1500,13 +1517,67 @@ export class AgentSession {
               compactionAttempted = false;
               dispatchedBudget = budget;
               this.requestBudgets.dispatchedRequest();
-              return doStream();
+              providerStepFinished = false;
+              const response = await doStream();
+              if (recoveryPolicy === undefined) return response;
+              const reader = response.stream.getReader();
+              let providerStepFailed = false;
+              return {
+                ...response,
+                stream: new ReadableStream<LanguageModelV4StreamPart>({
+                  async pull(controller) {
+                    let next: Awaited<ReturnType<typeof reader.read>>;
+                    try {
+                      next = await reader.read();
+                    } catch (error) {
+                      // Normalize only provider reader failures. Errors from persistence and other
+                      // consumers remain outside this boundary and must never authorize a retry.
+                      providerStepFinished = false;
+                      controller.enqueue({ type: "error", error });
+                      controller.close();
+                      reader.releaseLock();
+                      return;
+                    }
+                    if (next.done) {
+                      controller.close();
+                      reader.releaseLock();
+                      return;
+                    }
+                    const part = next.value;
+                    if (part.type === "finish" && providerStepFailed) return;
+                    if (part.type === "finish" && part.finishReason.unified === "error") {
+                      providerStepFailed = true;
+                      providerStepFinished = false;
+                      // An error finish must not become SDK model-call-end, which starts tools.
+                      controller.enqueue({
+                        type: "error",
+                        error: new Error("模型未成功完成本步骤，未执行待处理工具。"),
+                      });
+                      return;
+                    }
+                    if (part.type === "finish") providerStepFinished = true;
+                    if (part.type === "error") {
+                      providerStepFinished = false;
+                      providerStepFailed = true;
+                    }
+                    controller.enqueue(part);
+                  },
+                  async cancel(reason) {
+                    try {
+                      await reader.cancel(reason);
+                    } finally {
+                      reader.releaseLock();
+                    }
+                  },
+                }),
+              };
             },
           },
         });
         const createStreamResult = () =>
           streamText({
             model: guardedModel,
+            ...(recoveryPolicy === undefined ? {} : { maxRetries: 0 }),
             system: initialRequest.system,
             messages: initialRequest.messages,
             tools: streamTools,
@@ -1522,6 +1593,7 @@ export class AgentSession {
               return { messages: request.messages, system: request.system };
             },
             stopWhen: [
+              () => recoveryPolicy !== undefined && !providerStepFinished,
               stepCountIs(Math.max(1, this.maxSteps - activeTurn.completedStepCount)),
               stopOnUserRejected(),
               invalidScheduleRetryGuard.stop,
@@ -1551,7 +1623,10 @@ export class AgentSession {
               return undefined;
             },
             onLanguageModelCallStart: ({ callId }) => this.toolCoordinator.startBatch(callId),
-            onLanguageModelCallEnd: ({ callId, content, usage }) => {
+            onLanguageModelCallEnd: ({ callId, content, usage, finishReason }) => {
+              // Seal the actual finish chunk, not the reader's look-ahead state. A later
+              // stream failure must not leave already admitted SDK executions waiting forever.
+              if (recoveryPolicy !== undefined && finishReason === "error") return;
               streamMeasuredUsage = addUsage(streamMeasuredUsage ?? {}, toSessionUsage(usage));
               if (dispatchedBudget !== undefined) {
                 this.requestBudgets.measured(dispatchedBudget, usage.inputTokens);
@@ -1571,11 +1646,14 @@ export class AgentSession {
             ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
             onError: () => undefined,
             onStepEnd: (step) => {
+              if (recoveryPolicy !== undefined && !providerStepFinished) return;
               currentStreamCanonicalMessages.push(...rememberCompletedStep(activeTurn, step));
             },
             onAbort: ({ steps }) => {
-              for (const step of steps) {
-                rememberCompletedStep(activeTurn, step);
+              // Recovery mode already recorded verified steps through onStepEnd. SDK's abort
+              // snapshot may also contain a partial step synthesized after a stream error.
+              if (recoveryPolicy === undefined) {
+                for (const step of steps) rememberCompletedStep(activeTurn, step);
               }
             },
           });
@@ -1623,6 +1701,8 @@ export class AgentSession {
         let stepCount = 0;
         let lastStepFinishReason: string | undefined;
         let streamError: string | undefined;
+        let rawStreamError: unknown;
+        let modelStreamFailure = false;
         let streamContextOverflow = false;
         let userRejectionMessage: string | undefined;
         let firstPartSeen = false;
@@ -1657,6 +1737,9 @@ export class AgentSession {
               this.debug(queue, "model", "first stream event", turnStartedAt, { part: part.type });
             }
             switch (part.type) {
+              case "start-step":
+                if (recoveryPolicy !== undefined) queue.push({ type: "model-step-start" });
+                break;
               case "tool-input-start":
                 toolInputActivity.start(part.id, part.toolName);
                 break;
@@ -1829,6 +1912,7 @@ export class AgentSession {
               }
               case "finish-step": {
                 toolInputActivity.clear();
+                if (recoveryPolicy !== undefined && streamError !== undefined) break;
                 const stepUsage = toSessionUsage(part.usage);
                 if (stepUsage.inputTokens !== undefined) {
                   contextInputTokens = stepUsage.inputTokens;
@@ -1868,6 +1952,8 @@ export class AgentSession {
                   break;
                 }
                 streamContextOverflow = isContextWindowError(part.error);
+                rawStreamError = part.error;
+                modelStreamFailure = true;
                 streamError = errorMessage(part.error);
                 break;
               case "abort":
@@ -1891,6 +1977,9 @@ export class AgentSession {
             );
           } else {
             streamContextOverflow = isContextWindowError(error);
+            rawStreamError = error;
+            // Only provider-stream failures are recoverable, never persistence/consumer failures.
+            modelStreamFailure = false;
             streamError = errorMessage(error);
           }
         } finally {
@@ -1930,6 +2019,10 @@ export class AgentSession {
           turnStart = this.messages.length;
           activeTurn.completedStepCount += stepCount;
           if (streamMeasuredUsage !== undefined) {
+            turnUsage =
+              turnUsage === undefined
+                ? streamMeasuredUsage
+                : addUsage(turnUsage, streamMeasuredUsage);
             this.sessionUsage = addUsage(this.sessionUsage, streamMeasuredUsage);
           }
           // No successful call-end is invented for a denied dispatch. Retire its empty batch.
@@ -1945,7 +2038,7 @@ export class AgentSession {
                 text,
                 stoppedAtStepLimit: true,
                 sessionUsage: { ...this.sessionUsage },
-                ...(streamMeasuredUsage === undefined ? {} : { totalUsage: streamMeasuredUsage }),
+                ...(turnUsage === undefined ? {} : { totalUsage: turnUsage }),
                 ...(contextInputTokens === undefined ? {} : { contextInputTokens }),
               });
               return;
@@ -2019,7 +2112,101 @@ export class AgentSession {
           queue.push({ type: "message-start", messageId: randomUUID() });
           continue;
         }
+        if (streamError !== undefined && this.isTurnAborted(activeTurn)) {
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
+          return;
+        }
+        if (
+          streamError !== undefined &&
+          !streamContextOverflow &&
+          modelStreamFailure &&
+          recoveryPolicy?.isRecoverable(rawStreamError) &&
+          recoveryBudget !== undefined &&
+          !activeTurn.userRejected &&
+          userRejectionMessage === undefined &&
+          invalidScheduleRetryGuard.message === undefined
+        ) {
+          // Keep the provider failure even if tool settlement later prevents recovery.
+          // Retry eligibility and the final connection state are separate facts.
+          terminalModelError = rawStreamError;
+          try {
+            await awaitAbortable(result.steps, activeTurn.abortController.signal);
+          } catch (error) {
+            activeTurn.abortController.signal.throwIfAborted();
+            // Only the SDK's documented no-output rejection is expected here. Callback or
+            // settlement failures must stop before batch retirement or another model request.
+            if (!NoOutputGeneratedError.isInstance(error) && error !== rawStreamError) throw error;
+          }
+          const settled = stripReasoningMessages(unpersistedStepMessages(activeTurn));
+          const coveredResults = new Map<string, number>();
+          for (const message of settled) {
+            if (message.role !== "tool") continue;
+            for (const part of message.content) {
+              if (part.type === "tool-result") {
+                coveredResults.set(part.toolCallId, (coveredResults.get(part.toolCallId) ?? 0) + 1);
+              }
+            }
+          }
+          const missingResult = [...this.uncoveredToolExecutions.values()].some((record) => {
+            const count = coveredResults.get(record.toolCallId) ?? 0;
+            coveredResults.set(record.toolCallId, count - 1);
+            return count === 0;
+          });
+          if (
+            missingResult ||
+            [...activeTurn.pendingToolCalls.values()].some((pending) =>
+              this.toolCoordinator.hasExecutionStarted(pending.executionOccurrence),
+            )
+          ) {
+            // Fail closed: ledger evidence must not be marked covered by an unrelated transcript.
+            modelStreamFailure = false;
+            streamError = "网络中断且操作结果尚未完整结算；已停止自动恢复，请先核对结果。";
+          } else {
+            // fullStream and result.steps have drained SDK toolApproval/execute callbacks.
+            this.toolCoordinator.finishTurn();
+            // Commit completed steps before cancelling unexecuted calls so coverage stays truthful.
+            if (settled.length > 0) {
+              this.persistMessages(settled, "raw_transcript");
+              this.messages.push(...settled);
+            }
+            markTurnSegmentPersisted(activeTurn);
+            turnStart = this.messages.length;
+            this.persistRecoveryCancellations(queue, activeTurn);
+            turnStart = this.messages.length;
+            activeTurn.completedStepCount += stepCount;
+            if (streamMeasuredUsage !== undefined) {
+              turnUsage =
+                turnUsage === undefined
+                  ? streamMeasuredUsage
+                  : addUsage(turnUsage, streamMeasuredUsage);
+              this.sessionUsage = addUsage(this.sessionUsage, streamMeasuredUsage);
+            }
+            if (activeTurn.completedStepCount >= this.maxSteps) {
+              queue.push({
+                type: "error",
+                stage: "execute",
+                message: "已达单轮最大工具步数；未完成的回复已丢弃，输入和已完成的操作已保留。",
+              });
+              return;
+            }
+            const recovered = await recoveryBudget.attempt(
+              rawStreamError,
+              activeTurn.abortController.signal,
+              (attempt) => queue.push({ type: "model-recovery", attempt }),
+            );
+            if (recovered.recovered) {
+              terminalModelError = undefined;
+              continue;
+            }
+            rawStreamError = recovered.error;
+            streamError = errorMessage(recovered.error);
+          }
+        }
         if (streamError !== undefined) {
+          if (modelStreamFailure && !streamContextOverflow) terminalModelError = rawStreamError;
+          if (modelStreamFailure && !streamContextOverflow && recoveryPolicy?.formatError) {
+            streamError = recoveryPolicy.formatError(rawStreamError);
+          }
           if (streamContextOverflow && dispatchedBudget !== undefined) {
             providerRejected.add(dispatchedBudget.fingerprint);
             rejectedBudget = dispatchedBudget;
@@ -2177,6 +2364,7 @@ export class AgentSession {
           totalMessages: this.messages.length,
         });
         if (totalUsage) {
+          turnUsage = turnUsage === undefined ? totalUsage : addUsage(turnUsage, totalUsage);
           this.sessionUsage = addUsage(this.sessionUsage, totalUsage);
         }
         const pressureInputTokens = contextInputTokens;
@@ -2194,7 +2382,7 @@ export class AgentSession {
         queue.push({
           type: "message-finish",
           text,
-          ...(totalUsage ? { totalUsage } : {}),
+          ...(turnUsage === undefined ? {} : { totalUsage: turnUsage }),
           sessionUsage: { ...this.sessionUsage },
           ...(contextInputTokens !== undefined ? { contextInputTokens } : {}),
           ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
@@ -2244,10 +2432,16 @@ export class AgentSession {
         clearTimeout(turnTimeout);
       }
       this.toolCoordinator.finishTurn();
-      if (this.activeTurn === activeTurn) {
-        this.activeTurn = undefined;
+      try {
+        recoveryPolicy?.onTurnEnd?.(
+          this.isTurnAborted(activeTurn) ? undefined : terminalModelError,
+        );
+      } finally {
+        if (this.activeTurn === activeTurn) {
+          this.activeTurn = undefined;
+        }
+        queue.close();
       }
-      queue.close();
     }
   }
 
@@ -2526,7 +2720,12 @@ export class AgentSession {
   }
 
   reject(approvalId: string, reason?: string): boolean {
-    return this.gate.resolve(approvalId, { approved: false, ...(reason ? { reason } : {}) });
+    const resolved = this.gate.resolve(approvalId, {
+      approved: false,
+      ...(reason ? { reason } : {}),
+    });
+    if (resolved && this.activeTurn !== undefined) this.activeTurn.userRejected = true;
+    return resolved;
   }
 
   getMessages(): readonly ModelMessage[] {
@@ -2619,6 +2818,7 @@ export class AgentSession {
       throw new Error("会话正在生成回复，稍后再切换模型");
     }
     this.model = input.model;
+    this.modelRecovery = input.modelRecovery;
     this.requestBudgets = new RequestBudgetTracker();
     this.contextWindowSource = input.contextWindowSource;
     this.contextWindow = input.contextWindow;
@@ -3384,7 +3584,7 @@ export class AgentSession {
   ): boolean {
     this.captureCancellationActivity(activeTurn);
     try {
-      this.persistPendingToolCancellations(activeTurn);
+      this.persistPendingToolCancellations(queue, activeTurn);
       return true;
     } catch (error) {
       queue.push({
@@ -3396,7 +3596,67 @@ export class AgentSession {
     }
   }
 
-  private persistPendingToolCancellations(activeTurn: ActiveTurn): void {
+  /** Only called after the failed stream settles and every remaining occurrence is unstarted. */
+  private persistRecoveryCancellations(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+  ): void {
+    const messages: ModelMessage[] = [];
+    for (const pending of activeTurn.pendingToolCalls.values()) {
+      const result = createToolResult(
+        {
+          kind: TOOL_OUTCOME_KINDS.cancelled,
+          reason: SESSION_CANCELLATION_REASONS.runtime,
+          executionState: TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+        },
+        "模型连接中断，本工具调用确定未执行；重新生成的调用仍需正常校验与审批。",
+      );
+      const record = createToolExecutionRecord({
+        toolCallId: pending.toolCallId,
+        agentName: pending.agentName,
+        toolName: pending.toolName,
+        input: pending.input,
+        result,
+      });
+      this.persistToolExecution(record, activeTurn);
+      queue.push({
+        type: "tool-result",
+        toolCallId: pending.toolCallId,
+        agentName: pending.agentName,
+        toolName: pending.toolName,
+        executionId: record.id,
+        outcome: result.outcome,
+        display: result.display,
+        output: result.display,
+        isError: true,
+      });
+      const toolName = `${pending.agentName}__${pending.toolName}`;
+      messages.push(
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: pending.toolCallId, toolName, input: pending.input },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            { type: "tool-result", toolCallId: pending.toolCallId, toolName, output: result.model },
+          ],
+        },
+      );
+      activeTurn.pendingToolCalls.delete(pending.toolCallId);
+    }
+    if (messages.length > 0) {
+      this.persistMessages(messages, "raw_transcript");
+      this.messages.push(...messages);
+    }
+  }
+
+  private persistPendingToolCancellations(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+  ): void {
     const cancellationReason =
       activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
     for (const pending of activeTurn.pendingToolCalls.values()) {
@@ -3422,16 +3682,25 @@ export class AgentSession {
           },
         },
       );
-      this.persistToolExecution(
-        createToolExecutionRecord({
-          toolCallId: pending.toolCallId,
-          agentName: pending.agentName,
-          toolName: pending.toolName,
-          input: pending.input,
-          result,
-        }),
-        activeTurn,
-      );
+      const record = createToolExecutionRecord({
+        toolCallId: pending.toolCallId,
+        agentName: pending.agentName,
+        toolName: pending.toolName,
+        input: pending.input,
+        result,
+      });
+      this.persistToolExecution(record, activeTurn);
+      queue.push({
+        type: "tool-result",
+        toolCallId: pending.toolCallId,
+        agentName: pending.agentName,
+        toolName: pending.toolName,
+        executionId: record.id,
+        outcome: result.outcome,
+        display: result.display,
+        output: result.display,
+        isError: true,
+      });
       activeTurn.pendingToolCalls.delete(pending.toolCallId);
     }
   }

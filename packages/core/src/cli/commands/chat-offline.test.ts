@@ -86,8 +86,10 @@ globalThis.fetch = async () => { throw new TypeError('fetch failed', {cause: {co
     try {
       assert.equal(await result, 0, output);
       assert.equal(entered, true, output);
-      assert.ok(failures >= 2, output);
-      assert.match(output, /ECONNRESET/);
+      assert.equal(failures, 2, output);
+      assert.doesNotMatch(output, /正在连接 ChatGPT|ChatGPT 已连接|ChatGPT 尚未连接/);
+      assert.match(output, /网络中断.*\/reconnect/);
+      assert.doesNotMatch(output, /ECONNRESET|fetch failed/);
       assert.doesNotMatch(output, /synthetic/);
       assert.equal(authStore.read(id)?.credentials?.refreshToken, "synthetic");
     } finally {

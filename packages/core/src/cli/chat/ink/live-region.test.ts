@@ -32,6 +32,8 @@ test("LiveRegion renders streaming assistant text as Markdown preview", () => {
     activeTools: [],
     generatingTools: [],
     compacting: false,
+    recovering: false,
+    modelStepHistoryStart: undefined,
     producedOutput: true,
   };
   const { lastFrame, unmount } = render(h(LiveRegion, { live }));
@@ -57,6 +59,8 @@ test("LiveRegion keeps thinking dim while previewing visible Markdown", () => {
     activeTools: [],
     generatingTools: [],
     compacting: false,
+    recovering: false,
+    modelStepHistoryStart: undefined,
     producedOutput: true,
   };
   const { lastFrame, unmount } = render(h(LiveRegion, { live }));
@@ -84,6 +88,8 @@ test("LiveRegion 活动工具行在窄宽度内单行截断 args，不会多出�
     ],
     generatingTools: [],
     compacting: false,
+    recovering: false,
+    modelStepHistoryStart: undefined,
     producedOutput: false,
   };
   const { lastFrame, unmount } = render(h(Box, { width: 40 }, h(LiveRegion, { live })));

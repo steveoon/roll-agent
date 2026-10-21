@@ -7,6 +7,7 @@ export type {
   ForkSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
+export type { ModelTurnRecovery } from "./engine/model-recovery.ts";
 export type {
   SessionModelSwitch,
   SessionToolExclusion,

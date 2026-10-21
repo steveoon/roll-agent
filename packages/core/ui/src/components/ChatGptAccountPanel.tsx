@@ -214,7 +214,7 @@ export function ChatGptAccountPanel({
               });
             }}
           >
-            Continue with ChatGPT
+            使用 ChatGPT 继续
           </button>
         </div>
       )}

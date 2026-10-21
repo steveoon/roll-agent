@@ -138,6 +138,7 @@ export interface ConversationEngineOptions {
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
+  readonly modelRecovery?: AgentSessionOptions["modelRecovery"];
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   readonly ensureAgentReady?: EnsureAgentReady;
@@ -448,6 +449,7 @@ export class ConversationEngine {
   private readonly fileToolsEnabled: boolean;
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
+  private modelRecovery: AgentSessionOptions["modelRecovery"];
   private modelOverride: LanguageModelV4 | undefined;
   private modelNameOverride: string | undefined;
   private providerNameOverride: string | undefined;
@@ -499,6 +501,7 @@ export class ConversationEngine {
     this.fileToolsEnabled = options.fileToolsEnabled ?? true;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.providerOptions = options.providerOptions;
+    this.modelRecovery = options.modelRecovery;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
     this.acquireAgentUsage =
@@ -701,6 +704,7 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
+      ...(this.modelRecovery === undefined ? {} : { modelRecovery: this.modelRecovery }),
       sources: context.sources,
       toolSchemaPolicy: this.toolSchemaPolicyFor(this.resolveProviderName()),
       onToolExcluded: (exclusion) =>
@@ -804,6 +808,7 @@ export class ConversationEngine {
     const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
     const sessionSwitch = {
       model: input.model,
+      ...(input.modelRecovery === undefined ? {} : { modelRecovery: input.modelRecovery }),
       ...(resolution !== undefined
         ? { contextWindow: resolution.window, contextWindowSource: resolution.source }
         : {}),
@@ -833,6 +838,7 @@ export class ConversationEngine {
     this.modelNameOverride = input.modelName;
     this.providerNameOverride = input.provider;
     this.providerOptions = input.providerOptions;
+    this.modelRecovery = input.modelRecovery;
     this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
     this.structuredOutputReasoning = input.structuredOutputReasoning;
     this.clientManager.setSamplingModel(input.model);

@@ -129,6 +129,8 @@ function createFixture(
         calls: [{ toolCallId: "ephemeral-generation-sentinel", name: "demo-agent.write" }],
       };
       yield { type: "tool-input-activity", calls: [] };
+      yield { type: "model-step-start" };
+      yield { type: "model-recovery", attempt: 1 };
       yield {
         type: "confirmation-required",
         approvalId: IDS.approval,
@@ -405,10 +407,13 @@ test("RuntimeService respondApproval 不带 scope 时 session.approve 收到 und
     await nextTick();
 
     const wire = store.resumeRuntimeEvents(IDS.thread, null);
-    assert.doesNotMatch(JSON.stringify(wire), /ephemeral-generation-sentinel|tool-input-activity/);
+    assert.doesNotMatch(
+      JSON.stringify(wire),
+      /ephemeral-generation-sentinel|tool-input-activity|model-step-start|model-recovery/,
+    );
     assert.doesNotMatch(
       JSON.stringify(store.listTranscriptMessages(IDS.thread)),
-      /ephemeral-generation-sentinel|tool-input-activity/,
+      /ephemeral-generation-sentinel|tool-input-activity|model-step-start|model-recovery/,
     );
     await service.respondApproval(
       runtimeMethodSchemas["approval.respond"].params.parse({

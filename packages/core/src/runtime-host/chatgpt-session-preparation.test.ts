@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { simulateReadableStream } from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import * as runtime from "@roll-agent/runtime";
 import { rollConfigSchema } from "../config/schema.ts";
 import {
@@ -14,7 +16,7 @@ import { createChatGptCatalog } from "./chatgpt-catalog.ts";
 import { createChatGptSessionPreparation } from "./chatgpt-session-preparation.ts";
 
 test("reconnect and first-send preparation refresh live session windows and respect explicit override", async () => {
-  for (const scenario of ["empty", "stale", "override", "first-send"] as const) {
+  for (const scenario of ["empty", "stale", "override", "first-send", "during-turn"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "roll-prepare-window-"));
     const store = new runtime.ThreadStore(dir);
     const auth: ChatGptAuth = {
@@ -24,7 +26,7 @@ test("reconnect and first-send preparation refresh live session windows and resp
         usageUrl: "https://chatgpt.com/settings/usage",
       }),
       cachedModels: () =>
-        scenario === "stale"
+        scenario === "stale" || scenario === "during-turn"
           ? [{ slug: "fixture", displayName: "Fixture", contextWindow: 128000 }]
           : [],
       models: async () => [{ slug: "fixture", displayName: "Fixture", contextWindow: 64000 }],
@@ -41,7 +43,39 @@ test("reconnect and first-send preparation refresh live session windows and resp
         ...(override ? { contextWindow: override } : {}),
       },
     });
-    const selected = await resolveInteractiveChatLlm(config, { auth, deferConnection: true });
+    const resolved = await resolveInteractiveChatLlm(config, { auth, deferConnection: true });
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const model =
+      scenario === "during-turn"
+        ? new MockLanguageModelV4({
+            doStream: async () => {
+              started.resolve();
+              await release.promise;
+              return {
+                stream: simulateReadableStream({
+                  chunks: [
+                    { type: "stream-start", warnings: [] },
+                    { type: "text-start", id: "t" },
+                    { type: "text-delta", id: "t", delta: "done" },
+                    { type: "text-end", id: "t" },
+                    {
+                      type: "finish",
+                      finishReason: { unified: "stop", raw: "stop" },
+                      usage: {
+                        inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0 },
+                        outputTokens: { total: 1, text: 1, reasoning: 0 },
+                      },
+                    },
+                  ],
+                  initialDelayInMs: null,
+                  chunkDelayInMs: null,
+                }),
+              };
+            },
+          })
+        : resolved.model;
+    const selected = { ...resolved, model };
     assert.ok(selected.connection);
     const connection = selected.connection;
     const catalog = createChatGptCatalog(
@@ -74,13 +108,33 @@ test("reconnect and first-send preparation refresh live session windows and resp
     try {
       assert.equal(
         session.getContextWindow(),
-        override ?? (scenario === "stale" ? 128000 : undefined),
+        override ?? (scenario === "stale" || scenario === "during-turn" ? 128000 : undefined),
       );
-      if (scenario === "first-send") await preparation.prepare();
+      if (scenario === "during-turn") {
+        const turn = (async () => {
+          const events: runtime.SessionEvent[] = [];
+          for await (const event of session.send("task")) events.push(event);
+          return events;
+        })();
+        await started.promise;
+        assert.equal(session.canSwitchModel(), false);
+        await connection.prepareRecovery(new AbortController().signal);
+        assert.equal(connection.models[0]?.contextWindow, 64000);
+        assert.equal(session.getContextWindow(), 128000);
+        release.resolve();
+        const events = await turn;
+        assert.equal(events.at(-1)?.type, "message-finish");
+        assert.equal(session.getContextWindow(), 128000);
+        // A ready connection emits no new snapshot here; preparation must still synchronize.
+        await preparation.prepare();
+      } else if (scenario === "first-send") await preparation.prepare();
       else await connection.retry();
       assert.equal(session.getContextWindow(), override ?? 64000);
-      assert.equal(store.listTranscriptMessages(session.id).length, 0);
+      if (scenario !== "during-turn") {
+        assert.equal(store.listTranscriptMessages(session.id).length, 0);
+      }
     } finally {
+      release.resolve();
       preparation.dispose();
       connection.dispose();
       await engine.dispose();
@@ -118,7 +172,7 @@ test("switched ChatGPT model shares recovery, error status and live validation",
   try {
     await connection.retry();
     connection.setEnabled(false);
-    assert.equal(connection.getSnapshot(), "");
+    assert.deepEqual(connection.getSnapshot(), { state: "disabled" });
     const next = await resolveInteractiveChatSwitch(
       config,
       { provider: "chatgpt", model: "fixture" },
@@ -135,7 +189,10 @@ test("switched ChatGPT model shares recovery, error status and live validation",
         }),
       /网络连接中断/,
     );
-    assert.match(connection.getSnapshot(), /网络连接中断/);
+    const failed = connection.getSnapshot();
+    assert.ok(failed.state === "failed");
+    assert.match(failed.message, /网络中断.*\/reconnect/);
+    assert.doesNotMatch(failed.message, /fetch failed/);
     assert.equal(calls, 1);
     available = false;
     await connection.retry();

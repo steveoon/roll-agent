@@ -3283,7 +3283,10 @@ test("Runtime Protocol 1.1 用户拒绝保持成功业务结果并阻止 Tool �
 });
 
 test("Runtime Protocol 1.1 在 response 已关联但尚未 settle 时仍先收口审批", async (t) => {
-  const harness = createApprovalProtocolHarness();
+  let executionCount = 0;
+  const harness = createApprovalProtocolHarness(() => {
+    executionCount += 1;
+  });
   const client = attachRuntimeProtocolClient(harness.clientConn);
   t.after(() => harness.close());
 
@@ -3356,10 +3359,14 @@ test("Runtime Protocol 1.1 在 response 已关联但尚未 settle 时仍先收�
     ),
     false,
   );
-  assert.equal(
-    client.events.some((envelope) => envelope.event.type === "tool.completed"),
-    false,
-  );
+  assert.equal(executionCount, 0);
+  const tools = client.events.filter((envelope) => envelope.event.type === "tool.completed");
+  assert.equal(tools.length, 1);
+  const tool = tools[0];
+  assert.ok(tool?.event.type === "tool.completed");
+  assert.equal(tool.event.outcome?.kind, "cancelled");
+  assert.ok(client.events.indexOf(resolved) < client.events.indexOf(tool));
+  assert.ok(client.events.indexOf(tool) < client.events.indexOf(terminal));
 
   const reopened = (await client.request(4, RUNTIME_METHODS.threadOpen, {
     threadId: created.thread.id,
@@ -3383,7 +3390,10 @@ test("Runtime Protocol 1.1 在 response 已关联但尚未 settle 时仍先收�
 });
 
 test("Runtime Protocol 1.1 对 id:null Client error 立即 fail-closed", async (t) => {
-  const harness = createApprovalProtocolHarness();
+  let executionCount = 0;
+  const harness = createApprovalProtocolHarness(() => {
+    executionCount += 1;
+  });
   const client = attachRuntimeProtocolClient(harness.clientConn);
   t.after(() => harness.close());
 
@@ -3436,10 +3446,14 @@ test("Runtime Protocol 1.1 对 id:null Client error 立即 fail-closed", async (
     "id:null 后 Turn 未结束",
   );
   assert.equal(terminal.event.type, "turn.failed");
-  assert.equal(
-    client.events.some((envelope) => envelope.event.type === "tool.completed"),
-    false,
-  );
+  assert.equal(executionCount, 0);
+  const tools = client.events.filter((envelope) => envelope.event.type === "tool.completed");
+  assert.equal(tools.length, 1);
+  const tool = tools[0];
+  assert.ok(tool?.event.type === "tool.completed");
+  assert.equal(tool.event.outcome?.kind, "cancelled");
+  assert.ok(client.events.indexOf(resolved) < client.events.indexOf(tool));
+  assert.ok(client.events.indexOf(tool) < client.events.indexOf(terminal));
 });
 
 test("Runtime Protocol 1.1 handler error 终止 Turn 且不冒充用户拒绝", async (t) => {
@@ -3493,10 +3507,13 @@ test("Runtime Protocol 1.1 handler error 终止 Turn 且不冒充用户拒绝", 
   );
   assert.equal(terminal.event.type, "turn.failed");
   assert.equal(executionCount, 0);
-  assert.equal(
-    client.events.some((envelope) => envelope.event.type === "tool.completed"),
-    false,
-  );
+  const tools = client.events.filter((envelope) => envelope.event.type === "tool.completed");
+  assert.equal(tools.length, 1);
+  const tool = tools[0];
+  assert.ok(tool?.event.type === "tool.completed");
+  assert.equal(tool.event.outcome?.kind, "cancelled");
+  assert.ok(client.events.indexOf(resolved) < client.events.indexOf(tool));
+  assert.ok(client.events.indexOf(tool) < client.events.indexOf(terminal));
 });
 
 test("Runtime Protocol 1.0 拒绝带 scope 的 approval.respond", async (t) => {

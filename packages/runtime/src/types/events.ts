@@ -31,6 +31,9 @@ export type SessionEvent =
       readonly data?: SessionDebugData;
     }
   | { readonly type: "message-start"; readonly messageId: string }
+  /** Local presentation boundaries for opt-in model recovery; never public wire events. */
+  | { readonly type: "model-step-start" }
+  | { readonly type: "model-recovery"; readonly attempt: number }
   | { readonly type: "text-delta"; readonly delta: string }
   | { readonly type: "reasoning-start"; readonly reasoningId: string }
   | {

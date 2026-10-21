@@ -8,6 +8,7 @@ export const TURN_ACTIVITY_KINDS = {
   tool: "tool",
   toolInput: "tool-input",
   compacting: "compacting",
+  recovering: "recovering",
   waitingUser: "waiting-user",
   cancelling: "cancelling",
 } as const;
@@ -56,6 +57,9 @@ export function resolveTurnActivity(state: ChatUiState): TurnActivity | undefine
       animated: false,
       timed: false,
     });
+  }
+  if (state.live.recovering) {
+    return activity(TURN_ACTIVITY_KINDS.recovering, "恢复连接中…");
   }
   if (state.live.compacting) {
     return activity(TURN_ACTIVITY_KINDS.compacting, "压缩上下文中…");

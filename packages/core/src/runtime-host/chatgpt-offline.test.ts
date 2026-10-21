@@ -61,12 +61,14 @@ test("interactive startup with no cache performs no network request; reconnect i
     assert.equal(selected.modelName, "fixture");
     assert.deepEqual(selected.providerOptions, { openai: { reasoningEffort: "max" } });
     await assert.rejects(connection.retry(), /网络连接中断/);
-    assert.match(connection.getSnapshot(), /输入已保留.*reconnect/);
+    const failed = connection.getSnapshot();
+    assert.ok(failed.state === "failed");
+    assert.match(failed.message, /输入已保留.*reconnect/);
     f.recover();
     await Promise.all([connection.retry(), connection.ensure()]);
     assert.equal(f.calls(), 2);
     assert.equal(f.tokens(), 0);
-    assert.match(connection.getSnapshot(), /已连接/);
+    assert.deepEqual(connection.getSnapshot(), { state: "connected" });
     assert.equal(connection.models[0]?.slug, "fixture");
   } finally {
     connection.dispose();

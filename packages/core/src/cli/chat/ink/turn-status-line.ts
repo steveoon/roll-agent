@@ -4,6 +4,8 @@ import { Box, Text } from "ink";
 import { displayWidth } from "./display-width.ts";
 import { Spinner } from "./spinner.ts";
 import { TURN_ACTIVITY_KINDS, type TurnActivity, type TurnActivityKind } from "./turn-activity.ts";
+import type { ChatConnectionSnapshot } from "../../../runtime-host/chatgpt-connection.ts";
+import { ConnectionBadge, connectionBadgeText } from "./connection-badge.ts";
 
 const TIMER_INTERVAL_MS = 250;
 const STATUS_MARKER_WIDTH = 2;
@@ -17,6 +19,7 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme
 
 const ACTIVITY_COLORS: Record<TurnActivityKind, string> = {
   [TURN_ACTIVITY_KINDS.waitingModel]: "gray",
+  [TURN_ACTIVITY_KINDS.recovering]: "gray",
   [TURN_ACTIVITY_KINDS.reasoning]: "magenta",
   [TURN_ACTIVITY_KINDS.replying]: "green",
   [TURN_ACTIVITY_KINDS.tool]: "cyan",
@@ -114,9 +117,11 @@ export function composeTurnStatusLine(
 export function TurnStatusLine({
   activity,
   width,
+  connection,
 }: {
   readonly activity: TurnActivity;
   readonly width: number;
+  readonly connection?: ChatConnectionSnapshot | undefined;
 }): ReactElement {
   const renderedAt = Date.now();
   const turnStartedAt = useRef(renderedAt);
@@ -134,11 +139,13 @@ export function TurnStatusLine({
     };
   }, []);
   const currentTime = Math.max(now, renderedAt);
+  const connectionText = connectionBadgeText(connection);
+  const connectionWidth = connectionText ? displayWidth(` · ${connectionText}`) : 0;
   const layout = composeTurnStatusLayout(
     activity,
     currentTime - activityTiming.current.startedAt,
     currentTime - turnStartedAt.current,
-    Math.max(0, width - STATUS_HORIZONTAL_PADDING - STATUS_MARKER_WIDTH),
+    Math.max(0, width - STATUS_HORIZONTAL_PADDING - STATUS_MARKER_WIDTH - connectionWidth),
   );
   return h(
     Box,
@@ -153,5 +160,7 @@ export function TurnStatusLine({
     layout.phaseTime === undefined ? null : h(Text, { dimColor: true }, `  ${layout.phaseTime}`),
     layout.spacer.length > 0 ? h(Text, null, layout.spacer) : null,
     layout.turnTime.length > 0 ? h(Text, { dimColor: true }, layout.turnTime) : null,
+    connectionText ? h(Text, { dimColor: true }, " · ") : null,
+    connectionText ? h(ConnectionBadge, { snapshot: connection }) : null,
   );
 }

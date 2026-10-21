@@ -140,12 +140,19 @@ test("Ink keeps draft during failed background auth, /reconnect recovers without
   );
   const frame = () => view.lastFrame() ?? "";
   try {
-    await until(() => assert.match(frame(), /正在连接/));
+    await until(() => assert.equal(selected.connection?.getSnapshot().state, "connecting"));
+    assert.match(frame(), /ChatGPT/);
+    assert.doesNotMatch(frame(), /⚠|正在连接|尚未连接|本地会话可用/);
     view.stdin.write("keep-this-draft");
     await until(() => assert.match(frame(), /keep-this-draft/));
     release();
     await until(() => assert.match(frame(), /网络中断/));
     assert.match(frame(), /keep-this-draft/);
+    assert.equal(frame().split("网络中断").length - 1, 1);
+    selected.connection.setEnabled(false);
+    await until(() => assert.doesNotMatch(frame(), /ChatGPT|网络中断/));
+    selected.connection.setEnabled(true);
+    await until(() => assert.match(frame(), /网络中断/));
     assert.equal(exits, 0);
     assert.equal(submits, 0);
     // Clear the edit buffer, then explicitly reconnect; no old user turn is replayed.
@@ -158,7 +165,8 @@ test("Ink keeps draft during failed background auth, /reconnect recovers without
     view.stdin.write("/reconnect");
     await delay(20);
     view.stdin.write("\r");
-    await until(() => assert.match(frame(), /已连接/));
+    await until(() => assert.match(frame(), /ChatGPT ✓/));
+    assert.doesNotMatch(frame(), /网络中断|已连接|可继续发送消息|⚠/);
     assert.equal(modelRequests, 2);
     assert.equal(submits, 0);
     assert.equal(session.getMessages().length, 0);

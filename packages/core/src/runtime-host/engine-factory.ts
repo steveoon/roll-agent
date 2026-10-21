@@ -51,6 +51,7 @@ export interface CreateChatEngineInput {
   readonly model: NonNullable<ChatEngineOptions["model"]>;
   readonly store: ThreadStoreInstance;
   readonly surface: ChatEngineSurface;
+  readonly modelRecovery?: NonNullable<ChatEngineOptions["modelRecovery"]>;
   readonly policy?: NonNullable<ChatEngineOptions["policy"]>;
   readonly resolveDynamicCapabilityContext?: NonNullable<
     ChatEngineOptions["resolveDynamicCapabilityContext"]
@@ -88,6 +89,9 @@ export function createChatEngine(input: CreateChatEngineInput) {
     hostMode: chatHostModeForSurface(input.surface),
     policy: input.policy ?? createToolPolicy(input.runtime, input.config),
     maxSteps: input.config.runtime.maxSteps,
+    ...(chatHostModeForSurface(input.surface) === "interactive" && input.modelRecovery
+      ? { modelRecovery: input.modelRecovery }
+      : {}),
     ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
     ...(input.structuredOutputProviderOptions
       ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }

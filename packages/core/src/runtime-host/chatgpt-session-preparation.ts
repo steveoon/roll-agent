@@ -25,15 +25,23 @@ export function createChatGptSessionPreparation(options: {
     synchronize,
     dispose: unsubscribe,
     async prepare(signal?: AbortSignal): Promise<void> {
-      if (options.getSelection().provider !== "chatgpt") return;
+      const selection = options.getSelection();
+      if (selection.provider !== "chatgpt") return;
       try {
-        await options.connection.prepare(signal);
-      } catch {
-        // Runtime still records the input and surfaces the cached connection error.
-        // Do not bypass its input persistence by throwing a preflight network error.
+        selection.modelRecovery?.onTurnStart?.();
+        try {
+          await options.connection.prepare(signal);
+        } catch {
+          // Runtime still records the input and surfaces the cached connection error.
+          // Do not bypass its input persistence by throwing a preflight network error.
+        }
+        signal?.throwIfAborted();
+        synchronize();
+      } catch (error) {
+        // A cancelled or failed preparation never hands ownership to Runtime's finalizer.
+        selection.modelRecovery?.onTurnEnd?.();
+        throw error;
       }
-      signal?.throwIfAborted();
-      synchronize();
     },
   };
 }

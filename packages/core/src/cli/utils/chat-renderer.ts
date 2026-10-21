@@ -1,7 +1,13 @@
 import type { Ora } from "ora";
 import chalk from "chalk";
 import { isCancel, select } from "@clack/prompts";
-import { getFileChangeDisplay, type FileChangeDiff, type SessionEvent } from "@roll-agent/runtime";
+import {
+  getFileChangeDisplay,
+  TOOL_CANCELLATION_EXECUTION_STATES,
+  TOOL_OUTCOME_KINDS,
+  type FileChangeDiff,
+  type SessionEvent,
+} from "@roll-agent/runtime";
 import { createSpinner, log } from "./output.ts";
 import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
@@ -166,6 +172,7 @@ export class ChatRenderer {
   private compactionSpinner: Ora | undefined;
   private messageSpinner: Ora | undefined;
   private streaming = false;
+  private stepText: string | undefined;
   private diffDisplayMode: DiffDisplayMode = "collapsed";
 
   constructor(
@@ -194,9 +201,35 @@ export class ChatRenderer {
         log.debug(formatDebugEvent(event));
         break;
       case "message-start":
+        this.stepText = undefined;
         this.startMessageSpinner();
         break;
+      case "model-step-start":
+        this.stepText = "";
+        this.startMessageSpinner();
+        break;
+      case "model-recovery":
+        this.stepText = "";
+        for (const spinner of this.spinners.values()) spinner.stop();
+        this.spinners.clear();
+        this.toolLabels.clear();
+        this.stopMessageSpinner();
+        this.messageSpinner = createSpinner(chalk.gray("恢复连接中…"));
+        this.messageSpinner.start();
+        break;
+      case "step-finish":
+        if (this.stepText !== undefined && this.stepText.length > 0) {
+          this.stopMessageSpinner();
+          process.stdout.write(this.stepText);
+          this.streaming = true;
+          this.stepText = "";
+        }
+        break;
       case "text-delta":
+        if (this.stepText !== undefined) {
+          this.stepText += event.delta;
+          break;
+        }
         this.stopMessageSpinner();
         process.stdout.write(event.delta);
         this.streaming = true;
@@ -232,7 +265,18 @@ export class ChatRenderer {
       case "tool-result": {
         const spinner = this.spinners.get(event.toolCallId);
         if (spinner) {
-          if (event.isError) {
+          if (event.outcome?.kind === TOOL_OUTCOME_KINDS.cancelled) {
+            const label =
+              event.outcome.executionState === TOOL_CANCELLATION_EXECUTION_STATES.notExecuted
+                ? "未执行"
+                : event.outcome.executionState === TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown
+                  ? "结果待确认"
+                  : "已中断";
+            spinner.stopAndPersist({
+              symbol: chalk.gray("■"),
+              text: `${spinner.text} ${chalk.gray(label)}`,
+            });
+          } else if (event.isError) {
             spinner.fail();
           } else {
             spinner.succeed();
@@ -335,6 +379,7 @@ export class ChatRenderer {
         break;
       }
       case "turn-cancelled":
+        this.stepText = undefined;
         this.stopMessageSpinner();
         this.stopCompactionSpinner();
         this.flushLine();
@@ -352,13 +397,24 @@ export class ChatRenderer {
         }
         break;
       case "error":
+        this.stepText = undefined;
         this.stopMessageSpinner();
         this.stopCompactionSpinner();
         this.flushLine();
+        for (const spinner of this.spinners.values()) {
+          spinner.warn(`${spinner.text} ${chalk.yellow("结果待确认")}`);
+        }
+        this.spinners.clear();
+        this.toolLabels.clear();
         log.error(event.message);
         break;
       case "message-finish": {
         this.stopMessageSpinner();
+        if (this.stepText) {
+          process.stdout.write(this.stepText);
+          this.streaming = true;
+        }
+        this.stepText = undefined;
         this.flushLine();
         if (event.text.length === 0 && (event.totalUsage?.outputTokens ?? 0) > 0) {
           log.warn("模型本轮只返回了 thinking/reasoning，没有生成可见回复");

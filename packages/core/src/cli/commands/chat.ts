@@ -1,8 +1,4 @@
-import {
-  ChatGptConnection,
-  chatGptConnectionError,
-  type ChatConnection,
-} from "../../runtime-host/chatgpt-connection.ts";
+import { ChatGptConnection, type ChatConnection } from "../../runtime-host/chatgpt-connection.ts";
 import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-session-preparation.ts";
 import { basename, join } from "node:path";
 import { defineCommand } from "citty";
@@ -336,10 +332,18 @@ export async function runRepl(
   session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
-  const unsubscribeConnection = io.connection?.subscribe(() => {
-    const message = io.connection?.getSnapshot();
-    if (message) log.info(message);
-  });
+  let lastConnectionFailure: string | undefined;
+  const reportConnectionFailure = () => {
+    const snapshot = io.connection?.getSnapshot();
+    const message =
+      snapshot?.state === "failed" && snapshot.reportedInTurn !== true
+        ? snapshot.message
+        : undefined;
+    if (message !== undefined && message !== lastConnectionFailure) log.warn(message);
+    lastConnectionFailure = message;
+  };
+  const unsubscribeConnection = io.connection?.subscribe(reportConnectionFailure);
+  reportConnectionFailure();
   io.connection?.start();
   let titled = !isNewSession;
   const initial = { id: session.id, isNew: isNewSession, submitted: false };
@@ -359,7 +363,8 @@ export async function runRepl(
       if (input === "/reconnect") {
         if (io.connection) {
           // Recovery never queues/replays user turns or tools.
-          io.connection.retry().catch((error: unknown) => log.warn(chatGptConnectionError(error)));
+          // The subscription reports the failed snapshot once, including explicit retries.
+          io.connection.retry().catch(() => {});
         } else log.info("当前连接无需 ChatGPT 授权恢复。");
         continue;
       }
@@ -660,6 +665,7 @@ export default defineCommand({
     try {
       selection = await resolveInteractiveChatLlm(config, {
         deferConnection: !args.message && !args.json && !needsStartupModel,
+        enableRecovery: !args.message && !args.json,
         ...(canPrompt
           ? {
               selectModel: async (models: ChatGptModels) => {
@@ -721,8 +727,13 @@ export default defineCommand({
 
     const runtime = await loadRuntime();
     const { ThreadStore } = runtime;
-    const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
-      selection;
+    const {
+      model,
+      modelRecovery,
+      providerOptions,
+      structuredOutputProviderOptions,
+      structuredOutputReasoning,
+    } = selection;
     const store = new ThreadStore(config.runtime.threadsDir);
     const modelCatalog = createChatGptCatalog(
       runtime,
@@ -762,6 +773,7 @@ export default defineCommand({
         surface,
         modelCatalog,
         shellEnv: chatCliScope.env,
+        ...(modelRecovery ? { modelRecovery } : {}),
         ...(providerOptions ? { providerOptions } : {}),
         ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
         ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
