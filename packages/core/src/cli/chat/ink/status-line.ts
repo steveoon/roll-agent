@@ -14,6 +14,8 @@ import {
 import { displayWidth } from "./display-width.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { thinkingLabel } from "./thinking.ts";
+import type { ChatConnectionSnapshot } from "../../../runtime-host/chatgpt-connection.ts";
+import { ConnectionBadge, connectionBadgeText } from "./connection-badge.ts";
 
 const PRESSURE_STYLES = {
   ok: { dimColor: true },
@@ -53,7 +55,11 @@ export interface StatusSegmentView {
   readonly props: SegmentProps;
 }
 
-export function composeStatusSegments(status: StatusState, width: number): StatusSegmentView[] {
+export function composeStatusSegments(
+  status: StatusState,
+  width: number,
+  connection?: ChatConnectionSnapshot,
+): StatusSegmentView[] {
   const parts = computeUsageParts(
     status.turnUsage,
     status.sessionUsage,
@@ -69,6 +75,15 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
       props: status.thinkingLevel === "off" ? { color: "yellow" } : { dimColor: true },
     },
   ];
+  const connectionText = connectionBadgeText(connection);
+  if (connectionText) {
+    specs.splice(1, 0, {
+      key: "connection",
+      full: connectionText,
+      compact: connectionText,
+      props: connection?.state === "failed" ? { color: "yellow" } : { dimColor: true },
+    });
+  }
   if (status.autoApprove) {
     specs.push({
       key: "auto",
@@ -143,11 +158,17 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
 export function StatusLine({
   status,
   width,
+  connection,
 }: {
   readonly status: StatusState;
   readonly width: number;
+  readonly connection?: ChatConnectionSnapshot | undefined;
 }): ReactElement {
-  const segments = composeStatusSegments(status, Math.max(1, width - STATUS_HORIZONTAL_PADDING));
+  const segments = composeStatusSegments(
+    status,
+    Math.max(1, width - STATUS_HORIZONTAL_PADDING),
+    connection,
+  );
   return h(
     Box,
     { width, paddingX: 1 },
@@ -156,7 +177,9 @@ export function StatusLine({
       { wrap: "truncate-end" },
       ...segments.flatMap((segment, index) => [
         ...(index > 0 ? [h(Text, { key: `${segment.key}-sep`, dimColor: true }, SEPARATOR)] : []),
-        h(Text, { key: segment.key, ...segment.props }, segment.text),
+        segment.key === "connection"
+          ? h(ConnectionBadge, { key: segment.key, snapshot: connection })
+          : h(Text, { key: segment.key, ...segment.props }, segment.text),
       ]),
     ),
   );

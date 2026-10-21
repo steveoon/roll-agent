@@ -2706,6 +2706,14 @@ test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled out
   assert.equal(record.outcome.kind, "cancelled");
   assert.equal(record.outcome.reason, "user");
   assert.equal(record.outcome.executionState, "outcome_unknown");
+  const results = events.filter((event) => event.type === "tool-result");
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.executionId, record.id);
+  assert.deepEqual(results[0]?.outcome, record.outcome);
+  assert.ok(
+    events.findIndex((event) => event === results[0]) <
+      events.findIndex((event) => event.type === "turn-cancelled"),
+  );
   assert.equal(record.input.encoding, "json");
   if (record.input.encoding === "json") {
     assert.deepEqual(record.input.value, { q: "cancel-me" });

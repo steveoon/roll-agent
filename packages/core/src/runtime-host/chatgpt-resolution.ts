@@ -1,5 +1,6 @@
 import { wrapLanguageModel } from "ai";
 import { ChatGptConnection } from "./chatgpt-connection.ts";
+import { createChatGptTurnRecovery } from "./chatgpt-turn-recovery.ts";
 import { ChatGptAuthError } from "../auth/chatgpt/errors.ts";
 import type { EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
@@ -28,6 +29,7 @@ export type InteractiveChatLlm = ReturnType<typeof resolveChatLlmCalls> & {
   readonly accountId?: string;
   readonly models?: ChatGptModels;
   readonly connection?: ChatGptConnection;
+  readonly modelRecovery?: NonNullable<EngineModelSwitch["modelRecovery"]>;
 };
 
 /** Subscription identity/model resolution is async; API-key resolvers remain synchronous. */
@@ -38,6 +40,7 @@ export async function resolveInteractiveChatLlm(
     readonly selectModel?: (models: ChatGptModels) => Promise<string | undefined>;
     readonly auth?: ChatGptAuth;
     readonly deferConnection?: boolean;
+    readonly enableRecovery?: boolean;
     readonly connection?: ChatGptConnection;
   } = {},
 ): Promise<InteractiveChatLlm> {
@@ -63,7 +66,8 @@ export async function resolveInteractiveChatLlm(
   const status = await auth.status();
   const accountId = options.accountId ?? config.runtime.chatgptAccountId ?? status.currentAccountId;
   if (options.deferConnection) {
-    const models = accountId ? (auth.cachedModels?.(accountId) ?? []) : [];
+    const models =
+      options.connection?.models ?? (accountId ? (auth.cachedModels?.(accountId) ?? []) : []);
     const modelName = config.runtime.model ?? "未选择 ChatGPT 模型";
     const connection = options.connection ?? new ChatGptConnection(auth, accountId, models);
     const effortOptions = (level: RollConfig["runtime"]["thinkingLevel"]) => ({
@@ -106,6 +110,7 @@ export async function resolveInteractiveChatLlm(
       ...(accountId ? { accountId } : {}),
       models,
       connection,
+      ...(options.enableRecovery ? { modelRecovery: createChatGptTurnRecovery(connection) } : {}),
       model,
       providerOptions: effortOptions(config.runtime.thinkingLevel),
       structuredOutputProviderOptions: effortOptions(
@@ -125,6 +130,25 @@ export async function resolveInteractiveChatLlm(
   if (!selectedModel) {
     throw new Error(
       `当前 ChatGPT 账号不提供模型 "${modelName}"。请运行 roll auth chatgpt models --account ${accountId} 后重新选择。`,
+    );
+  }
+  if (options.enableRecovery) {
+    // Startup model selection and deferred startup share live model/effort authorization,
+    // including after recovery refreshes the catalog. Noninteractive resolution is unchanged.
+    chatGptThinkingOptions(config.runtime.thinkingLevel, selectedModel);
+    chatGptThinkingOptions(
+      config.runtime.compaction.thinkingLevel ?? config.runtime.thinkingLevel,
+      selectedModel,
+    );
+    return resolveInteractiveChatLlm(
+      { ...config, runtime: { ...config.runtime, model: modelName } },
+      {
+        auth,
+        accountId,
+        connection: options.connection ?? new ChatGptConnection(auth, accountId, models),
+        deferConnection: true,
+        enableRecovery: true,
+      },
     );
   }
   return {
@@ -175,13 +199,14 @@ export async function resolveInteractiveChatSwitch(
     {
       ...(accountId !== undefined ? { accountId } : {}),
       ...(auth ? { auth } : {}),
-      ...(connection ? { connection, deferConnection: true } : {}),
+      ...(connection ? { connection, deferConnection: true, enableRecovery: true } : {}),
     },
   );
   return {
     provider: resolution.provider,
     modelName: resolution.modelName,
     model: resolution.model,
+    ...(resolution.modelRecovery ? { modelRecovery: resolution.modelRecovery } : {}),
     ...(resolution.providerOptions ? { providerOptions: resolution.providerOptions } : {}),
     ...(resolution.structuredOutputProviderOptions
       ? { structuredOutputProviderOptions: resolution.structuredOutputProviderOptions }

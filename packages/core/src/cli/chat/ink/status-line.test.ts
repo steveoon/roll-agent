@@ -92,6 +92,30 @@ test("composeStatusSegments omits usage segments before the first turn", () => {
   assert.deepEqual(keys, ["model", "think"]);
 });
 
+test("connection badge stays beside the model, quiet normally and visible on narrow screens", () => {
+  for (const state of ["idle", "connecting", "connected"] as const) {
+    const segments = composeStatusSegments(BUSY_STATUS, 40, { state });
+    assert.deepEqual(
+      segments.slice(0, 2).map(({ key }) => key),
+      ["model", "connection"],
+    );
+    const badge = segments.find(({ key }) => key === "connection");
+    assert.match(badge?.text ?? "", /ChatGPT/);
+    assert.deepEqual(badge?.props, { dimColor: true });
+  }
+  const failed = composeStatusSegments(BUSY_STATUS, 40, {
+    state: "failed",
+    message: "offline",
+  }).find(({ key }) => key === "connection");
+  assert.equal(failed?.props.color, "yellow");
+  assert.equal(failed?.text, "ChatGPT !");
+  assert.ok(
+    !composeStatusSegments(BUSY_STATUS, 40, { state: "disabled" }).some(
+      ({ key }) => key === "connection",
+    ),
+  );
+});
+
 test("StatusLine keeps a one-column gutter so the model id lines up with the prompt", () => {
   const { lastFrame, unmount } = render(h(StatusLine, { status: BUSY_STATUS, width: 40 }));
   const frame = lastFrame() ?? "";

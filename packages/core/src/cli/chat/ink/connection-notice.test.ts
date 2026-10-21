@@ -3,64 +3,48 @@ import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createElement as h } from "react";
 import { cleanup, render } from "ink-testing-library";
-import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
+import type { ChatConnectionSnapshot } from "../../../runtime-host/chatgpt-connection.ts";
 import { ConnectionNotice } from "./connection-notice.ts";
 
 afterEach(() => cleanup());
 
-test("connection notices enter history once per transition and never occupy the footer", async () => {
-  let message = "ChatGPT 已连接；可继续发送消息，/model 查看可用模型。";
-  const listeners = new Set<() => void>();
-  let starts = 0;
-  const connection: ChatConnection = {
-    getSnapshot: () => message,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    start: () => {
-      starts++;
-    },
-    retry: async () => {},
-  };
-  const notices: string[] = [];
-  const props = () => ({
-    connection,
-    onNotice: (text: string) => {
-      notices.push(text);
-    },
-  });
-  const view = render(h(ConnectionNotice, props()));
+test("connection notice is silent for normal states and replaces rather than retains failures", async () => {
+  const props = (snapshot: ChatConnectionSnapshot | undefined) => ({ snapshot, width: 80 });
+  const view = render(h(ConnectionNotice, props({ state: "idle" })));
   try {
-    await delay(30);
-    assert.deepEqual(notices, [message]);
+    for (const state of ["idle", "connecting", "connected", "disabled"] as const) {
+      view.rerender(h(ConnectionNotice, props({ state })));
+      await delay(20);
+      assert.equal(view.lastFrame(), "");
+    }
+    const failed = { state: "failed", message: "网络中断；/reconnect 重试连接。" } as const;
+    view.rerender(h(ConnectionNotice, props(failed)));
+    await delay(20);
+    assert.match(view.lastFrame() ?? "", /网络中断/);
+    view.rerender(h(ConnectionNotice, props(failed)));
+    await delay(20);
+    assert.equal((view.lastFrame() ?? "").split("网络中断").length - 1, 1);
+    view.rerender(h(ConnectionNotice, props({ state: "failed", message: "请重新登录" })));
+    await delay(20);
+    assert.match(view.lastFrame() ?? "", /请重新登录/);
+    assert.doesNotMatch(view.lastFrame() ?? "", /网络中断/);
+    for (const state of ["connecting", "connected", "disabled"] as const) {
+      view.rerender(h(ConnectionNotice, props({ state })));
+      await delay(20);
+      assert.equal(view.lastFrame(), "");
+    }
+    view.rerender(
+      h(
+        ConnectionNotice,
+        props({ state: "failed", message: "already reported", reportedInTurn: true }),
+      ),
+    );
+    await delay(20);
     assert.equal(view.lastFrame(), "");
-    view.rerender(h(ConnectionNotice, props()));
-    for (const listener of listeners) listener();
-    await delay(30);
-    assert.equal(notices.length, 1);
-    assert.equal(starts, 1);
-
-    message = "网络中断；/reconnect 重试连接。";
-    for (const listener of listeners) listener();
-    await delay(30);
-    assert.equal(notices.at(-1), message);
-    assert.equal(notices.length, 2);
+    view.rerender(h(ConnectionNotice, props(undefined)));
+    await delay(20);
     assert.equal(view.lastFrame(), "");
-
-    message = "";
-    for (const listener of listeners) listener();
-    await delay(30);
-    assert.equal(notices.length, 2);
-    message = "ChatGPT 已连接；可继续发送消息，/model 查看可用模型。";
-    for (const listener of listeners) listener();
-    await delay(30);
-    assert.equal(notices.length, 3);
-    assert.equal(notices.at(-1), message);
   } finally {
     view.unmount();
   }
-  assert.equal(listeners.size, 0);
 });

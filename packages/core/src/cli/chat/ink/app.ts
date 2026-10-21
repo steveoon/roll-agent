@@ -1,8 +1,6 @@
 import { ConnectionNotice } from "./connection-notice.ts";
-import {
-  chatGptConnectionError,
-  type ChatConnection,
-} from "../../../runtime-host/chatgpt-connection.ts";
+import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
+import { useChatConnection } from "./use-chat-connection.ts";
 import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
@@ -294,6 +292,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
 
 function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const { session, model, onUserSubmit, onExit } = props;
+  const connection = useChatConnection(props.connection);
   const windowSize = useWindowSize();
   const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
   const contextWindow = session.getContextWindow();
@@ -357,12 +356,6 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const notice = (text: string): void => {
     commitHistory({ kind: "notice", id: randomUUID(), text });
   };
-  const connectionNotice = useCallback(
-    (text: string): void => {
-      commitHistory({ kind: "notice", id: randomUUID(), text }, true);
-    },
-    [commitHistory],
-  );
   const openModelPicker = (): boolean => {
     if (!modelSwitching) {
       return false;
@@ -695,7 +688,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     const level = state.status.thinkingLevel;
     if (name === "/reconnect") {
       if (props.connection) {
-        props.connection.retry().catch((error: unknown) => notice(chatGptConnectionError(error)));
+        // The live failed snapshot owns recovery feedback; never append duplicate history.
+        props.connection.retry().catch(() => {});
       } else notice("当前连接无需 ChatGPT 授权恢复。");
       return;
     }
@@ -1020,12 +1014,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       Box,
       { flexShrink: 0, marginTop: turnActivity === undefined ? 0 : 1 },
       turnActivity === undefined
-        ? h(StatusLine, { status: state.status, width: layout.columns })
-        : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
+        ? h(StatusLine, { status: state.status, width: layout.columns, connection })
+        : h(TurnStatusLine, { activity: turnActivity, width: layout.columns, connection }),
     ),
-    props.connection
-      ? h(ConnectionNotice, { connection: props.connection, onNotice: connectionNotice })
-      : null,
+    h(ConnectionNotice, { snapshot: connection, width: layout.columns }),
     slashPopupActive
       ? h(SlashPopup, {
           matches,

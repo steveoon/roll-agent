@@ -34,6 +34,8 @@ const EMPTY_LIVE: LiveState = {
   activeTools: [],
   generatingTools: [],
   compacting: false,
+  recovering: false,
+  modelStepHistoryStart: undefined,
   producedOutput: false,
 };
 const settled = (): void => {};

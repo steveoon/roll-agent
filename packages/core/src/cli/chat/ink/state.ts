@@ -1,9 +1,11 @@
 import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
   getFileChangeDisplay,
   type FileChangeDiff,
   type SessionEvent,
   type SessionTokenUsage,
+  type ToolCancellationExecutionState,
 } from "@roll-agent/runtime";
 import {
   formatApprovalDetails,
@@ -62,6 +64,7 @@ export type HistoryItem =
       readonly id: string;
       readonly name: string;
       readonly args: string;
+      readonly executionState?: ToolCancellationExecutionState;
     }
   | { readonly kind: "compaction"; readonly id: string; readonly notice: string }
   | {
@@ -83,6 +86,8 @@ export interface LiveState {
   readonly activeTools: readonly ToolRowState[];
   readonly generatingTools: Extract<SessionEvent, { type: "tool-input-activity" }>["calls"];
   readonly compacting: boolean;
+  readonly recovering: boolean;
+  readonly modelStepHistoryStart: number | undefined;
   readonly producedOutput: boolean;
 }
 
@@ -187,6 +192,8 @@ const EMPTY_LIVE: LiveState = {
   activeTools: [],
   generatingTools: [],
   compacting: false,
+  recovering: false,
+  modelStepHistoryStart: undefined,
   producedOutput: false,
 };
 
@@ -286,14 +293,24 @@ function commitTool(
   const item: HistoryItem =
     denial !== undefined
       ? { kind: "denied", id, name, label: denial }
-      : {
-          kind: "tool",
-          id,
-          name,
-          args,
-          ok: !event.isError,
-          ...(fileChange !== undefined ? { diff: fileChange.diff } : {}),
-        };
+      : event.outcome?.kind === TOOL_OUTCOME_KINDS.cancelled
+        ? {
+            kind: "cancelled",
+            id,
+            name,
+            args,
+            ...(event.outcome.executionState !== undefined
+              ? { executionState: event.outcome.executionState }
+              : {}),
+          }
+        : {
+            kind: "tool",
+            id,
+            name,
+            args,
+            ok: !event.isError,
+            ...(fileChange !== undefined ? { diff: fileChange.diff } : {}),
+          };
   return {
     ...state,
     history: [...state.history, item],
@@ -376,6 +393,17 @@ function beginReasoning(
   };
 }
 
+function discardModelDraft(state: ChatUiState): ChatUiState {
+  const boundary = state.live.modelStepHistoryStart;
+  if (boundary === undefined) return state;
+  return {
+    ...state,
+    history: state.history.filter(
+      (item, index) => index < boundary || (item.kind !== "assistant" && item.kind !== "reasoning"),
+    ),
+  };
+}
+
 function applySessionEvent(
   state: ChatUiState,
   id: string,
@@ -385,20 +413,42 @@ function applySessionEvent(
   switch (event.type) {
     case "message-start":
       return { ...state, live: { ...state.live, generatingTools: [] } };
+    case "model-step-start": {
+      if (state.phase === CHAT_PHASES.idle || state.phase === CHAT_PHASES.cancelling) return state;
+      const committed = commitStreamingText(commitReasoning(state, `${id}-reasoning`, at), id);
+      return {
+        ...committed,
+        live: {
+          ...committed.live,
+          recovering: false,
+          modelStepHistoryStart: committed.history.length,
+        },
+      };
+    }
+    case "model-recovery": {
+      if (state.phase === CHAT_PHASES.idle || state.phase === CHAT_PHASES.cancelling) return state;
+      const current = discardModelDraft(state);
+      return { ...current, live: { ...EMPTY_LIVE, recovering: true } };
+    }
     case "tool-input-activity":
       if (state.phase === CHAT_PHASES.idle || state.phase === CHAT_PHASES.cancelling) return state;
       return { ...state, live: { ...state.live, generatingTools: event.calls } };
-    case "step-finish":
+    case "step-finish": {
+      const current =
+        state.live.modelStepHistoryStart === undefined
+          ? state
+          : commitStreamingText(commitReasoning(state, `${id}-reasoning`, at), id);
       return {
-        ...state,
-        live: { ...state.live, generatingTools: [] },
+        ...current,
+        live: { ...current.live, generatingTools: [], modelStepHistoryStart: undefined },
         status: {
-          ...state.status,
+          ...current.status,
           ...(event.usage?.inputTokens === undefined
             ? {}
             : { contextInputTokens: event.usage.inputTokens }),
         },
       };
+    }
     case "reasoning-start":
       return beginReasoning(state, id, event.reasoningId, at);
     case "reasoning-delta": {
@@ -548,6 +598,7 @@ function applySessionEvent(
       };
     }
     case "turn-cancelled": {
+      state = discardModelDraft(state);
       const cancelledTools: HistoryItem[] = state.live.activeTools.map((tool, index) => ({
         kind: "cancelled",
         id: `${id}-tool-${String(index)}`,
@@ -564,12 +615,27 @@ function applySessionEvent(
         live: { ...EMPTY_LIVE },
       };
     }
-    case "error":
+    case "error": {
+      state = discardModelDraft(state);
+      // A persistence failure can prevent a tool-result event. Preserve the call without
+      // guessing whether its side effects happened.
+      const unsettledTools: HistoryItem[] = state.live.activeTools.map((tool, index) => ({
+        kind: "cancelled",
+        id: `${id}-tool-${String(index)}`,
+        name: tool.name,
+        args: tool.args,
+        executionState: TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+      }));
       return {
         ...state,
-        history: [...state.history, { kind: "error", id, message: event.message }],
+        history: [
+          ...state.history,
+          ...unsettledTools,
+          { kind: "error", id, message: event.message },
+        ],
         live: { ...EMPTY_LIVE },
       };
+    }
     default:
       return state;
   }

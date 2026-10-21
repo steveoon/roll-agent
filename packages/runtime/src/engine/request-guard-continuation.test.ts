@@ -116,6 +116,13 @@ for (const maxSteps of [2, 4]) {
         )
         .at(-1);
       assert.ok(finish);
+      const measuredInput = events.reduce(
+        (sum, event) => sum + (event.type === "step-finish" ? (event.usage?.inputTokens ?? 0) : 0),
+        0,
+      );
+      assert.equal(finish.totalUsage?.inputTokens, measuredInput);
+      assert.equal(finish.totalUsage?.outputTokens, calls);
+      assert.deepEqual(finish.totalUsage, finish.sessionUsage);
       if (maxSteps === 2) {
         assert.equal(calls, 2);
         assert.equal(finish.stoppedAtStepLimit, true);

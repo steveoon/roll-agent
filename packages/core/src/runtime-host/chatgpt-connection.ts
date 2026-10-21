@@ -1,13 +1,35 @@
-import { ChatGptAuthError, isTemporaryChatGptError } from "../auth/chatgpt/errors.ts";
+import { ChatGptAuthError } from "../auth/chatgpt/errors.ts";
+import { chatGptErrorPresentation } from "./chatgpt-error-presentation.ts";
 import type { ChatGptAuth, ChatGptModels } from "./chatgpt-resolution.ts";
+
+export const CHAT_CONNECTION_STATES = {
+  idle: "idle",
+  connecting: "connecting",
+  connected: "connected",
+  failed: "failed",
+  disabled: "disabled",
+} as const;
+
+export type ChatConnectionState =
+  (typeof CHAT_CONNECTION_STATES)[keyof typeof CHAT_CONNECTION_STATES];
+export type ChatConnectionSnapshot =
+  | { readonly state: Exclude<ChatConnectionState, typeof CHAT_CONNECTION_STATES.failed> }
+  | {
+      readonly state: typeof CHAT_CONNECTION_STATES.failed;
+      readonly message: string;
+      readonly reportedInTurn?: boolean;
+    };
+
+const DISABLED_SNAPSHOT: ChatConnectionSnapshot = { state: CHAT_CONNECTION_STATES.disabled };
 
 /** UI connectivity and catalog validation, independent of local session/history lifetime. */
 export class ChatGptConnection {
   private readonly auth: ChatGptAuth;
   private account: string | undefined;
   private catalog: ChatGptModels;
-  private message = "ChatGPT 尚未连接；本地会话可用，正在准备连接。";
+  private snapshot: ChatConnectionSnapshot = { state: CHAT_CONNECTION_STATES.idle };
   private ready = false;
+  private turnOwnsFailure = false;
   private enabled = true;
   private disposed = false;
   private pending: Promise<void> | undefined;
@@ -38,21 +60,21 @@ export class ChatGptConnection {
     this.account ??= accountId;
     if (accountId === this.account) this.catalog = models;
   }
-  getSnapshot = (): string => (this.enabled ? this.message : "");
+  getSnapshot = (): ChatConnectionSnapshot => (this.enabled ? this.snapshot : DISABLED_SNAPSHOT);
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
   };
-  private publish(message: string): void {
-    this.message = message;
+  private publish(snapshot: ChatConnectionSnapshot): void {
+    this.snapshot = snapshot;
     for (const listener of this.listeners) listener();
   }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    this.publish(this.message);
+    this.publish(this.snapshot);
   }
 
   start = (): void => {
@@ -74,15 +96,47 @@ export class ChatGptConnection {
     await this.ensure(signal);
   }
 
-  failed(error: unknown): void {
+  /** Idempotent: preparation and Runtime refer to the same real user submission. */
+  beginTurn(): void {
+    this.turnOwnsFailure = true;
+    if (this.failure) this.publish({ state: CHAT_CONNECTION_STATES.connecting });
+  }
+
+  recovering(): void {
+    this.ready = false;
+    this.publish({ state: CHAT_CONNECTION_STATES.connecting });
+  }
+
+  async prepareRecovery(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    this.ready = false;
+    this.failure = undefined;
+    await this.ensure(signal);
+  }
+
+  endTurn(error?: unknown): void {
+    this.turnOwnsFailure = false;
+    if (error !== undefined && chatGptErrorPresentation(error).invalidatesConnection) {
+      this.failed(error, true);
+    } else if (!this.ready) {
+      this.failure = undefined;
+      this.publish({ state: CHAT_CONNECTION_STATES.idle });
+    }
+  }
+
+  failed(error: unknown, reportedInTurn = false): void {
     this.ready = false;
     this.failure = { error };
     if (this.disposed) return;
-    const message =
-      error instanceof ChatGptAuthError
-        ? error.message
-        : "ChatGPT 连接暂不可用，请检查网络或账号状态。";
-    this.publish(`${message} 本地会话和输入已保留；/reconnect 重试连接。`);
+    if (this.turnOwnsFailure) {
+      this.publish({ state: CHAT_CONNECTION_STATES.connecting });
+      return;
+    }
+    this.publish({
+      state: CHAT_CONNECTION_STATES.failed,
+      message: `输入已保留；${chatGptConnectionError(error)}`,
+      ...(reportedInTurn ? { reportedInTurn } : {}),
+    });
   }
 
   async ensure(signal?: AbortSignal): Promise<void> {
@@ -96,7 +150,7 @@ export class ChatGptConnection {
         AbortSignal.timeout(this.timeoutMs),
         ...(signal ? [signal] : []),
       ]);
-      this.publish("正在连接 ChatGPT；网络波动将自动重试，本地会话和输入可继续使用。");
+      this.publish({ state: CHAT_CONNECTION_STATES.connecting });
       const operation = (async () => {
         if (!this.account) this.account = (await this.auth.status()).currentAccountId;
         if (!this.account) {
@@ -110,7 +164,7 @@ export class ChatGptConnection {
         this.catalog = catalog;
         this.ready = true;
         this.failure = undefined;
-        this.publish("ChatGPT 已连接；可继续发送消息，/model 查看可用模型。");
+        this.publish({ state: CHAT_CONNECTION_STATES.connected });
       })();
       this.pending = waitForConnection(operation, requestSignal)
         .catch((error: unknown) => {
@@ -159,8 +213,5 @@ export type ChatConnection = Pick<
 
 /** Safe text for UI surfaces; never render arbitrary request errors containing credentials. */
 export function chatGptConnectionError(error: unknown): string {
-  if (error instanceof ChatGptAuthError) {
-    return `${error.message}${isTemporaryChatGptError(error) ? " 可输入 /reconnect 重试连接。" : ""}`;
-  }
-  return "ChatGPT 连接失败，请检查网络后输入 /reconnect 重试连接。";
+  return chatGptErrorPresentation(error).message;
 }

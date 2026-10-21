@@ -1,12 +1,17 @@
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
+import { createElement as h } from "react";
+import { cleanup, render } from "ink-testing-library";
 import assert from "node:assert/strict";
 import { displayWidth } from "./display-width.ts";
 import {
   composeTurnStatusLayout,
   composeTurnStatusLine,
   formatElapsed,
+  TurnStatusLine,
 } from "./turn-status-line.ts";
 import { TURN_ACTIVITY_KINDS, type TurnActivity } from "./turn-activity.ts";
+
+afterEach(() => cleanup());
 
 const WAITING: TurnActivity = {
   kind: TURN_ACTIVITY_KINDS.waitingModel,
@@ -15,6 +20,22 @@ const WAITING: TurnActivity = {
   animated: true,
   showPhaseElapsed: true,
 };
+
+test("active turn reserves a single line for both its timer and connection badge at 40 columns", () => {
+  for (const state of ["connecting", "connected", "disabled"] as const) {
+    const view = render(h(TurnStatusLine, { activity: WAITING, width: 40, connection: { state } }));
+    try {
+      const frame = view.lastFrame() ?? "";
+      assert.equal(frame.split("\n").length, 1);
+      assert.ok(displayWidth(frame) <= 40, frame);
+      assert.match(frame, /本轮/);
+      if (state === "disabled") assert.doesNotMatch(frame, /ChatGPT/);
+      else assert.match(frame, /ChatGPT/);
+    } finally {
+      view.unmount();
+    }
+  }
+});
 
 test("formatElapsed uses compact second and minute labels", () => {
   assert.equal(formatElapsed(999), "0s");

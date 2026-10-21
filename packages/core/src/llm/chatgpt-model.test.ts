@@ -5,6 +5,7 @@ import { z } from "zod";
 import { APICallError } from "@ai-sdk/provider";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { createChatGptModel } from "./chatgpt-model.ts";
+import { isRecoverableChatGptError } from "./chatgpt-recovery.ts";
 import { chatGptThinkingOptions } from "../runtime-host/chatgpt-resolution.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -452,6 +453,45 @@ describe("ChatGPT subscription Responses adapter", () => {
   });
 
   for (const method of ["doGenerate", "doStream"] as const) {
+    it(`recovers EOF during tool arguments but not an invalid completion in ${method}`, async () => {
+      for (const completed of [false, true]) {
+        const model = createChatGptModel({
+          modelId: "subscription-slug",
+          getAccessToken: async () => "token",
+          fetch: async () =>
+            sse([
+              {
+                type: "response.output_item.added",
+                output_index: 0,
+                item: {
+                  type: "function_call",
+                  id: "partial",
+                  call_id: "partial-call",
+                  name: "roll__read",
+                  arguments: "",
+                },
+              },
+              {
+                type: "response.function_call_arguments.delta",
+                item_id: "partial",
+                output_index: 0,
+                delta: '{"path":',
+              },
+              ...(completed ? [completion()] : []),
+            ]),
+        });
+        await assert.rejects(
+          async () => {
+            const result = await model[method]({ prompt });
+            if ("stream" in result) await collect(result.stream);
+          },
+          (error: unknown) => {
+            assert.equal(isRecoverableChatGptError(error), !completed);
+            return true;
+          },
+        );
+      }
+    });
     it(`rejects response.completed with a local tool missing output_item.done in ${method}`, async () => {
       const model = createChatGptModel({
         modelId: "subscription-slug",

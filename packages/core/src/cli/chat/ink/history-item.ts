@@ -1,6 +1,7 @@
 import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
+import { TOOL_CANCELLATION_EXECUTION_STATES } from "@roll-agent/runtime";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { DiffDisplayMode } from "../diff-display.ts";
@@ -124,13 +125,19 @@ export function HistoryItemView({
       return h(Text, { dimColor: true }, `⊘ ${item.name} ${item.label}`);
     case "cancelled": {
       const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
+      const unexecuted = item.executionState === TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
+      const label = unexecuted
+        ? "未执行"
+        : item.executionState === TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown
+          ? "结果待确认"
+          : "已中断";
       return h(
         Text,
-        { color: "yellow" },
+        unexecuted ? { dimColor: true } : { color: "yellow" },
         "■ ",
         h(ToolLabel, { name: item.name }),
         args.length > 0 ? h(Text, { dimColor: true }, args) : null,
-        h(Text, { dimColor: true }, " 已中断"),
+        h(Text, { dimColor: true }, ` ${label}`),
       );
     }
     case "compaction":
