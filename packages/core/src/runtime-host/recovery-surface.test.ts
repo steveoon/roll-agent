@@ -25,8 +25,9 @@ test("factory admits recovery only for interactive Ink and basic REPL surfaces",
   class CapturingEngine extends runtime.ConversationEngine {
     constructor(options: ChatEngineOptions) {
       captured = options;
+      const { agentHost: _host, ...isolatedOptions } = options;
       super({
-        ...options,
+        ...isolatedOptions,
         sources: [],
         skillLibrary: null,
         workspaceInstructions: null,

@@ -9,6 +9,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   McpClientManager,
+  McpConnectionCleanupError,
   buildStdioChildEnv,
   shouldSuppressStdioChildStderrLine,
 } from "./client-manager.ts";
@@ -888,6 +889,240 @@ function connectionMap(manager: McpClientManager): Map<string, ManagedConnection
     }
   ).connections;
 }
+
+describe("McpClientManager cancellation after handshake", () => {
+  for (const scoped of [false, true]) {
+    const mode = scoped ? "scoped" : "legacy";
+
+    it(`closes a ${mode} connection cancelled before acquisition delivery`, async () => {
+      const manager = new McpClientManager();
+      const handshake = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const cancellation = new Error("cancelled after handshake");
+      let closes = 0;
+      installClientDouble(manager, {
+        connect: () => handshake.promise,
+        close: async () => {
+          closes += 1;
+        },
+      });
+      const connect = scoped
+        ? manager.connectScoped.bind(manager)
+        : manager.connectWithOwnership.bind(manager);
+      const operation = connect("cancel-ready", TEST_STDIO_TRANSPORT, process.cwd(), {
+        signal: controller.signal,
+      });
+      const rejected = assert.rejects(operation, (error) => error === cancellation);
+      handshake.resolve();
+      await Promise.resolve();
+      assert.equal(manager.isConnected("cancel-ready"), true);
+      controller.abort(cancellation);
+      try {
+        await rejected;
+        assert.equal(manager.isConnected("cancel-ready"), false);
+        assert.equal(closes, 1);
+      } finally {
+        await manager.disconnectAll();
+      }
+    });
+
+    it(`preserves cancellation and cleanup failure for a ${mode} connection`, async () => {
+      const manager = new McpClientManager();
+      const handshake = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const cancellation = new Error("cancelled after handshake");
+      const cleanupFailure = new Error("connection close failed");
+      installClientDouble(manager, {
+        connect: () => handshake.promise,
+        close: async () => {
+          throw cleanupFailure;
+        },
+      });
+      const connect = scoped
+        ? manager.connectScoped.bind(manager)
+        : manager.connectWithOwnership.bind(manager);
+      const operation = connect("cancel-close-error", TEST_STDIO_TRANSPORT, process.cwd(), {
+        signal: controller.signal,
+      });
+      const rejected = assert.rejects(operation, (error) => {
+        assert.ok(error instanceof McpConnectionCleanupError);
+        assert.deepEqual(error.errors, [cancellation, cleanupFailure]);
+        return true;
+      });
+      handshake.resolve();
+      await Promise.resolve();
+      assert.equal(manager.isConnected("cancel-close-error"), true);
+      controller.abort(cancellation);
+      try {
+        await rejected;
+        assert.equal(manager.isConnected("cancel-close-error"), false);
+      } finally {
+        await manager.disconnectAll().catch(() => {});
+      }
+    });
+  }
+});
+
+describe("McpClientManager scoped ownership", () => {
+  it("keeps a shared committed client alive until its final scoped owner releases", async () => {
+    const manager = new McpClientManager();
+    let closes = 0;
+    installClientDouble(manager, {
+      connect: async () => {},
+      close: async () => {
+        closes += 1;
+      },
+    });
+    const first = await manager.connectScoped("shared", TEST_STDIO_TRANSPORT, process.cwd());
+    const second = await manager.connectScoped("shared", TEST_STDIO_TRANSPORT, process.cwd());
+    first.commit();
+    second.commit();
+    await first.release();
+    assert.equal(closes, 0);
+    assert.equal(manager.isConnected("shared"), true);
+    await second.release();
+    await second.release();
+    assert.equal(closes, 1);
+    assert.equal(manager.isConnected("shared"), false);
+  });
+
+  it("never releases a connection pinned by a legacy manager-owned caller", async () => {
+    const manager = new McpClientManager();
+    let closes = 0;
+    installClientDouble(manager, {
+      connect: async () => {},
+      close: async () => {
+        closes += 1;
+      },
+    });
+    await manager.connect("pinned", TEST_STDIO_TRANSPORT, process.cwd());
+    const borrowed = await manager.connectScoped("pinned", TEST_STDIO_TRANSPORT, process.cwd());
+    borrowed.commit();
+    await borrowed.release();
+    assert.equal(closes, 0);
+    assert.equal(manager.isConnected("pinned"), true);
+    await manager.disconnectAll();
+    assert.equal(closes, 1);
+  });
+
+  it("cancels the initiating scoped consumer without aborting a surviving follower", async () => {
+    const manager = new McpClientManager();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    let nativeSignal: AbortSignal | undefined;
+    let closes = 0;
+    installClientDouble(manager, {
+      connect: async (_transport, options) => {
+        nativeSignal = options?.signal;
+        entered.resolve();
+        await release.promise;
+      },
+      close: async () => {
+        closes += 1;
+      },
+    });
+    const first = manager.connectScoped("pending-shared", TEST_STDIO_TRANSPORT, process.cwd(), {
+      signal: controller.signal,
+    });
+    const rejected = assert.rejects(first, /initiator cancelled/u);
+    await entered.promise;
+    const follower = manager.connectScoped("pending-shared", TEST_STDIO_TRANSPORT, process.cwd());
+    controller.abort(new Error("initiator cancelled"));
+    await rejected;
+    assert.equal(nativeSignal?.aborted, false);
+    release.resolve();
+    const surviving = await follower;
+    surviving.commit();
+    assert.equal(closes, 0);
+    assert.equal(manager.isConnected("pending-shared"), true);
+    await surviving.release();
+    assert.equal(closes, 1);
+  });
+
+  it("settles and closes a late connection after the last scoped consumer cancels", async () => {
+    const manager = new McpClientManager();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const aborted = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    let settled = false;
+    let closes = 0;
+    installClientDouble(manager, {
+      connect: async (_transport, options) => {
+        options?.signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+        entered.resolve();
+        await release.promise;
+      },
+      close: async () => {
+        closes += 1;
+      },
+    });
+    const operation = manager.connectScoped("late", TEST_STDIO_TRANSPORT, process.cwd(), {
+      signal: controller.signal,
+    });
+    operation.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const rejected = assert.rejects(operation, /last owner cancelled/u);
+    await entered.promise;
+    controller.abort(new Error("last owner cancelled"));
+    await aborted.promise;
+    assert.equal(settled, false);
+    release.resolve();
+    await rejected;
+    assert.equal(closes, 1);
+    assert.equal(manager.isConnected("late"), false);
+  });
+
+  it("retains a scoped cleanup rejection on repeated release", async () => {
+    const manager = new McpClientManager();
+    const failure = new Error("close failed");
+    let closes = 0;
+    installClientDouble(manager, {
+      connect: async () => {},
+      close: async () => {
+        closes += 1;
+        throw failure;
+      },
+    });
+    const owned = await manager.connectScoped("close-error", TEST_STDIO_TRANSPORT, process.cwd());
+    owned.commit();
+    await assert.rejects(owned.release(), (error) => error === failure);
+    await assert.rejects(owned.release(), (error) => error === failure);
+    assert.equal(closes, 1);
+  });
+
+  it("returns the same release promise from reentrant client cleanup", async () => {
+    const manager = new McpClientManager();
+    const entered = Promise.withResolvers<void>();
+    const finishClose = Promise.withResolvers<void>();
+    const failure = new Error("reentrant close failed");
+    let reentered: Promise<void> | undefined;
+    installClientDouble(manager, {
+      connect: async () => {},
+      close: async () => {
+        reentered = owned.release();
+        entered.resolve();
+        await finishClose.promise;
+        throw failure;
+      },
+    });
+    const owned = await manager.connectScoped("reentrant", TEST_STDIO_TRANSPORT, process.cwd());
+    owned.commit();
+    const releasing = owned.release();
+    const rejected = assert.rejects(releasing, (error) => error === failure);
+    await entered.promise;
+    assert.equal(reentered, releasing);
+    finishClose.resolve();
+    await rejected;
+  });
+});
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {

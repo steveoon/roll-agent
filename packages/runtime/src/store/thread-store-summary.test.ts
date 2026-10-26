@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
 import { threadIdSchema } from "@roll-agent/protocol";
 import { ThreadStore } from "./thread-store.ts";
 import { SemanticLedger } from "./semantic-ledger.ts";
@@ -324,23 +324,16 @@ for (const version of [1, 2] as const) {
           };
         },
       });
-      const config = rollConfigSchema.parse({
-        llm: {
-          defaultProvider: "mock",
-          defaultModel: "test",
-          providers: { mock: { apiKey: "test" } },
-        },
-        ask: {},
-        agents: { dataDir: join(f.dir, "agents") },
-        runtime: {
-          shell: { enabled: false },
-          contextWindow: 200_000,
-          compaction: { keepRecentTurns: 1, keepRecentTokens: 1, maxOutputTokens: 2048 },
-        },
+      const config = runtimeSettingsSchema.parse({
+        shell: { enabled: false },
+        contextWindow: 200_000,
+        compaction: { keepRecentTurns: 1, keepRecentTokens: 1, maxOutputTokens: 2048 },
       });
       const makeEngine = (store: ThreadStore) =>
         new ConversationEngine({
-          config,
+          provider: "mock",
+          modelName: "test",
+          settings: config,
           model,
           store,
           sources: [],

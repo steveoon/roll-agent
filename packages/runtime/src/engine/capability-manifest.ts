@@ -1,12 +1,12 @@
 import type { AppOutputDeclaration } from "@roll-agent/protocol/app-output";
 import { asSchema, type ToolSet } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
-import type { SkillSummary } from "@roll-agent/core/skills/library";
+import type { SkillSummary } from "../skills/contracts.ts";
 import type {
   AgentRuntimeOwnership,
   AgentSourceType,
-  AgentTransport,
-} from "@roll-agent/core/types/agent";
+  AgentTransportKind,
+} from "../tool-contracts/agent-types.ts";
 import type { ToolAnnotations } from "../types/policy.ts";
 import type { ToolRoute } from "../tool-bridge/naming.ts";
 import { isSensitiveFieldName, redactSecretText } from "../tool-bridge/tool-execution-record.ts";
@@ -148,7 +148,7 @@ export interface EffectiveToolCapability {
   readonly agentName: string;
   readonly toolName: string;
   readonly source: CapabilityToolSource;
-  readonly transport?: AgentTransport["type"];
+  readonly transport?: AgentTransportKind;
   readonly runtimeOwnership?: AgentRuntimeOwnership;
   readonly annotations?: ToolAnnotations;
   readonly appOutput?: AppOutputDeclaration;

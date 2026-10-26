@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
-import type { SkillLibrary } from "@roll-agent/core/skills/library";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
+import type { SkillLibrary } from "../skills/contracts.ts";
 import { ThreadStore } from "../store/thread-store.ts";
 import { AgentSession } from "./agent-session.ts";
 import { ConversationEngine } from "./conversation-engine.ts";
@@ -72,16 +72,8 @@ function demoLibrary(body: string, onLoad?: () => void): SkillLibrary {
   };
 }
 
-function runtimeConfig(dataDir: string) {
-  return rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir },
-  });
+function runtimeConfig() {
+  return runtimeSettingsSchema.parse({});
 }
 
 async function drain(events: AsyncIterable<unknown>): Promise<unknown[]> {
@@ -161,7 +153,9 @@ test("resume 不向后续普通 Turn 注入已完成 Turn 的持久化 Skill 快
     try {
       let initialLoads = 0;
       firstEngine = new ConversationEngine({
-        config: runtimeConfig(dir),
+        provider: "mock",
+        modelName: "default-model",
+        settings: runtimeConfig(),
         model: textModel("first done"),
         sources: [],
         store,
@@ -190,7 +184,9 @@ test("resume 不向后续普通 Turn 注入已完成 Turn 的持久化 Skill 快
       let currentLibraryLoads = 0;
       const resumedPrompts: string[] = [];
       resumedEngine = new ConversationEngine({
-        config: runtimeConfig(dir),
+        provider: "mock",
+        modelName: "default-model",
+        settings: runtimeConfig(),
         model: textModel("second done", (prompt) => resumedPrompts.push(prompt)),
         sources: [],
         store,

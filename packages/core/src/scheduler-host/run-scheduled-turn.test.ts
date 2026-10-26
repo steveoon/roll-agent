@@ -63,12 +63,13 @@ test("scheduled subscription turn streams Responses, executes local tools and re
   };
   class IsolatedEngine extends runtime.ConversationEngine {
     constructor(options: ConstructorParameters<typeof runtime.ConversationEngine>[0]) {
-      assert.equal(options.config.runtime.provider, "chatgpt");
+      assert.equal(options.provider, "chatgpt");
       assert.equal(options.modelCatalog?.lookup("chatgpt", "gpt-6.1-sol"), 8192);
       assert.deepEqual(options.structuredOutputProviderOptions, {
         openai: { reasoningEffort: "low" },
       });
-      super({ ...options, sources: [], skillLibrary: null, workspaceInstructions: null });
+      const { agentHost: _host, ...isolatedOptions } = options;
+      super({ ...isolatedOptions, sources: [], skillLibrary: null, workspaceInstructions: null });
     }
   }
   try {
@@ -203,6 +204,7 @@ test("scheduled subscription failure and cancellation cannot fall back to an API
               provider: "chatgpt",
               modelName: "fixture",
               model: new MockLanguageModelV4({}),
+              toolSchemaPolicy: () => true,
             };
           }
           throw new Error("subscription_sharing_usage_limit_exceeded");
@@ -294,8 +296,9 @@ test("scheduled turn registers before creating a session and the model sees dura
     class IsolatedEngine extends runtime.ConversationEngine {
       constructor(options: ConstructorParameters<typeof runtime.ConversationEngine>[0]) {
         assert.equal(runtime.readScheduleRun(f.dir, f.invocation.id).run?.references.length, 1);
+        const { agentHost: _host, ...isolatedOptions } = options;
         super({
-          ...options,
+          ...isolatedOptions,
           model,
           sources: [],
           skillLibrary: null,

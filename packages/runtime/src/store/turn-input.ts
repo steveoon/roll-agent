@@ -1,9 +1,6 @@
 import { z } from "zod";
 import type { ModelMessage } from "ai";
-import {
-  SKILL_INVOCATION_PARSE_KINDS,
-  parseSkillInvocationResult,
-} from "@roll-agent/core/skills/invocation";
+import { SKILL_INVOCATION_PARSE_KINDS, parseSkillInvocationResult } from "../skills/invocation.ts";
 import { explicitSkillCheckpointV1Schema } from "../engine/explicit-skill-context.ts";
 
 /** A receipt is an internal persistence identity, not permission to replay a turn. */

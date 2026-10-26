@@ -4,7 +4,7 @@ import { describeTrigger } from "../scheduler/trigger.ts";
 import type {
   ScheduleExtendAdmission,
   ScheduleToolError,
-} from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+} from "../host-contracts/schedule-tools.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
 import type { ScheduleToolDeps } from "./schedule-tool.ts";

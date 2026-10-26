@@ -5,7 +5,7 @@ import type {
   ScheduleExecutionReadiness,
   ScheduleToolError,
   ScheduleToolPort,
-} from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+} from "../host-contracts/schedule-tools.ts";
 import { buildScheduleExtendTools } from "./schedule-extend-tool.ts";
 import { SCHEDULE_STATUSES } from "../scheduler/types.ts";
 import { systemTimeZone } from "../scheduler/calendar.ts";

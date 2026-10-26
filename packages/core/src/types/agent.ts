@@ -1,15 +1,14 @@
-import type { AppOutputContract } from "@roll-agent/protocol/app-output";
-import type { JsonSchemaRefIssue } from "../tool-runtime/json-schema-refs.ts";
+import type { AGENT_TRANSPORT_KINDS } from "@roll-agent/runtime/tool-contracts";
 
 /** Agent 传输模式 */
 export type AgentTransport =
   | {
-      readonly type: "stdio";
+      readonly type: typeof AGENT_TRANSPORT_KINDS.stdio;
       readonly command: string;
       readonly args?: readonly string[];
       readonly maxBufferSize?: number;
     }
-  | { readonly type: "streamable-http"; readonly endpoint: string };
+  | { readonly type: typeof AGENT_TRANSPORT_KINDS.streamableHttp; readonly endpoint: string };
 
 /** SKILL.md frontmatter 解析结果 */
 export const AGENT_ENV_VALUE_TYPES = ["string", "boolean", "number", "json", "url"] as const;
@@ -44,18 +43,18 @@ export interface AgentSkill {
 export const AGENT_STATUSES = ["idle", "starting", "online", "error", "stopped"] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
-/** Agent 来源类型 */
-export const AGENT_SOURCE_TYPES = [
-  "git",
-  "local-path",
-  "installed-package",
-  "remote-manifest",
-] as const;
-export type AgentSourceType = (typeof AGENT_SOURCE_TYPES)[number];
-
-/** Agent 运行时 ownership */
-export const AGENT_RUNTIME_OWNERSHIPS = ["on-demand", "core-managed", "external-managed"] as const;
-export type AgentRuntimeOwnership = (typeof AGENT_RUNTIME_OWNERSHIPS)[number];
+export {
+  AGENT_SOURCE_TYPES,
+  AGENT_RUNTIME_OWNERSHIPS,
+  AGENT_TRANSPORT_KINDS,
+} from "@roll-agent/runtime/tool-contracts";
+export type {
+  AgentSourceType,
+  AgentRuntimeOwnership,
+  JsonSchemaObject,
+  AgentTool,
+  AgentTransportKind,
+} from "@roll-agent/runtime/tool-contracts";
 
 /** Agent 来源（用于 update 策略判断） */
 export interface GitAgentSource {
@@ -144,27 +143,6 @@ export interface RegisteredAgent {
   readonly skillBody?: string;
   /** Agent 来源，用于 roll update 判断更新策略。旧数据可能缺失此字段 */
   readonly source?: AgentSource;
-}
-
-/** JSON Schema 子集，对应 MCP tool 的 inputSchema */
-export interface JsonSchemaObject {
-  readonly type: "object";
-  readonly properties?: Readonly<Record<string, object>> | undefined;
-  readonly required?: readonly string[] | undefined;
-  readonly additionalProperties?: boolean | undefined;
-  readonly [key: string]: unknown;
-}
-
-/** MCP Tool Schema */
-export interface AgentTool {
-  readonly name: string;
-  readonly description?: string | undefined;
-  readonly inputSchema: JsonSchemaObject;
-  readonly schemaIssues?: readonly JsonSchemaRefIssue[];
-  readonly appOutput?: AppOutputContract;
-  readonly appOutputIssue?: "invalid_contract";
-  /** Validated MCP request deadline advertised by this tool. */
-  readonly executionTimeoutMs?: number;
 }
 
 export function createDefaultRuntimeForTransport(transport: AgentTransport): AgentRuntime {

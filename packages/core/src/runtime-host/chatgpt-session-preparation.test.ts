@@ -1,3 +1,4 @@
+import { mapRuntimeSettings } from "./engine-factory.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -14,6 +15,78 @@ import {
 } from "./chatgpt-resolution.ts";
 import { createChatGptCatalog } from "./chatgpt-catalog.ts";
 import { createChatGptSessionPreparation } from "./chatgpt-session-preparation.ts";
+import { providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
+
+test("initial model selection preserves schema policy through reconnect preparation", async () => {
+  const config = rollConfigSchema.parse({
+    ask: {},
+    agents: { dataDir: "/tmp/unused-prepare-schema-policy" },
+    llm: { defaultProvider: "chatgpt", defaultModel: "fixture", providers: {} },
+    runtime: { provider: "chatgpt", model: "fixture" },
+  });
+  const auth: ChatGptAuth = {
+    status: async () => ({
+      currentAccountId: "00000000-0000-4000-8000-000000000001",
+      accounts: [],
+      usageUrl: "https://chatgpt.com/settings/usage",
+    }),
+    cachedModels: () => [],
+    models: async () => [{ slug: "fixture", displayName: "Fixture", contextWindow: 64000 }],
+    getAccessToken: async () => "synthetic",
+  };
+  const selected = await resolveInteractiveChatLlm(config, { auth, deferConnection: true });
+  assert.ok(selected.connection);
+  const connection = selected.connection;
+  const engine = new runtime.ConversationEngine({
+    settings: mapRuntimeSettings(config),
+    provider: selected.provider,
+    modelName: selected.modelName,
+    model: selected.model,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(selected.provider, issues),
+    modelCatalog: createChatGptCatalog(
+      runtime,
+      new runtime.ModelCatalog({ snapshot: { fetchedAt: "2026-10-26T00:00:00Z", providers: {} } }),
+      () => connection.models,
+    ),
+    sources: [
+      {
+        agentName: "schema-agent",
+        client: { callTool: async () => ({ content: [] }) },
+        tools: [
+          {
+            tool: {
+              name: "passthrough",
+              inputSchema: { type: "object", properties: { x: { $ref: "#/properties/missing" } } },
+            },
+            annotations: undefined,
+          },
+        ],
+      },
+    ],
+    skillLibrary: null,
+    workspaceInstructions: null,
+    fileToolsEnabled: false,
+  });
+  const session = await engine.createSession();
+  const preparation = createChatGptSessionPreparation({
+    connection,
+    engine,
+    getSession: () => session,
+    getSelection: () => selected,
+  });
+  const hasTool = () =>
+    session.getCapabilityManifest().tools.some((tool) => tool.id.endsWith("passthrough"));
+  try {
+    assert.equal(hasTool(), true);
+    await preparation.prepare();
+    assert.equal(session.getContextWindow(), 64000);
+    assert.equal(hasTool(), true);
+  } finally {
+    preparation.dispose();
+    connection.dispose();
+    await engine.dispose();
+  }
+});
 
 test("reconnect and first-send preparation refresh live session windows and respect explicit override", async () => {
   for (const scenario of ["empty", "stale", "override", "first-send", "during-turn"] as const) {
@@ -86,7 +159,9 @@ test("reconnect and first-send preparation refresh live session windows and resp
       () => connection.models,
     );
     const engine = new runtime.ConversationEngine({
-      config,
+      settings: mapRuntimeSettings(config),
+      provider: "chatgpt",
+      modelName: "fixture",
       store,
       model: selected.model,
       modelCatalog: catalog,

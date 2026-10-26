@@ -1,3 +1,4 @@
+import { mapRuntimeSettings } from "./engine-factory.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -66,7 +67,9 @@ test("failed auth preserves user input in SQLite; reconnect performs no inferenc
   });
   const selected = await resolveInteractiveChatLlm(config, { auth, deferConnection: true });
   const engine = new ConversationEngine({
-    config,
+    settings: mapRuntimeSettings(config),
+    provider: "chatgpt",
+    modelName: "fixture",
     store,
     model: selected.model,
     sources: [],

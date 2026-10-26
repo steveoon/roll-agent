@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
-import type { SkillLibrary } from "@roll-agent/core/skills/library";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
+import type { SkillLibrary } from "../skills/contracts.ts";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -18,17 +18,11 @@ async function drain(session: AgentSession, text: string) {
   }
   return events;
 }
-function engine(store: ThreadStore, dir: string, library: SkillLibrary | null, prompts: string[]) {
+function engine(store: ThreadStore, library: SkillLibrary | null, prompts: string[]) {
   return new ConversationEngine({
-    config: rollConfigSchema.parse({
-      ask: {},
-      agents: { dataDir: dir },
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "fixture",
-        providers: { mock: { apiKey: "fixture" } },
-      },
-    }),
+    provider: "mock",
+    modelName: "fixture",
+    settings: runtimeSettingsSchema.parse({}),
     store,
     sources: [],
     skillLibrary: library,
@@ -78,7 +72,7 @@ test("Engine receipt metadata survives SQLite reopen/resume/fork without replay 
     loadReference: () => undefined,
   };
   const firstPrompts: string[] = [];
-  let host = engine(store, dir, library, firstPrompts);
+  let host = engine(store, library, firstPrompts);
   try {
     const session = await host.createSession();
     const id = session.id;
@@ -99,7 +93,6 @@ test("Engine receipt metadata survives SQLite reopen/resume/fork without replay 
     const resumedPrompts: string[] = [];
     host = engine(
       store,
-      dir,
       {
         ...library,
         load: () => {

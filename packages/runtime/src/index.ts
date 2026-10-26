@@ -1,4 +1,19 @@
-export { ConversationEngine } from "./engine/conversation-engine.ts";
+export {
+  ConversationEngine,
+  buildSessionBashSettings,
+  buildSessionExecSettings,
+} from "./engine/conversation-engine.ts";
+export { runtimeSettingsSchema } from "./host-contracts/runtime-settings.ts";
+export type { RuntimeSettings } from "./host-contracts/runtime-settings.ts";
+export type {
+  AgentHost,
+  AgentHostOperation,
+  AgentHostSnapshot,
+  AgentHostRefresh,
+  AgentHostInstallResult,
+} from "./host-contracts/agent-host.ts";
+export { buildScheduleToolset, SCHEDULE_CREATE_TOOL_ID } from "./tool-bridge/schedule-tool.ts";
+export { scheduleCreateInputSchema } from "./tool-bridge/schedule-create-input.ts";
 export type { EngineModelSwitch } from "./engine/conversation-engine.ts";
 export type {
   AgentBootstrapIssue,

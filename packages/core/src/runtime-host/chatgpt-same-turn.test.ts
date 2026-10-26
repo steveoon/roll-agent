@@ -1,3 +1,4 @@
+import { mapRuntimeSettings } from "./engine-factory.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -233,7 +234,9 @@ for (const scenario of ["fetch", "body", "eof", "preflight"] as const) {
     const connection = selected.connection;
     connection.subscribe(() => states.push(connection.getSnapshot().state));
     const engine = new ConversationEngine({
-      config,
+      settings: mapRuntimeSettings(config),
+      provider: "chatgpt",
+      modelName: "fixture",
       store,
       model: selected.model,
       modelRecovery: selected.modelRecovery,

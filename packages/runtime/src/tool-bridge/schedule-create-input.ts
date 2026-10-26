@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ScheduleToolCreateRequest } from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+import type { ScheduleToolCreateRequest } from "../host-contracts/schedule-tools.ts";
 import { calendarScheduleSchema, timeZoneSchema } from "../scheduler/calendar.ts";
 
 const interval = z

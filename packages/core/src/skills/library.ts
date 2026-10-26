@@ -5,33 +5,21 @@ import matter from "gray-matter";
 import type { RegisteredAgent } from "../types/agent.ts";
 import { collectReferencedSkillPaths, readReferencedSkillDocument } from "./documents.ts";
 
-export const SKILL_SOURCES = ["agent", "project", "user", "config"] as const;
-export type SkillSource = (typeof SKILL_SOURCES)[number];
-
-export interface SkillSummary {
-  readonly name: string;
-  readonly description: string;
-  readonly source: SkillSource;
-}
-
-export interface LoadedSkill {
-  readonly summary: SkillSummary;
-  readonly content: string;
-  readonly referencePaths: readonly string[];
-  readonly skillRoot?: string;
-}
-
-export interface LoadedSkillReference {
-  readonly content: string;
-  readonly skillRoot?: string;
-}
-
-export interface SkillLibrary {
-  list(): readonly SkillSummary[];
-  load(name: string): LoadedSkill | undefined;
-  loadReference(name: string, referencePath: string): string | undefined;
-  loadReferenceDocument?(name: string, referencePath: string): LoadedSkillReference | undefined;
-}
+import type {
+  SkillSource,
+  SkillSummary,
+  SkillLibrary,
+  LoadedSkill,
+  LoadedSkillReference,
+} from "@roll-agent/runtime/skills";
+export { SKILL_SOURCES, SKILL_TOOL_ID } from "@roll-agent/runtime/skills";
+export type {
+  SkillSource,
+  SkillSummary,
+  LoadedSkill,
+  LoadedSkillReference,
+  SkillLibrary,
+} from "@roll-agent/runtime/skills";
 
 export interface CreateSkillLibraryOptions {
   readonly agents?: readonly RegisteredAgent[];
@@ -48,7 +36,6 @@ interface SkillEntry {
 }
 
 export const SKILL_FILE_NAME = "SKILL.md";
-export const SKILL_TOOL_ID = "roll__skill";
 
 export function getAgentSkillPath(agent: RegisteredAgent): string {
   return resolve(agent.installPath, SKILL_FILE_NAME);

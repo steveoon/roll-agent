@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
-import type { AgentTool } from "@roll-agent/core/types/agent";
+import { preflightToolCall } from "../tool-contracts/preflight.ts";
+import type { AgentTool } from "../tool-contracts/agent-types.ts";
 import type { ApprovalDecision } from "../approval/approval-gate.ts";
 import type { ToolAnnotations } from "../types/policy.ts";
 import type { ToolBridgeContext } from "./build-tools.ts";

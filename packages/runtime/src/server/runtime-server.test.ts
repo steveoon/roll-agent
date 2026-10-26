@@ -32,7 +32,7 @@ import {
   type RuntimeServerRequestMethod,
   type UserInputRequestParamsV12,
 } from "@roll-agent/protocol";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
 import { ConversationEngine } from "../engine/conversation-engine.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { RuntimeService } from "../service/runtime-service.ts";
@@ -61,11 +61,7 @@ import {
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
 
-const config = rollConfigSchema.parse({
-  llm: { defaultProvider: "mock", defaultModel: "mock", providers: {} },
-  ask: {},
-  agents: { dataDir: "/tmp/roll-runtime-server-test" },
-});
+const config = runtimeSettingsSchema.parse({});
 
 function usage() {
   return {
@@ -370,15 +366,14 @@ function createApprovalProtocolHarness(
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-approval-v11-"));
   const store = new ThreadStore(storeDir);
   const engineOptions = {
-    config:
+    provider: "mock",
+    modelName: "mock",
+    settings:
       turnTimeoutMs === undefined
         ? config
         : {
             ...config,
-            runtime: {
-              ...config.runtime,
-              turnTimeoutMs,
-            },
+            turnTimeoutMs,
           },
     model: sequencedModel([
       [
@@ -434,15 +429,14 @@ function createUserInputProtocolHarness(turnTimeoutMs: number | undefined = unde
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-user-input-v12-"));
   const store = new ThreadStore(storeDir);
   const engine = new ConversationEngine({
-    config:
+    provider: "mock",
+    modelName: "mock",
+    settings:
       turnTimeoutMs === undefined
         ? config
         : {
             ...config,
-            runtime: {
-              ...config.runtime,
-              turnTimeoutMs,
-            },
+            turnTimeoutMs,
           },
     model: sequencedModel([
       [
@@ -1345,7 +1339,9 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
   ]);
 
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model,
     sources: [source("msg-agent", "send_message")],
     policy: new DefaultToolPolicy(),
@@ -1473,7 +1469,9 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
 test("RuntimeServer 默认拒绝 includeRaw，即使请求来自可用 session", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([[]]),
     sources: [],
   });
@@ -1534,7 +1532,9 @@ test("RuntimeServer 即使授权也不会从无 Store session 返回完整内存
     ],
   ]);
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model,
     sources: [failingSource("fail-agent", "read", "secret-result")],
   });
@@ -1615,7 +1615,9 @@ test("RuntimeServer 透传同批 Tool 混合结果并允许模型恢复", async 
     },
   });
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model,
     sources: [source("ok-agent", "read"), failingSource("fail-agent", "read", "server boom")],
   });
@@ -1704,7 +1706,9 @@ test("RuntimeServer 透传执行中 batch cancel，并允许同 session 下一�
     },
   });
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model,
     sources: [
       abortableSource("slow-a", "wait", onStart),
@@ -1777,7 +1781,9 @@ test("RuntimeServer 透传执行中 batch cancel，并允许同 session 下一�
 test("RuntimeServer 支持 session.compact 并透传压缩事件", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([[]]),
     sources: [],
   });
@@ -1815,19 +1821,14 @@ test("RuntimeServer send 复用中央 overflow 重放且仅持久化一组当前
   const dir = mkdtempSync(join(tmpdir(), "roll-runtime-overflow-"));
   try {
     const { serverConn, clientConn } = memoryPair();
-    const overflowConfig = rollConfigSchema.parse({
-      llm: { defaultProvider: "mock", defaultModel: "mock", providers: {} },
-      ask: {},
-      runtime: {
-        compaction: {
-          enabled: true,
-          strategy: "truncate",
-          threshold: 0.75,
-          keepRecentTurns: 1,
-          keepRecentTokens: 1,
-        },
+    const overflowConfig = runtimeSettingsSchema.parse({
+      compaction: {
+        enabled: true,
+        strategy: "truncate",
+        threshold: 0.75,
+        keepRecentTurns: 1,
+        keepRecentTokens: 1,
       },
-      agents: { dataDir: join(dir, "agents") },
     });
     const steps: readonly LanguageModelV4StreamPart[][] = [
       [
@@ -1866,7 +1867,9 @@ test("RuntimeServer send 复用中央 overflow 重放且仅持久化一组当前
     });
     const store = new ThreadStore(join(dir, "threads"));
     const engine = new ConversationEngine({
-      config: overflowConfig,
+      provider: "mock",
+      modelName: "mock",
+      settings: overflowConfig,
       model,
       sources: [],
       store,
@@ -1949,7 +1952,13 @@ test("RuntimeServer session.abort 取消当前 turn 并保留 session", async ()
       }),
     }),
   });
-  const engine = new ConversationEngine({ config, model, sources: [] });
+  const engine = new ConversationEngine({
+    settings: config,
+    provider: "mock",
+    modelName: "mock",
+    model,
+    sources: [],
+  });
   const server = new RuntimeServer(engine, serverConn);
   assert.ok(server);
 
@@ -1995,7 +2004,9 @@ test("RuntimeServer session.abort 取消当前 turn 并保留 session", async ()
 test("RuntimeServer session.close 完整释放并移除 session", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([[]]),
     sources: [],
   });
@@ -2067,7 +2078,9 @@ test("RuntimeServer session.close 完整释放并移除 session", async () => {
 test("RuntimeServer.abortAll 等待所有 session close 完成", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([[]]),
     sources: [],
   });
@@ -2128,7 +2141,9 @@ test("RuntimeServer.abortAll 等待所有 session close 完成", async () => {
 test("RuntimeServer 未知 session 返回错误响应", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([[]]),
     sources: [],
   });
@@ -2388,7 +2403,9 @@ test("RuntimeServer 每条连接只能选择 Runtime Protocol 或 legacy session
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-v1-server-"));
   const store = new ThreadStore(storeDir);
   const engine = new ConversationEngine({
-    config,
+    provider: "mock",
+    modelName: "mock",
+    settings: config,
     model: sequencedModel([
       [
         { type: "stream-start", warnings: [] },
@@ -4062,7 +4079,9 @@ test(
     const store = new ThreadStore(dir);
     const { serverConn, clientConn } = memoryPair();
     const engine = new ConversationEngine({
-      config,
+      provider: "mock",
+      modelName: "mock",
+      settings: config,
       store,
       sources: [],
       policy: new DefaultToolPolicy(),

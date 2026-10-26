@@ -6,6 +6,7 @@ import type { EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { getChatGptAuthService } from "../auth/chatgpt/service.ts";
 import { createChatGptModel } from "../llm/chatgpt-model.ts";
+import { providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
 import { chatGptThinkingLevels } from "../llm/thinking-levels.ts";
 import type { LlmModelChoice } from "../llm/model-choices.ts";
 import { listLlmModelChoices } from "../llm/model-choices.ts";
@@ -23,6 +24,7 @@ export type ChatGptAuth = Pick<
 > &
   Partial<Pick<ReturnType<typeof getChatGptAuthService>, "cachedModels">>;
 export type ChatGptModels = Awaited<ReturnType<ChatGptAuth["models"]>>;
+/** Also passed as a whole EngineModelSwitch during reconnect/window synchronization. */
 export type InteractiveChatLlm = ReturnType<typeof resolveChatLlmCalls> & {
   readonly provider: string;
   readonly modelName: string;
@@ -107,6 +109,7 @@ export async function resolveInteractiveChatLlm(
     return {
       provider,
       modelName,
+      toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
       ...(accountId ? { accountId } : {}),
       models,
       connection,
@@ -154,6 +157,7 @@ export async function resolveInteractiveChatLlm(
   return {
     provider,
     modelName,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
     accountId,
     models,
     model: createChatGptModel({
@@ -206,6 +210,7 @@ export async function resolveInteractiveChatSwitch(
     provider: resolution.provider,
     modelName: resolution.modelName,
     model: resolution.model,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(resolution.provider, issues),
     ...(resolution.modelRecovery ? { modelRecovery: resolution.modelRecovery } : {}),
     ...(resolution.providerOptions ? { providerOptions: resolution.providerOptions } : {}),
     ...(resolution.structuredOutputProviderOptions

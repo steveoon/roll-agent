@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { modelMessageSchema, type ModelMessage } from "ai";
-import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
+import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
 import {
   applyExplicitSkillContext,
   attachExplicitSkillCheckpoint,

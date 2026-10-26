@@ -1,9 +1,11 @@
 import type { ChildProcess } from "node:child_process";
 import type { EngineModelSwitch } from "@roll-agent/runtime";
+import { runtimeSettingsSchema, type RuntimeSettings } from "@roll-agent/runtime/host-contracts";
 import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-binding.ts";
 import { inspectLlmConfigReadiness, type LlmConfigReadiness } from "../config/helpers.ts";
 import type { RollConfig } from "../config/schema.ts";
-import { resolveLLMCall } from "../llm/providers.ts";
+import { providerAcceptsToolSchemaIssues, resolveLLMCall } from "../llm/providers.ts";
+import { CoreAgentHost } from "./agent-host.ts";
 import { isDebugLogEnabled, log } from "../cli/utils/output.ts";
 
 export type RuntimeModule = typeof import("@roll-agent/runtime");
@@ -82,9 +84,18 @@ function reportWorkspaceInstructionsIssue(message: string): void {
 }
 
 export function createChatEngine(input: CreateChatEngineInput) {
+  const provider = input.config.runtime.provider ?? input.config.llm.defaultProvider;
   return new input.runtime.ConversationEngine({
-    config: input.config,
+    settings: mapRuntimeSettings(input.config),
+    provider,
+    modelName: input.config.runtime.model ?? input.config.llm.defaultModel,
     model: input.model,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
+    agentHost: new CoreAgentHost({
+      config: input.config,
+      onAgentBootstrapIssue: reportAgentBootstrapIssue,
+      onSkillLibraryIssue: reportSkillLibraryIssue,
+    }),
     store: input.store,
     hostMode: chatHostModeForSurface(input.surface),
     policy: input.policy ?? createToolPolicy(input.runtime, input.config),
@@ -106,10 +117,23 @@ export function createChatEngine(input: CreateChatEngineInput) {
     scheduleTools: createScheduleToolBinding(),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
-    onSkillLibraryIssue: reportSkillLibraryIssue,
     onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,
     ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
     ...(input.onShellCommandSpawn ? { onShellCommandSpawn: input.onShellCommandSpawn } : {}),
+  });
+}
+
+/** Explicitly project execution settings; credentials and discovery configuration stay in Core. */
+export function mapRuntimeSettings(config: RollConfig): RuntimeSettings {
+  return runtimeSettingsSchema.parse({
+    maxSteps: config.runtime.maxSteps,
+    turnTimeoutMs: config.runtime.turnTimeoutMs,
+    ...(config.runtime.contextWindow === undefined
+      ? {}
+      : { contextWindow: config.runtime.contextWindow }),
+    compaction: config.runtime.compaction,
+    shell: config.runtime.shell,
+    instructions: config.chat.instructions,
   });
 }
 
@@ -139,6 +163,7 @@ export function resolveChatLlmSwitch(
   return {
     provider: choice.provider,
     modelName: choice.model,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(choice.provider, issues),
     model: calls.model,
     ...(calls.providerOptions ? { providerOptions: calls.providerOptions } : {}),
     ...(calls.structuredOutputProviderOptions
@@ -182,6 +207,7 @@ export function resolveChatLlmCalls(
   compactionUsesStructuredOutput = true,
 ): {
   readonly model: NonNullable<ChatEngineOptions["model"]>;
+  readonly toolSchemaPolicy: NonNullable<ChatEngineOptions["toolSchemaPolicy"]>;
   readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
   readonly structuredOutputProviderOptions?: NonNullable<
     ChatEngineOptions["structuredOutputProviderOptions"]
@@ -201,6 +227,7 @@ export function resolveChatLlmCalls(
     : undefined;
   return {
     model: chat.model,
+    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
     ...(chat.providerOptions ? { providerOptions: chat.providerOptions } : {}),
     ...(structuredOutput?.providerOptions
       ? { structuredOutputProviderOptions: structuredOutput.providerOptions }

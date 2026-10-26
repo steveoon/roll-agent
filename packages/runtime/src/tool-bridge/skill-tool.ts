@@ -1,6 +1,6 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
+import { SKILL_TOOL_ID, type SkillLibrary } from "../skills/contracts.ts";
 import type { ToolRegistry } from "./naming.ts";
 import {
   TOOL_OUTCOME_KINDS,
