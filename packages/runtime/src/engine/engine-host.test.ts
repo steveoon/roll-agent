@@ -357,6 +357,220 @@ test("rejected Provider options preserve live sessions, future sessions and Samp
   }
 });
 
+for (const update of ["model", "options"] as const) {
+  for (const work of ["send", "compact"] as const) {
+    test(`${update} updates reject reentrant ${work} before accepting work and release the guard`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "roll-host-reentrant-work-"));
+      const store = new ThreadStore(dir);
+      const initial = model("original model");
+      const next = model("next model");
+      const initialOptions = { mock: { effort: "low" } };
+      const nextOptions = { mock: { effort: "high" } };
+      const attempted = deferred<unknown>();
+      let reenter: (() => void) | undefined;
+      let sampling: LanguageModelV4 = initial;
+      let sampledOptions: SharedV4ProviderOptions | undefined;
+      const engine = new ConversationEngine(
+        options({
+          store,
+          model: initial,
+          providerOptions: initialOptions,
+          agentHost: host({
+            updateSampling: (value, providerOptions) => {
+              sampling = value;
+              sampledOptions = providerOptions;
+              const callback = reenter;
+              reenter = undefined;
+              callback?.();
+            },
+          }),
+        }),
+      );
+      const existing = await engine.createSession();
+      const iterator = (
+        work === "send" ? existing.send("must not be accepted") : existing.compact()
+      )[Symbol.asyncIterator]();
+      reenter = () => {
+        iterator.next().then(attempted.resolve, attempted.resolve);
+      };
+      try {
+        assert.doesNotThrow(() => {
+          if (update === "model") {
+            engine.switchModel({
+              provider: "next",
+              modelName: "next-model",
+              model: next,
+              providerOptions: nextOptions,
+            });
+          } else {
+            existing.setProviderOptions(nextOptions);
+          }
+        });
+        const error = await attempted.promise;
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /模型配置正在更新/);
+        assert.equal(existing.canSwitchModel(), true);
+        assert.equal(existing.getMessages().length, 0);
+        assert.equal(store.listTranscriptMessages(existing.id).length, 0);
+        assert.equal(initial.doStreamCalls.length, 0);
+        assert.equal(next.doStreamCalls.length, 0);
+        const expected = update === "model" ? next : initial;
+        assert.equal(sampling, expected);
+        assert.equal(sampledOptions, nextOptions);
+        const future = await engine.createSession();
+        for (const session of [existing, future]) {
+          assert.equal(
+            store.getThread(session.id)?.model,
+            update === "model" ? "next-model" : "fixture",
+          );
+          for await (const event of session.send("accepted after the update")) {
+            assert.notEqual(event.type, "error");
+          }
+        }
+        assert.equal(expected.doStreamCalls.length, 2);
+        assert.deepEqual(
+          expected.doStreamCalls.map((call) => call.providerOptions),
+          [nextOptions, nextOptions],
+        );
+      } finally {
+        reenter = undefined;
+        await iterator.return?.();
+        await engine.dispose();
+        store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test(`${update} updates reject recursive model and Provider-option changes before Sampling writes`, async () => {
+    const initial = model("original model");
+    const next = model("next model");
+    const unexpected = model("must not be selected");
+    const initialOptions = { mock: { effort: "low" } };
+    const nextOptions = { mock: { effort: "high" } };
+    let reenter: (() => void) | undefined;
+    let updates = 0;
+    let sampling: LanguageModelV4 = initial;
+    let sampledOptions: SharedV4ProviderOptions | undefined;
+    const engine = new ConversationEngine(
+      options({
+        model: initial,
+        providerOptions: initialOptions,
+        agentHost: host({
+          updateSampling: (value, providerOptions) => {
+            updates++;
+            sampling = value;
+            sampledOptions = providerOptions;
+            const callback = reenter;
+            reenter = undefined;
+            callback?.();
+          },
+        }),
+      }),
+    );
+    try {
+      const existing = await engine.createSession();
+      const before = updates;
+      reenter = () => {
+        assert.throws(
+          () =>
+            engine.switchModel({
+              provider: "unexpected",
+              modelName: "unexpected",
+              model: unexpected,
+            }),
+          /模型配置正在更新/,
+        );
+        assert.throws(() => existing.setProviderOptions(initialOptions), /模型配置正在更新/);
+      };
+      if (update === "model") {
+        engine.switchModel({
+          provider: "next",
+          modelName: "next-model",
+          model: next,
+          providerOptions: nextOptions,
+        });
+      } else {
+        existing.setProviderOptions(nextOptions);
+      }
+      assert.equal(updates, before + 1);
+      assert.equal(sampling, update === "model" ? next : initial);
+      assert.equal(sampledOptions, nextOptions);
+      const future = await engine.createSession();
+      for (const session of [existing, future]) {
+        for await (const event of session.send("after the update")) {
+          assert.notEqual(event.type, "error");
+        }
+      }
+      const expected = update === "model" ? next : initial;
+      assert.equal(expected.doStreamCalls.length, 2);
+      assert.equal(unexpected.doStreamCalls.length, 0);
+      assert.deepEqual(
+        expected.doStreamCalls.map((call) => call.providerOptions),
+        [nextOptions, nextOptions],
+      );
+    } finally {
+      reenter = undefined;
+      await engine.dispose();
+    }
+  });
+}
+
+test("a turn queued by the host runs after all sessions and Sampling switch models", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-host-queued-turn-"));
+  const store = new ThreadStore(dir);
+  const initial = model("original model");
+  const next = model("next model");
+  const finished = deferred<void>();
+  let queueTurn: (() => void) | undefined;
+  let sampling: LanguageModelV4 = initial;
+  const engine = new ConversationEngine(
+    options({
+      store,
+      model: initial,
+      agentHost: host({
+        updateSampling: (value) => {
+          sampling = value;
+          queueTurn?.();
+        },
+      }),
+    }),
+  );
+  try {
+    const existing = await engine.createSession();
+    const other = await engine.createSession();
+    queueTurn = () => {
+      queueMicrotask(() => {
+        (async () => {
+          for await (const event of existing.send("queued during model update")) {
+            assert.notEqual(event.type, "error");
+          }
+        })().then(() => finished.resolve(), finished.reject);
+      });
+    };
+    engine.switchModel({ provider: "next", modelName: "next-model", model: next });
+    queueTurn = undefined;
+    await finished.promise;
+    const future = await engine.createSession();
+    for (const session of [other, future]) {
+      for await (const event of session.send("after model update")) {
+        assert.notEqual(event.type, "error");
+      }
+    }
+    assert.equal(sampling, next);
+    assert.equal(initial.doStreamCalls.length, 0);
+    assert.equal(next.doStreamCalls.length, 3);
+    for (const session of [existing, other, future]) {
+      assert.equal(store.getThread(session.id)?.model, "next-model");
+    }
+  } finally {
+    queueTurn = undefined;
+    await engine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cleanup preserves all session and host errors and repeat dispose preserves failure", async () => {
   const hostError = new Error("host release failed");
   const sessionError = new Error("session cleanup failed");

@@ -43,6 +43,7 @@ export interface AgentHost {
   /**
    * Synchronous memory update; must not open connections or perform external I/O.
    * Validate before writing: a thrown error must leave the previous Sampling state intact.
+   * Must not synchronously start Runtime work or reenter model/Provider-option updates.
    */
   updateSampling(
     model: LanguageModelV4,

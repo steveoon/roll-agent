@@ -235,6 +235,8 @@ export interface SessionModelSwitch {
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
+  /** @internal Synchronous engine admission before accepting input or starting compaction. */
+  readonly onBeforeTurn?: () => void;
   readonly modelRecovery?: ModelTurnRecovery;
   readonly sources: readonly AgentToolSource[];
   readonly maxSteps: number;
@@ -701,6 +703,7 @@ export class AgentSession {
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private readonly onClose: (() => void) | undefined;
+  private readonly onBeforeTurn: AgentSessionOptions["onBeforeTurn"];
   private providerOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputReasoning:
@@ -805,6 +808,7 @@ export class AgentSession {
     this.compaction = options.compaction;
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.onClose = options.onClose;
+    this.onBeforeTurn = options.onBeforeTurn;
     this.providerOptions = options.providerOptions;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
@@ -1206,6 +1210,7 @@ export class AgentSession {
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
+    this.onBeforeTurn?.();
     const normalizedInput = normalizeSessionSendInput(input);
 
     const queue = new AsyncEventQueue<SessionEvent>();
@@ -1239,6 +1244,7 @@ export class AgentSession {
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
+    this.onBeforeTurn?.();
 
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);

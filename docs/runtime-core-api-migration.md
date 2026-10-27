@@ -76,4 +76,6 @@ Core 通过 MCP scoped acquisition 跟踪连接所有权。一次获取失败只
 
 宿主 Sampling 校验在会话检查之后、模型状态写入之前执行；宿主拒绝时，Runtime 模型和持久化标识保持原值。`toolSchemaPolicy` 必须是无副作用、不会抛错的判定函数，不应执行 I/O 或在其中修改会话。此同步契约不为任意用户回调提供事务回滚。
 
+模型和 Provider options 更新期间，Engine 会拒绝同步重入的切换、参数更新及已有会话的 `send()` / `compact()`；工作在接受输入和建立活动轮次前被拒绝。保护在同步更新结束或失败后释放。宿主只应同步更新 Sampling 内存状态，后续工作应由调用方在更新成功返回后启动。
+
 恢复继续使用 `ModelTurnRecovery`。本次拆分不重置整轮 deadline、maxSteps，也不重放已经完成的工具操作。摘要请求继续使用已注入模型及专门的 structured-output 参数。

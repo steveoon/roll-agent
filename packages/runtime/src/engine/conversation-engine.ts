@@ -429,6 +429,7 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
+      onBeforeTurn: this.assertModelUpdateIdle,
       ...(this.modelRecovery === undefined ? {} : { modelRecovery: this.modelRecovery }),
       sources: context.sources,
       toolSchemaPolicy: this.toolSchemaPolicy,
@@ -523,56 +524,69 @@ export class ConversationEngine {
     return recovered === undefined ? [] : [recovered];
   }
 
+  private readonly assertModelUpdateIdle = (): void => {
+    if (this.switchingProviderName !== undefined) {
+      throw new Error("模型配置正在更新，请稍后再试");
+    }
+  };
+
   private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
-    this.agentHost?.updateSampling(this.modelOverride ?? this.explicitModel, providerOptions);
-    this.providerOptions = providerOptions;
+    this.assertModelUpdateIdle();
+    this.switchingProviderName = this.provider;
+    try {
+      this.agentHost?.updateSampling(this.modelOverride ?? this.explicitModel, providerOptions);
+      this.providerOptions = providerOptions;
+    } finally {
+      this.switchingProviderName = undefined;
+    }
   }
 
   switchModel(input: EngineModelSwitch): ContextWindowResolution | undefined {
     this.assertAcceptingSessions();
-    const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
-    const sessionSwitch = {
-      model: input.model,
-      ...(input.modelRecovery === undefined ? {} : { modelRecovery: input.modelRecovery }),
-      ...(resolution !== undefined
-        ? { contextWindow: resolution.window, contextWindowSource: resolution.source }
-        : {}),
-      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
-      ...(input.structuredOutputProviderOptions
-        ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
-        : {}),
-      ...(input.structuredOutputReasoning
-        ? { structuredOutputReasoning: input.structuredOutputReasoning }
-        : {}),
-      toolSchemaPolicy: input.toolSchemaPolicy ?? strictToolSchemaPolicy,
-    } satisfies SessionModelSwitch;
-    for (const session of this.liveSessions.values()) {
-      if (!session.canSwitchModel()) {
-        throw new Error("存在正在生成回复的会话，稍后再切换模型");
-      }
-    }
-    // Host validation can fail; do it before mutating any session or stored model identity.
-    this.agentHost?.updateSampling(input.model, input.providerOptions);
+    this.assertModelUpdateIdle();
     this.switchingProviderName = input.provider;
     try {
+      const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
+      const sessionSwitch = {
+        model: input.model,
+        ...(input.modelRecovery === undefined ? {} : { modelRecovery: input.modelRecovery }),
+        ...(resolution !== undefined
+          ? { contextWindow: resolution.window, contextWindowSource: resolution.source }
+          : {}),
+        ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+        ...(input.structuredOutputProviderOptions
+          ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+          : {}),
+        ...(input.structuredOutputReasoning
+          ? { structuredOutputReasoning: input.structuredOutputReasoning }
+          : {}),
+        toolSchemaPolicy: input.toolSchemaPolicy ?? strictToolSchemaPolicy,
+      } satisfies SessionModelSwitch;
+      for (const session of this.liveSessions.values()) {
+        if (!session.canSwitchModel()) {
+          throw new Error("存在正在生成回复的会话，稍后再切换模型");
+        }
+      }
+      // Host validation can fail; do it before mutating any session or stored model identity.
+      this.agentHost?.updateSampling(input.model, input.providerOptions);
       for (const session of this.liveSessions.values()) {
         session.switchModel(sessionSwitch);
       }
+      this.modelOverride = input.model;
+      this.modelName = input.modelName;
+      this.provider = input.provider;
+      this.toolSchemaPolicy = sessionSwitch.toolSchemaPolicy;
+      this.providerOptions = input.providerOptions;
+      this.modelRecovery = input.modelRecovery;
+      this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
+      this.structuredOutputReasoning = input.structuredOutputReasoning;
+      for (const id of this.liveSessions.keys()) {
+        this.store?.updateModel(id, input.modelName);
+      }
+      return resolution;
     } finally {
       this.switchingProviderName = undefined;
     }
-    this.modelOverride = input.model;
-    this.modelName = input.modelName;
-    this.provider = input.provider;
-    this.toolSchemaPolicy = sessionSwitch.toolSchemaPolicy;
-    this.providerOptions = input.providerOptions;
-    this.modelRecovery = input.modelRecovery;
-    this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
-    this.structuredOutputReasoning = input.structuredOutputReasoning;
-    for (const id of this.liveSessions.keys()) {
-      this.store?.updateModel(id, input.modelName);
-    }
-    return resolution;
   }
 
   private ensureReady(): Promise<EngineContext> {
