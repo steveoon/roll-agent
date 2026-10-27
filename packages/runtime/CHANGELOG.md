@@ -1,5 +1,56 @@
 # @roll-agent/runtime
 
+## 1.0.0
+
+### Major Changes
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Make Runtime independently consumable by removing its reverse dependency on Core. `ConversationEngine` now requires execution-only `RuntimeSettings`, an injected model and its provider/model identity; dynamic Agent integration uses an `AgentHost` instead of Core registries and MCP managers. Static tool sources remain caller-owned. Skills, tool validation and host contracts are available through dedicated leaf exports.
+  
+  Core assembles the existing chat, Runtime service, Companion and scheduler entry points through the new host boundary, preserving CLI configuration, approval, recovery, persistence and wire behavior. Direct Runtime TypeScript consumers must migrate their engine construction and model-switch integration to the new contracts.
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Upgrade Zod to 4.6.6 to address oversized-array validation denial of service
+  (GHSA-mrhx-c7xc-m3w5). SDK tool schemas and the exported Core, Runtime, Browser,
+  Companion, and Reply Authority Client schemas now use Zod 4; TypeScript consumers using
+  Zod 3 must migrate their schema definitions and composition. See
+  `docs/how-to-migrate-zod4.md` for the required changes.
+  
+  Preserve nested configuration defaults, YAML key mapping, configuration UI
+  constraints, tool preprocessing/refinements, and application-output validation.
+  Runtime and Relay wire versions and payload formats remain unchanged; Protocol
+  1.6 envelopes retain strict validation and capability checks with Zod 4.6.
+  Protocol now exports `uuidSchema` so Relay can share the frozen UUID validation;
+  existing UUID and timestamp acceptance and Relay schema fingerprints are preserved.
+  Standalone installer builds resolve subpath manifests to the owning package so
+  that the bundled Zod license is included correctly.
+
+### Patch Changes
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Update AI SDK to 7.0.146 and refresh the OpenAI, Anthropic, Google, DeepSeek,
+  Alibaba, and xAI providers. Core and Runtime use provider types 4.0.31. The xAI
+  upgrade retains Roll's existing Responses API integration; configuration keys
+  and model selection remain unchanged.
+  
+  Pin OpenAI to 4.0.59: newer versions filter reasoning efforts using a fixed model
+  list, which would silently drop `none` even when the ChatGPT model catalog
+  advertises it. Preserve catalog-driven thinking settings without changing the
+  subscription transport.
+  
+  Preserve same-turn ChatGPT recovery when the SDK wraps an interrupted response
+  body in a successful-HTTP-status error. Recovery still requires typed transport
+  evidence; parser, authorization, and quota failures remain terminal.
+  
+  Update the shared AI SDK HTTP dependency, undici, to 7.30.1 to include its
+  security fixes. All selected versions satisfy the existing seven-day release
+  cooldown.
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Update the resolved body-parser dependency to 2.4.0 to fix GHSA-27r3-jxmh-p828, a denial-of-service vulnerability in compressed HTTP request parsing.
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - 修复 Zod 4 升级后 OpenAI 拒绝定时任务、交互表单及 MCP 工具中的判别联合 schema，导致普通聊天请求也无法执行的问题。仅将具有互斥必填判别字段的 `oneOf` 转换为等价 `anyOf`，保留原始参数校验、转换与工具执行契约。
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Reject synchronous reentry during model and Provider-option updates before accepting a new turn or compaction. Keep Sampling and session configuration aligned, preserve existing state when the host rejects an update, and release the update guard so later work can proceed.
+- Updated dependencies [[`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486)]:
+  - @roll-agent/protocol@0.10.0
+
 ## 0.27.0
 
 ### Minor Changes
