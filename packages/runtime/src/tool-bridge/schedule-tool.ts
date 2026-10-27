@@ -11,6 +11,7 @@ import { SCHEDULE_STATUSES } from "../scheduler/types.ts";
 import { systemTimeZone } from "../scheduler/calendar.ts";
 import { computeNextRunAtMs } from "../scheduler/trigger.ts";
 import { scheduleCreateInputSchema, toScheduleCreateRequest } from "./schedule-create-input.ts";
+import { modelToolInputSchema } from "./model-input-schema.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
 import {
@@ -212,7 +213,7 @@ export function buildScheduleToolset(
           [createId]: tool({
             description:
               "登记定时任务，每轮无人值守 chat 执行 prompt。startAt=开始时间，recurrence=重复规则，rounds=总轮数，三个维度独立。今天/明天某时不是 daily；缺少两轮间隔先澄清，不能猜成每天一次。信息齐全后只做工具自带的完整参数确认，不重复口头确认。可选值用 null 表示缺省。不支持 cron 或每天开启一组多轮循环。",
-            inputSchema: scheduleCreateInputSchema,
+            inputSchema: modelToolInputSchema(scheduleCreateInputSchema),
             strict: true,
             toModelOutput: ({ output }) => toolResultToModelOutput(output),
             execute: async (

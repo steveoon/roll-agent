@@ -56,6 +56,27 @@ test("schedule creation explicitly opts into provider strict mode", () => {
   assert.equal(modelTool().strict, true);
 });
 
+test("model schema projection preserves schedule input transformations", async () => {
+  const schema = asSchema(modelTool().inputSchema);
+  const wire = await schema.jsonSchema;
+  assert.doesNotMatch(JSON.stringify(wire), /"oneOf":/u);
+  assert.match(JSON.stringify(wire), /"anyOf":/u);
+  assert.ok(schema.validate);
+  const input = {
+    ...defaults,
+    name: "  probe  ",
+    recurrence: {
+      kind: "weekly",
+      time: "08:00",
+      weekdays: [5, 1, 1],
+      timeZone: "Asia/Shanghai",
+    },
+  };
+  const result = await schema.validate(input);
+  assert.ok(result.success);
+  assert.deepEqual(result.value, scheduleCreateInputSchema.parse(input));
+});
+
 test("recurrence variants map to the unchanged Core contract and discard only declared null defaults", () => {
   assert.deepEqual(
     toScheduleCreateRequest(

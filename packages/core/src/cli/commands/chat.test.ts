@@ -169,7 +169,7 @@ test("resolveChatLlmCalls lets compaction override the global thinking level", (
   );
 
   assert.deepEqual(resolved.providerOptions, {
-    anthropic: { thinking: { type: "adaptive" }, effort: "low" },
+    anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" },
   });
   assert.equal(resolved.structuredOutputReasoning, "high");
 });

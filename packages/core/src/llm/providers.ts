@@ -10,6 +10,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { wrapLanguageModel } from "ai";
+import { projectAnthropicStrictToolSchema } from "./anthropic-tool-schema.ts";
 import {
   requireLegacyThinkingLevel,
   type LegacyThinkingLevel,
@@ -140,7 +141,9 @@ export function thinkingProviderOptions(
       return { anthropic: { thinking: { type: "disabled" } } };
     }
     if (supportsAnthropicAdaptiveThinking(modelName)) {
-      return { anthropic: { thinking: { type: "adaptive" }, effort: level } };
+      return {
+        anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: level },
+      };
     }
     return { anthropic: { thinking: { type: "enabled", budgetTokens: THINKING_BUDGETS[level] } } };
   }
@@ -189,7 +192,24 @@ const QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   anthropic: (modelName, { apiKey, baseURL }) => {
     const provider = createAnthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    return provider(modelName);
+    return wrapLanguageModel({
+      model: provider(modelName),
+      middleware: {
+        transformParams: async ({ params }) => {
+          if (!params.tools?.some((tool) => tool.type === "function" && tool.strict === true)) {
+            return params;
+          }
+          return {
+            ...params,
+            tools: params.tools.map((tool) =>
+              tool.type === "function" && tool.strict === true
+                ? { ...tool, inputSchema: projectAnthropicStrictToolSchema(tool.inputSchema) }
+                : tool,
+            ),
+          };
+        },
+      },
+    });
   },
   openai: (modelName, { apiKey, baseURL }) => {
     const provider = createOpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });

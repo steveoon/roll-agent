@@ -10,6 +10,7 @@ import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "../tool-contracts/preflight.ts";
+import { modelToolInputSchema } from "./model-input-schema.ts";
 import {
   readExecutionTimeoutMs,
   ROLL_EXECUTION_TIMEOUT_META_KEY,
@@ -518,7 +519,9 @@ export function buildAgentToolset(
       ctx.coordinator?.register(id, plan);
       tools[id] = tool({
         description: agentTool.description ?? `${agentTool.name} (via ${agentName})`,
-        inputSchema: jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
+        inputSchema: modelToolInputSchema(
+          jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
+        ),
         toModelOutput: ({ output }) =>
           output.outcome.kind === TOOL_OUTCOME_KINDS.success
             ? (currentObservationModelOutput(output.raw, observationRetention) ??

@@ -21,6 +21,58 @@ describe("createProviderModel", () => {
     assert.equal(model.modelId, "claude-sonnet-4-6");
   });
 
+  for (const strict of [undefined, false, true]) {
+    it(`Anthropic adapts only strict function tools (strict: ${strict})`, async () => {
+      const originalFetch = globalThis.fetch;
+      const schema = {
+        type: "object" as const,
+        properties: { name: { type: "string" as const, maxLength: 10 } },
+        required: ["name"],
+        additionalProperties: false,
+      };
+      let captured = false;
+      try {
+        globalThis.fetch = async (_url, init) => {
+          const body: unknown = JSON.parse(String(init?.body));
+          assert.ok(isRecord(body) && Array.isArray(body.tools));
+          const wire: unknown = body.tools[0];
+          assert.ok(isRecord(wire));
+          assert.equal(wire.strict, strict);
+          assert.deepEqual(
+            wire.input_schema,
+            strict === true
+              ? {
+                  ...schema,
+                  properties: {
+                    name: { type: "string", description: "Constraints: maxLength=10." },
+                  },
+                }
+              : schema,
+          );
+          captured = true;
+          return new Response("", { headers: { "content-type": "text/event-stream" } });
+        };
+        const model = createProviderModel("anthropic", "claude-sonnet-5", "fixture-key");
+        const result = await model.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+          tools: [
+            {
+              type: "function",
+              name: "probe",
+              inputSchema: schema,
+              ...(strict === undefined ? {} : { strict }),
+            },
+          ],
+        });
+        await result.stream.cancel();
+        assert.equal(captured, true);
+        assert.equal(schema.properties.name.maxLength, 10);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+
   it("should create an openai model", () => {
     const model = createProviderModel("openai", "gpt-5.5", "test-key");
     assert.ok(model);
@@ -276,7 +328,7 @@ describe("resolveLLMCall", () => {
     assert.deepEqual(off.providerOptions, { alibaba: { enableThinking: false } });
     const high = resolveLLMCall("anthropic", "claude-sonnet-4-6", "k", "chat", undefined, "high");
     assert.deepEqual(high.providerOptions, {
-      anthropic: { thinking: { type: "adaptive" }, effort: "high" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
     });
   });
 
@@ -440,7 +492,9 @@ describe("resolveLLMCall", () => {
       {
         provider: "anthropic",
         model: "claude-sonnet-4-6",
-        expected: { anthropic: { thinking: { type: "adaptive" }, effort: "high" } },
+        expected: {
+          anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+        },
       },
       {
         provider: "qwen",
@@ -710,19 +764,19 @@ describe("thinkingProviderOptions", () => {
 
   it("maps anthropic 4.6+ thinking to adaptive effort", () => {
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-4-6", "low"), {
-      anthropic: { thinking: { type: "adaptive" }, effort: "low" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" },
     });
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-opus-5-0", "high"), {
-      anthropic: { thinking: { type: "adaptive" }, effort: "high" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
     });
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-5", "medium"), {
-      anthropic: { thinking: { type: "adaptive" }, effort: "medium" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "medium" },
     });
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-fable-5", "high"), {
-      anthropic: { thinking: { type: "adaptive" }, effort: "high" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
     });
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-5-20260601", "low"), {
-      anthropic: { thinking: { type: "adaptive" }, effort: "low" },
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" },
     });
   });
 
