@@ -3,6 +3,7 @@ packages:
   - "agents/*"
 
 overrides:
+  "body-parser@>=2.0.0 <2.4.0": 2.4.0
   "browserslist@4.28.5": 4.28.8
   "fast-uri@>=3.0.0 <3.1.8": 3.1.8
   hono: 4.12.25
@@ -23,6 +24,8 @@ strictPeerDependencies: false
 
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
+  # Reviewed security fix for GHSA-27r3-jxmh-p828; eligible normally on 2026-10-29.
+  - "body-parser@2.4.0"
   - esbuild
   - "@esbuild/*"
   - "nanoid@3.3.18"
