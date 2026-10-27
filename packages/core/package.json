@@ -146,7 +146,7 @@
     "string-width": "8.2.1",
     "yaml": "^2.7.0",
     "yauzl": "3.4.0",
-    "zod": "^3.25.76"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.2",

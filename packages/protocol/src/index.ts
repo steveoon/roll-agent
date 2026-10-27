@@ -302,16 +302,35 @@ export const TOOL_OUTCOME_KINDS = [
   "tool_failed",
 ] as const;
 
-export const threadIdSchema = z.string().uuid().brand<"ThreadId">();
-export const turnIdSchema = z.string().uuid().brand<"TurnId">();
-export const approvalIdSchema = z.string().uuid().brand<"ApprovalId">();
-export const interactionIdSchema = z.string().uuid().brand<"InteractionId">();
-export const runtimeInstanceIdSchema = z.string().uuid().brand<"RuntimeInstanceId">();
-export const requestIdSchema = z.string().uuid().brand<"RequestId">();
-export const streamIdSchema = z.string().uuid().brand<"StreamId">();
-export const operationIdSchema = z.string().uuid().brand<"OperationId">();
-export const runtimeEventIdSchema = z.string().uuid().brand<"RuntimeEventId">();
-export const attachmentIdSchema = z.string().uuid().brand<"AttachmentId">();
+// Wire formats are owned by Protocol: dependency upgrades must not broaden UUIDs or
+// reject timestamps that existing clients could send (including minute precision).
+export const uuidSchema = z
+  .string()
+  .check(
+    z.stringFormat(
+      "uuid",
+      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000)$/,
+    ),
+  );
+export const timestampSchema = z
+  .string()
+  .check(
+    z.stringFormat(
+      "datetime",
+      /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|([+-]\d{2}:\d{2})))$/,
+    ),
+  );
+
+export const threadIdSchema = uuidSchema.clone().brand<"ThreadId">();
+export const turnIdSchema = uuidSchema.clone().brand<"TurnId">();
+export const approvalIdSchema = uuidSchema.clone().brand<"ApprovalId">();
+export const interactionIdSchema = uuidSchema.clone().brand<"InteractionId">();
+export const runtimeInstanceIdSchema = uuidSchema.clone().brand<"RuntimeInstanceId">();
+export const requestIdSchema = uuidSchema.clone().brand<"RequestId">();
+export const streamIdSchema = uuidSchema.clone().brand<"StreamId">();
+export const operationIdSchema = uuidSchema.clone().brand<"OperationId">();
+export const runtimeEventIdSchema = uuidSchema.clone().brand<"RuntimeEventId">();
+export const attachmentIdSchema = uuidSchema.clone().brand<"AttachmentId">();
 export const runtimeEventCursorSchema = z
   .string()
   .max(128)
@@ -319,7 +338,6 @@ export const runtimeEventCursorSchema = z
     /^rte1:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:(?:0|[1-9]\d*):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u,
   )
   .brand<"RuntimeEventCursor">();
-export const timestampSchema = z.string().datetime({ offset: true });
 export const jsonValueSchema = z.json();
 export const jsonRpcIdSchema = z.union([z.string(), z.number()]);
 export const runtimeProtocolVersionSchema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS);
@@ -1091,14 +1109,8 @@ const recoveryThreadSummarySchema = z
     id: threadIdSchema,
     title: z.string().max(RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS).optional(),
     model: z.string().max(RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS).optional(),
-    createdAt: z
-      .string()
-      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
-      .datetime({ offset: true }),
-    updatedAt: z
-      .string()
-      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
-      .datetime({ offset: true }),
+    createdAt: timestampSchema.max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS),
+    updatedAt: timestampSchema.max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS),
     messageCount: z.number().int().nonnegative(),
   })
   .strict()
@@ -1121,10 +1133,7 @@ const recoveryActiveTurnSchema = z
   .object({
     id: turnIdSchema,
     status: z.enum(["running", "cancelling", "waiting-for-user"]),
-    startedAt: z
-      .string()
-      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
-      .datetime({ offset: true }),
+    startedAt: timestampSchema.max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS),
   })
   .strict()
   .readonly();
@@ -1178,7 +1187,7 @@ export const threadSnapshotV15Schema = z.union([
 /** Bounded Harness state only; no model-authored recovery notes or fact contents cross the wire. */
 export const contextRecoveryViewSchema = z
   .object({
-    checkpointId: z.string().uuid(),
+    checkpointId: uuidSchema.clone(),
     required: z.boolean(),
     unextracted: z.boolean(),
     requiredItemCount: z.number().int().nonnegative(),
@@ -1985,19 +1994,28 @@ export const runtimeEventEnvelopeV15Schema = z.discriminatedUnion("durability", 
 ]);
 
 /** Any currently supported Runtime Event envelope. */
-export const runtimeDurableEventEnvelopeV16Schema =
-  runtimeDurableEventEnvelopeV15Schema.def.innerType
-    .extend({
-      protocolVersion: z.literal("1.6"),
-      event: runtimeDurableEventV16Schema,
-    })
-    .readonly();
-export const runtimeEphemeralEventEnvelopeV16Schema =
-  runtimeEphemeralEventEnvelopeV15Schema.def.innerType
-    .extend({
-      protocolVersion: z.literal("1.6"),
-    })
-    .readonly();
+export const runtimeDurableEventEnvelopeV16Schema = z
+  .object({
+    protocolVersion: z.literal("1.6"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("durable"),
+    eventId: runtimeEventIdSchema,
+    cursor: runtimeEventCursorSchema,
+    event: runtimeDurableEventV16Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+export const runtimeEphemeralEventEnvelopeV16Schema = z
+  .object({
+    protocolVersion: z.literal("1.6"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("ephemeral"),
+    event: runtimeEphemeralEventV13Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
 export const runtimeEventEnvelopeV16Schema = z.discriminatedUnion("durability", [
   runtimeDurableEventEnvelopeV16Schema,
   runtimeEphemeralEventEnvelopeV16Schema,

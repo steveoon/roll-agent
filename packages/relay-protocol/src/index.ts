@@ -28,6 +28,7 @@ import {
   threadIdSchema,
   threadSnapshotV11Schema,
   timestampSchema,
+  uuidSchema,
   turnIdSchema,
   userInputFormSchema,
   userInputResultSchema,
@@ -287,10 +288,10 @@ export function getRelayErrorRetryabilityV11(code: RelayErrorCodeV11): boolean {
 }
 
 export const relayProtocolVersionSchema = z.enum(SUPPORTED_RELAY_PROTOCOL_VERSIONS);
-export const deviceIdSchema = z.string().uuid().brand<"DeviceId">();
-export const workspaceIdSchema = z.string().uuid().brand<"WorkspaceId">();
-export const relayRequestIdSchema = z.string().uuid().brand<"RelayRequestId">();
-export const relayEnvelopeIdSchema = z.string().uuid();
+export const deviceIdSchema = uuidSchema.clone().brand<"DeviceId">();
+export const workspaceIdSchema = uuidSchema.clone().brand<"WorkspaceId">();
+export const relayRequestIdSchema = uuidSchema.clone().brand<"RelayRequestId">();
+export const relayEnvelopeIdSchema = uuidSchema.clone();
 export const relayInteractionIdSchema = interactionIdSchema;
 
 export const relayApprovalCandidateParamsSchema = z

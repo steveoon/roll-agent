@@ -44,6 +44,10 @@ import {
   RELAY_REPLAY_CONFORMANCE_CASES_V11,
 } from "../dist/conformance.js";
 import { z } from "zod/v4";
+import {
+  expandTypeUnions,
+  preserveDiscriminatedUnion,
+} from "../../../scripts/wire-json-schema.mjs";
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const frozenSchemaHashes = {
@@ -254,6 +258,7 @@ function generateSchema(config) {
   }
   const generatedSchemas = z.toJSONSchema(registry, {
     target: "draft-2020-12",
+    override: preserveDiscriminatedUnion,
   }).schemas;
   const definitionNames = new Set(
     Object.keys(generatedSchemas).filter((name) => name !== "__shared"),
@@ -267,7 +272,7 @@ function generateSchema(config) {
     if (name === "__shared") {
       continue;
     }
-    const { $schema: _schema, ...definition } = generatedSchema;
+    const { $schema: _schema, ...definition } = expandTypeUnions(generatedSchema);
     definitions[name] = rewriteReferences(definition, definitionNames, sharedDefinitionNames);
   }
   for (const [name, sharedSchema] of Object.entries(sharedDefinitions)) {
@@ -275,7 +280,11 @@ function generateSchema(config) {
     if (rootName === undefined || Object.hasOwn(definitions, rootName)) {
       throw new Error(`JSON Schema definition name collision: ${String(rootName)}`);
     }
-    definitions[rootName] = rewriteReferences(sharedSchema, definitionNames, sharedDefinitionNames);
+    definitions[rootName] = rewriteReferences(
+      expandTypeUnions(sharedSchema),
+      definitionNames,
+      sharedDefinitionNames,
+    );
   }
 
   const relayMessageDefinition = definitions.relayMessage;

@@ -68,7 +68,7 @@ const ReplyPreviewDiagnosticsSchema = z.object({
   clientTimeoutMs: z.number().int().positive().optional(),
   lastStartedPhase: z.string().min(1).optional(),
   activePhase: z.string().min(1).optional(),
-  phaseLatencies: z.record(z.number().int().min(0)).optional(),
+  phaseLatencies: z.record(z.string(), z.number().int().min(0)).optional(),
 });
 
 const OutputSchema = z

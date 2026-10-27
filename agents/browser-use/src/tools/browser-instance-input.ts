@@ -105,22 +105,23 @@ function resolvePlatformConstraint(
 
 function extendBrowserInstanceInput(schema: z.ZodType): z.ZodType | undefined {
   if (schema instanceof z.ZodObject) {
-    return schema.extend(BrowserInstanceInputSchema);
+    return schema.safeExtend(BrowserInstanceInputSchema);
   }
 
-  if (schema instanceof z.ZodEffects) {
-    const extendedInner = extendBrowserInstanceInput(schema.innerType());
+  if (schema instanceof z.ZodPipe) {
+    const isPreprocess = schema.in instanceof z.ZodTransform;
+    const inner = isPreprocess ? schema.out : schema.in;
+    if (!(inner instanceof z.ZodType)) return undefined;
+    const extendedInner = extendBrowserInstanceInput(inner);
     if (extendedInner === undefined) {
       return undefined;
     }
 
-    // Preserve root-level refine/superRefine contracts while exposing browserInstance to MCP.
-    const effect = schema._def.effect;
-    if (effect.type === "preprocess") {
-      return z.ZodEffects.createWithPreprocess(effect.transform, extendedInner, schema._def);
-    }
-
-    return z.ZodEffects.create(extendedInner, effect, schema._def);
+    // Preserve preprocessing/transforms while extending the input object.
+    return schema.clone({
+      ...schema._zod.def,
+      ...(isPreprocess ? { out: extendedInner } : { in: extendedInner }),
+    });
   }
 
   return undefined;

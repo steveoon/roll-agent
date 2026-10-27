@@ -145,7 +145,7 @@ export function withFormContext(
         : {}),
     }));
   request.state = {
-    ...z.record(z.unknown()).parse(request.state),
+    ...z.record(z.string(), z.unknown()).parse(request.state),
     ...(form ? { formControls: fieldInventory } : {}),
     executionContext: {
       ...summary,
@@ -361,7 +361,7 @@ export function withFormContext(
   const focus = form.fields.find((f) => f.id === form.focus);
   if (form.panel && focus) {
     request.state = {
-      ...z.record(z.unknown()).parse(request.state),
+      ...z.record(z.string(), z.unknown()).parse(request.state),
       currentEditor: {
         delegatedField: focus.name,
         relatedFields: form.fields
@@ -511,20 +511,20 @@ export function withFormContext(
   // A local editor decision needs its controls, not the surrounding record page.
   // The full delegation remains in ExecutionContext and is checked before dispatch.
   if (form.panel && focus) {
-    const view = z.record(z.unknown()).parse(request.state);
+    const view = z.record(z.string(), z.unknown()).parse(request.state);
     const refs = new Set(
       controls.filter((c) => c.modal || c.identity === focus.binding?.identity).map((c) => c.ref),
     );
     const rows = (value: unknown) =>
       Array.isArray(value)
         ? value.filter((row) => {
-            const record = z.record(z.unknown()).parse(row);
+            const record = z.record(z.string(), z.unknown()).parse(row);
             return typeof record.ref === "string" && refs.has(record.ref);
           })
         : value;
-    const executionView = z.record(z.unknown()).parse(view.executionContext);
-    const formView = z.record(z.unknown()).parse(executionView.form);
-    const fields = z.array(z.record(z.unknown())).parse(formView.fields);
+    const executionView = z.record(z.string(), z.unknown()).parse(view.executionContext);
+    const formView = z.record(z.string(), z.unknown()).parse(executionView.form);
+    const fields = z.array(z.record(z.string(), z.unknown())).parse(formView.fields);
     request.state = {
       ...view,
       pageText: undefined,

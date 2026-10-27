@@ -49,7 +49,7 @@
     "@roll-agent/client-node": "workspace:*",
     "@roll-agent/protocol": "workspace:*",
     "@roll-agent/relay-protocol": "workspace:*",
-    "zod": "3.25.76"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

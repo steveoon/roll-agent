@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 import type { ModelMessage } from "ai";
 import {
   buildCompactionCheckpointReminder,
@@ -436,7 +437,9 @@ test("Draft schema 拒绝把未知 Tool outcome 写入持久化 checkpoint", () 
           ],
         },
       } as unknown as CompactionCheckpointDraftInput),
-    /Invalid enum value/u,
+    (error: unknown) =>
+      error instanceof z.ZodError &&
+      error.issues.some((issue) => issue.code === "invalid_value" && issue.path.at(-1) === "kind"),
   );
 
   assert.throws(
@@ -460,7 +463,11 @@ test("Draft schema 拒绝把未知 Tool outcome 写入持久化 checkpoint", () 
           ],
         },
       } as unknown as CompactionCheckpointDraftInput),
-    /Invalid enum value|Invalid option/u,
+    (error: unknown) =>
+      error instanceof z.ZodError &&
+      error.issues.some(
+        (issue) => issue.code === "invalid_value" && issue.path.at(-1) === "executionState",
+      ),
   );
 });
 

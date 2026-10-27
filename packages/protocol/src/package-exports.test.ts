@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { z } from "zod";
 import { SUPPORTED_RUNTIME_PROTOCOL_VERSIONS } from "./index.ts";
 
-const exportsMapSchema = z.record(z.unknown());
+const exportsMapSchema = z.record(z.string(), z.unknown());
 const manifestSchema = z.object({
   exports: exportsMapSchema,
   publishConfig: z.object({ exports: exportsMapSchema }),

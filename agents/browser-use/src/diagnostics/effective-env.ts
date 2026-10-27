@@ -24,7 +24,7 @@ export const EffectiveEnvSourceSchema = z.object({
   fingerprint: z.string().regex(EFFECTIVE_ENV_FINGERPRINT_PATTERN).optional(),
 });
 
-export const EffectiveEnvSourcesSchema = z.record(EffectiveEnvSourceSchema);
+export const EffectiveEnvSourcesSchema = z.record(z.string(), EffectiveEnvSourceSchema);
 
 export type EffectiveEnvSources = z.infer<typeof EffectiveEnvSourcesSchema>;
 

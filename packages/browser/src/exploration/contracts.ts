@@ -108,7 +108,7 @@ export const BrowserScriptOriginSchema = z
 export const BrowserExecuteInputSchema = z.object({
   pageId: z.string().min(1),
   source: z.string().min(1).max(65_536),
-  args: z.record(z.unknown()).default({}),
+  args: z.record(z.string(), z.unknown()).default({}),
   capabilities: z.array(BrowserScriptCapabilitySchema).min(1).max(4),
   allowedOrigins: z.array(BrowserScriptOriginSchema).min(1).max(20),
   timeoutMs: z.number().int().min(100).max(30_000).default(30_000),
@@ -142,7 +142,7 @@ export const BrowserExecuteResultSchema = z.object({
       kind: z.string(),
       elapsedMs: z.number(),
       actual: z
-        .record(z.union([z.string().max(500), z.number(), z.boolean(), z.null()]))
+        .record(z.string(), z.union([z.string().max(500), z.number(), z.boolean(), z.null()]))
         .optional(),
     }),
   ),

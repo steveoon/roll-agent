@@ -33,7 +33,7 @@ const BrowserUseToolPolicyEntrySchema = z.object({
 
 export const BrowserUsePolicyConfigSchema = z.object({
   approvalTtlMs: z.number().int().positive().max(3_600_000).default(300_000),
-  tools: z.record(BrowserUseToolPolicyEntrySchema).default({}),
+  tools: z.record(z.string(), BrowserUseToolPolicyEntrySchema).default({}),
 });
 export type BrowserUsePolicyConfig = z.infer<typeof BrowserUsePolicyConfigSchema>;
 

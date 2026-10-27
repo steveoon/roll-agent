@@ -27,6 +27,15 @@ export async function buildInstallBootstrap(outputPath) {
     for (;;) {
       try {
         const manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
+        // Subpath manifests can declare module format without identifying a package (Zod 4).
+        // Continue to the owning package; its actual license must still be included below.
+        if (manifest.name === undefined && manifest.version === undefined) {
+          if (dirname(directory) === directory) {
+            throw new Error(`Missing bootstrap dependency identity: ${input}`);
+          }
+          directory = dirname(directory);
+          continue;
+        }
         const key = `${manifest.name}@${manifest.version}`;
         if (!notices.has(key)) {
           let license;

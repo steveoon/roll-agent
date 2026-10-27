@@ -32,7 +32,7 @@ export const BrowserWorkflowSaveDraftInputSchema = z
 export const BrowserWorkflowExecutionInputSchema = identitySchema
   .extend({
     pageId: z.string().min(1),
-    args: z.record(z.unknown()).default({}),
+    args: z.record(z.string(), z.unknown()).default({}),
     scriptApproval: z
       .object({ id: z.string().min(1) })
       .strict()
@@ -234,7 +234,7 @@ export const browserWorkflowList = defineTool({
         name: z.string(),
         description: z.string(),
         appliesTo: z.object({ origins: z.array(z.string()), pathPrefix: z.string().optional() }),
-        parameterSchema: z.record(z.unknown()),
+        parameterSchema: z.record(z.string(), z.unknown()),
       }),
     ),
   }),

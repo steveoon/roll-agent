@@ -94,7 +94,7 @@ export const runtimeShellConfigSchema = z.object({
   maxTimeoutMs: z.number().int().min(1_000).max(600_000).default(600_000),
   maxCaptureBytes: z.number().int().min(16_384).default(1_048_576),
   maxModelOutputChars: z.number().int().min(1_000).default(16_000),
-  session: runtimeShellSessionConfigSchema.default({}),
+  session: runtimeShellSessionConfigSchema.prefault({}),
 });
 
 export const runtimeConfigSchema = z.object({
@@ -106,10 +106,10 @@ export const runtimeConfigSchema = z.object({
   threadsDir: z.string().default("~/.roll-agent/threads"),
   contextWindow: z.number().int().min(1).optional(),
   thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
-  approval: runtimeApprovalConfigSchema.default({}),
-  compaction: runtimeCompactionConfigSchema.default({}),
-  agentBootstrap: runtimeAgentBootstrapConfigSchema.default({}),
-  shell: runtimeShellConfigSchema.default({}),
+  approval: runtimeApprovalConfigSchema.prefault({}),
+  compaction: runtimeCompactionConfigSchema.prefault({}),
+  agentBootstrap: runtimeAgentBootstrapConfigSchema.prefault({}),
+  shell: runtimeShellConfigSchema.prefault({}),
 });
 
 export const schedulerConfigSchema = z.object({
@@ -195,7 +195,7 @@ export const browserConfigSchema = z
   .object({
     defaultInstance: z.string().trim().min(1).optional(),
     instances: z.record(z.string(), browserInstanceConfigSchema).default({}),
-    operate: z.object({ engine: z.enum(["sampling", "jev"]).default("sampling") }).default({}),
+    operate: z.object({ engine: z.enum(["sampling", "jev"]).default("sampling") }).prefault({}),
   })
   .superRefine((browser, ctx) => {
     const instanceEntries = Object.entries(browser.instances);
@@ -242,13 +242,13 @@ export const browserConfigSchema = z
 export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
   ask: askConfigSchema,
-  chat: chatConfigSchema.default({}),
-  runtime: runtimeConfigSchema.default({}),
-  scheduler: schedulerConfigSchema.default({}),
-  skills: skillsConfigSchema.default({}),
+  chat: chatConfigSchema.prefault({}),
+  runtime: runtimeConfigSchema.prefault({}),
+  scheduler: schedulerConfigSchema.prefault({}),
+  skills: skillsConfigSchema.prefault({}),
   agents: agentsConfigSchema,
-  install: installConfigSchema.default({}),
-  browser: browserConfigSchema.default({}),
+  install: installConfigSchema.prefault({}),
+  browser: browserConfigSchema.prefault({}),
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;

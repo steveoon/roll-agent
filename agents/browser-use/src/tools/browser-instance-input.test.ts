@@ -313,6 +313,38 @@ describe("browser instance input wrapper", () => {
     await first;
   });
 
+  it("preserves preprocessing and transforms when extending a tool input", () => {
+    let preprocessingCalls = 0;
+    let transformCalls = 0;
+    const tool = withBrowserInstanceInput(
+      defineTool({
+        name: "pipeline_tool",
+        description: "pipeline tool",
+        input: z.preprocess(
+          (value) => {
+            preprocessingCalls += 1;
+            return value;
+          },
+          z.object({ count: z.number().positive() }).transform((value) => {
+            transformCalls += 1;
+            return { ...value, count: value.count * 2 };
+          }),
+        ),
+        output: z.object({ ok: z.boolean() }),
+        execute: async () => ({ ok: true }),
+      }),
+      { startRuntime: false },
+    );
+    assert.deepEqual(tool.input.parse({ count: 2, browserInstance: " boss-a " }), {
+      count: 4,
+      browserInstance: "boss-a",
+    });
+    assert.equal(preprocessingCalls, 1);
+    assert.equal(transformCalls, 1);
+    assert.equal(tool.input.safeParse({ count: -1, browserInstance: "boss-a" }).success, false);
+    assert.equal(transformCalls, 1);
+  });
+
   it("adds browserInstance to refined object schemas without dropping refinements", async () => {
     const refinedTool = withBrowserInstanceInput(
       defineTool({

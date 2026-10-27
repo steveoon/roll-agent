@@ -40,7 +40,7 @@ export class BrowserHelperArgumentError extends BrowserScriptError {
 }
 
 export function parseHelperArgument<T>(
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  schema: z.ZodType<T, unknown>,
   value: unknown,
   method: Helper,
   parameter: "target" | "options",

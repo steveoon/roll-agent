@@ -136,7 +136,7 @@ test(
           let count = 0;
           const stub: DecisionProvider = async (request) => {
             count++;
-            const state = z.record(z.unknown()).parse(request.state);
+            const state = z.record(z.string(), z.unknown()).parse(request.state);
             const progress = z.object({ phase: z.string() }).parse(state.taskProgress);
             const label = progress.phase === "collect" ? "Preview Record A" : "Close";
             let action = Object.entries(request.questions.operation!.criteria).find(

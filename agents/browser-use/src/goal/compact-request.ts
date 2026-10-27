@@ -37,7 +37,7 @@ export function compactTaskRequest(
   request: DecisionRequest,
   maxBytes = MAX_TASK_REQUEST_BYTES,
 ): DecisionRequest {
-  const original = z.record(z.unknown()).parse(request.state);
+  const original = z.record(z.string(), z.unknown()).parse(request.state);
   const head = request.questions[request.routing?.head ?? "operation"];
   const actionRefs = new Set(
     Object.keys(head?.criteria ?? {}).flatMap((key) => {
@@ -49,7 +49,7 @@ export function compactTaskRequest(
   let omittedElements = 0;
   const elements = Array.isArray(original.elements)
     ? original.elements.filter((element) => {
-        const row = z.record(z.unknown()).parse(element);
+        const row = z.record(z.string(), z.unknown()).parse(element);
         const keep =
           actionRefs.size === 0 ||
           (typeof row.ref === "string" && actionRefs.has(row.ref)) ||
@@ -65,7 +65,7 @@ export function compactTaskRequest(
   for (const limit of [512, 256, 128, 64, 32]) {
     let clipped = 0;
     const contexts: Record<string, unknown> = {
-      ...z.record(z.unknown()).parse(original.contexts ?? {}),
+      ...z.record(z.string(), z.unknown()).parse(original.contexts ?? {}),
     };
     const byText = new Map(
       Object.entries(contexts)
@@ -102,7 +102,7 @@ export function compactTaskRequest(
         );
       }
       if (value !== null && typeof value === "object") {
-        const record = z.record(z.unknown()).parse(value);
+        const record = z.record(z.string(), z.unknown()).parse(value);
         if (key === "contexts") {
           return Object.fromEntries(
             Object.entries(record).map(([id, text]) => [
@@ -139,7 +139,9 @@ export function compactTaskRequest(
     };
     // sourceValues is the canonical input table; facts was a duplicate copy.
     const { facts: _facts, valueSemantics: _semantics, contexts: _contexts, ...base } = original;
-    const state = z.record(z.unknown()).parse(walk({ ...base, ...(elements ? { elements } : {}) }));
+    const state = z
+      .record(z.string(), z.unknown())
+      .parse(walk({ ...base, ...(elements ? { elements } : {}) }));
     if (Object.keys(contexts).length) {
       state.contexts = Object.fromEntries(
         Object.entries(contexts).map(([id, text]) => [

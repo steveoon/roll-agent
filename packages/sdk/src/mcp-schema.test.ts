@@ -6,6 +6,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getMcpCompatibleInputSchema, parseToolInput } from "./mcp-schema.ts";
 
+test("oversized tool arrays fail before validating every element", async () => {
+  let visited = 0;
+  const input = z.object({
+    items: z
+      .array(
+        z.preprocess((value) => {
+          visited += 1;
+          return value;
+        }, z.number()),
+      )
+      .max(2),
+  });
+  await assert.rejects(parseToolInput(input, { items: Array(100).fill("invalid") }), /items/);
+  assert.equal(visited, 0);
+});
+
 type TextContent = {
   readonly type: "text";
   readonly text: string;
@@ -44,6 +60,7 @@ function getIsError(value: unknown): boolean | undefined {
 }
 
 test("getMcpCompatibleInputSchema exposes fields for root refined object schemas", async () => {
+  let refinementCalls = 0;
   const refinedInputSchema = z
     .object({
       ageMin: z.number().int().optional(),
@@ -51,8 +68,12 @@ test("getMcpCompatibleInputSchema exposes fields for root refined object schemas
       gender: z.enum(["不限", "男", "女"]).default("不限"),
     })
     .refine(
-      (input) =>
-        input.ageMin === undefined || input.ageMax === undefined || input.ageMin <= input.ageMax,
+      (input) => {
+        refinementCalls += 1;
+        return (
+          input.ageMin === undefined || input.ageMax === undefined || input.ageMin <= input.ageMax
+        );
+      },
       {
         path: ["ageMax"],
         message: "ageMax must be greater than or equal to ageMin",
@@ -97,6 +118,7 @@ test("getMcpCompatibleInputSchema exposes fields for root refined object schemas
 
     const validText = getFirstTextContent(validResult);
     assert.equal(validText, JSON.stringify({ ageMin: 20, ageMax: 40, gender: "不限" }));
+    assert.equal(refinementCalls, 1);
 
     const invalidResult = await client.callTool({
       name: "filter",
@@ -106,6 +128,51 @@ test("getMcpCompatibleInputSchema exposes fields for root refined object schemas
     assert.equal(getIsError(invalidResult), true);
     const invalidText = getFirstTextContent(invalidResult);
     assert.match(invalidText ?? "", /ageMax must be greater than or equal to ageMin/);
+    assert.equal(refinementCalls, 2);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP exposes the input object while original preprocessing and transforms run once", async () => {
+  let preprocessingCalls = 0;
+  let transformCalls = 0;
+  const input = z.preprocess(
+    (value) => {
+      preprocessingCalls += 1;
+      const parsed = z.object({ count: z.number() }).parse(value);
+      return { count: parsed.count + 1 };
+    },
+    z.object({ count: z.number().positive() }).transform(({ count }) => {
+      transformCalls += 1;
+      return { count: count * 2 };
+    }),
+  );
+  const server = new McpServer({ name: "pipeline-test", version: "1" });
+  server.registerTool(
+    "pipeline",
+    { inputSchema: getMcpCompatibleInputSchema(input) },
+    async (params) => ({
+      content: [{ type: "text", text: JSON.stringify(await parseToolInput(input, params)) }],
+    }),
+  );
+  const client = new Client({ name: "pipeline-client", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = (await client.listTools()).tools[0];
+    assert.deepEqual(Object.keys(listed?.inputSchema.properties ?? {}), ["count"]);
+    const result = await client.callTool({ name: "pipeline", arguments: { count: 2 } });
+    assert.equal(getIsError(result), undefined);
+    assert.equal(getFirstTextContent(result), JSON.stringify({ count: 6 }));
+    assert.equal(preprocessingCalls, 1);
+    assert.equal(transformCalls, 1);
+    assert.equal(
+      getIsError(await client.callTool({ name: "pipeline", arguments: { count: "bad" } })),
+      true,
+    );
+    assert.equal(preprocessingCalls, 1);
   } finally {
     await client.close();
     await server.close();

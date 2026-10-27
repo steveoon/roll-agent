@@ -5,6 +5,10 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { z } from "zod/v4";
 import {
+  expandTypeUnions,
+  preserveDiscriminatedUnion,
+} from "../../../scripts/wire-json-schema.mjs";
+import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
@@ -137,6 +141,7 @@ function createProtocolBundle(version) {
   }
   const generatedSchemas = z.toJSONSchema(zodRegistry, {
     target: "draft-2020-12",
+    override: preserveDiscriminatedUnion,
   }).schemas;
   const definitionNames = new Set(
     Object.keys(generatedSchemas).filter((name) => name !== "__shared"),
@@ -150,7 +155,7 @@ function createProtocolBundle(version) {
     if (name === "__shared") {
       continue;
     }
-    const { $schema: _schema, ...definition } = schema;
+    const { $schema: _schema, ...definition } = expandTypeUnions(schema);
     definitions[name] = rewriteReferences(definition, definitionNames, sharedDefinitionNames);
   }
   for (const [name, schema] of Object.entries(sharedDefinitions)) {
@@ -158,7 +163,11 @@ function createProtocolBundle(version) {
     if (rootName === undefined || Object.hasOwn(definitions, rootName)) {
       throw new Error(`JSON Schema definition name collision: ${String(rootName)}`);
     }
-    definitions[rootName] = rewriteReferences(schema, definitionNames, sharedDefinitionNames);
+    definitions[rootName] = rewriteReferences(
+      expandTypeUnions(schema),
+      definitionNames,
+      sharedDefinitionNames,
+    );
   }
 
   setProtocolVersionConst(definitions, "runtimeEventEnvelope", version);

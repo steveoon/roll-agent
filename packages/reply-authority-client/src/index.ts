@@ -312,7 +312,7 @@ export const ReplyFeedbackRubricResponseSchema = z.object({
     .string()
     .min(1)
     .regex(/^sha256:/),
-  rubric: z.record(z.unknown()),
+  rubric: z.record(z.string(), z.unknown()),
   advisoryFindings: z.array(ReplyVariantFindingSchema),
 });
 
@@ -326,7 +326,7 @@ export const GenerateSignedReplyResponseSchema = z.object({
   latencyMs: z.number().optional(),
   shouldExchangeWechat: z.boolean().optional(),
   error: z.string().optional(),
-  diagnostics: z.record(z.unknown()).optional(),
+  diagnostics: z.record(z.string(), z.unknown()).optional(),
   replyVariants: ReplyVariantsSchema.optional(),
 });
 
@@ -374,7 +374,7 @@ export const ReplyStreamFinalEventSchema = ReplyStreamEventSchema.extend({
   latencyMs: z.number().optional(),
   shouldExchangeWechat: z.boolean().optional(),
   error: z.string().optional(),
-  diagnostics: z.record(z.unknown()).optional(),
+  diagnostics: z.record(z.string(), z.unknown()).optional(),
   replyVariants: ReplyVariantsSchema.optional(),
 });
 

@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { timestampSchema } from "@roll-agent/protocol";
 import { RELAY_MESSAGE_TYPES_V11, workspaceIdSchema } from "./index.ts";
 
 export const RELAY_CONTROL_VERSION = "1.0" as const;
@@ -57,7 +58,7 @@ const secureWebSocketUrlSchema = z
 export const relaySessionDescriptorSchema = z
   .object({
     connectUrl: secureWebSocketUrlSchema,
-    expiresAt: z.string().datetime({ offset: true }),
+    expiresAt: timestampSchema,
   })
   .strict()
   .readonly();

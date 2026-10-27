@@ -26,6 +26,7 @@ export const BrowserSecurityDiagnosticSchema = z.object({
 export const BrowserUseToolPolicyDiagnosticSchema = z.object({
   approvalTtlMs: z.number(),
   tools: z.record(
+    z.string(),
     z.object({
       policy: z.enum(["log", "deny", "confirm"]),
     }),
@@ -59,7 +60,7 @@ export const BrowserInstanceStatusDiagnosticSchema = z.object({
 });
 
 export const AgentRuntimeEnvDiagnosticPayloadSchema = z.object({
-  effectiveEnvSources: z.record(EffectiveEnvSourceSchema),
+  effectiveEnvSources: z.record(z.string(), EffectiveEnvSourceSchema),
   security: BrowserSecurityDiagnosticSchema.optional(),
   toolPolicy: BrowserUseToolPolicyDiagnosticSchema.optional(),
   policyWarnings: z.array(BrowserUsePolicyWarningDiagnosticSchema).optional(),

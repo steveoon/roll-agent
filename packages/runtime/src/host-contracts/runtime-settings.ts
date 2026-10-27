@@ -26,7 +26,7 @@ export const runtimeShellSettingsSchema = z.object({
   maxTimeoutMs: z.number().int().min(1_000).max(600_000).default(600_000),
   maxCaptureBytes: z.number().int().min(16_384).default(1_048_576),
   maxModelOutputChars: z.number().int().min(1_000).default(16_000),
-  session: runtimeShellSessionSettingsSchema.default({}),
+  session: runtimeShellSessionSettingsSchema.prefault({}),
 });
 
 /** Execution settings only. Provider credentials, discovery paths and install config belong to hosts. */
@@ -34,8 +34,8 @@ export const runtimeSettingsSchema = z.object({
   maxSteps: z.number().int().min(1).default(80),
   turnTimeoutMs: z.number().int().min(10_000).default(300_000),
   contextWindow: z.number().int().min(1).optional(),
-  compaction: runtimeCompactionSettingsSchema.default({}),
-  shell: runtimeShellSettingsSchema.default({}),
+  compaction: runtimeCompactionSettingsSchema.prefault({}),
+  shell: runtimeShellSettingsSchema.prefault({}),
   instructions: z.string().trim().min(1).default("auto"),
 });
 
