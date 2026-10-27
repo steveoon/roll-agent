@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 
 const PORT = Number(process.env.FAKE_LLM_PORT ?? 0);
@@ -10,6 +11,7 @@ const DELTA_INTERVAL_MS = Number(process.env.FAKE_LLM_DELTA_MS ?? 25);
 const LINE_MIN = Number(process.env.FAKE_LLM_LINE_MIN ?? 350);
 const LINE_MAX = Number(process.env.FAKE_LLM_LINE_MAX ?? 700);
 const LOG = process.env.FAKE_LLM_LOG ?? "";
+const FACTS = process.env.FAKE_LLM_FACTS ?? "";
 const TOOL_PATTERN = new RegExp(process.env.FAKE_LLM_TOOL_PATTERN ?? "read_file$");
 const TOOL_ARGUMENTS = process.env.FAKE_LLM_TOOL_ARGUMENTS ?? JSON.stringify({ path: "probe.txt" });
 
@@ -78,16 +80,19 @@ function usageFor(step, completionChars) {
 
 let requestCounter = 0;
 
-async function streamReasoningStep(res, id, step, toolName, isAborted) {
+async function streamReasoningStep(res, id, step, toolName, isAborted, observe) {
   const reasoning = buildReasoning(step);
   res.write(chunk(id, { role: "assistant", content: "" }));
   for (let offset = 0; offset < reasoning.length; offset += DELTA_CHARS) {
     if (isAborted()) {
       return false;
     }
-    res.write(chunk(id, { reasoning_content: reasoning.slice(offset, offset + DELTA_CHARS) }));
+    const text = reasoning.slice(offset, offset + DELTA_CHARS);
+    observe("reasoning", text);
+    res.write(chunk(id, { reasoning_content: text }));
     await sleep(DELTA_INTERVAL_MS);
   }
+  observe("tool", JSON.stringify({ name: toolName, arguments: TOOL_ARGUMENTS }));
   res.write(
     chunk(id, {
       tool_calls: [
@@ -104,9 +109,10 @@ async function streamReasoningStep(res, id, step, toolName, isAborted) {
   return true;
 }
 
-async function streamFinalAnswer(res, id, step) {
+async function streamFinalAnswer(res, id, step, observe) {
   const text = "已完成全部步骤。";
   for (const character of text) {
+    observe("text", character);
     res.write(chunk(id, { content: character }));
     await sleep(20);
   }
@@ -152,17 +158,56 @@ const server = createServer((req, res) => {
       }
     });
     const id = `chatcmpl-${step}`;
+    const semanticHash = createHash("sha256");
+    const toolMessages = JSON.stringify(messages.filter((message) => message.role === "tool"));
+    const facts = {
+      step,
+      reasoningChars: 0,
+      textChars: 0,
+      toolCalls: 0,
+      chunks: 0,
+      previousToolResult:
+        step === 1
+          ? null
+          : ["probe line 1", "probe line 2", "probe line 3"].every((line) =>
+              toolMessages.includes(line),
+            ),
+    };
+    const observe = (kind, text) => {
+      semanticHash.update(kind).update("\0").update(text).update("\0");
+      facts.chunks += 1;
+      if (kind === "reasoning") facts.reasoningChars += text.length;
+      if (kind === "text") facts.textChars += text.length;
+      if (kind === "tool") facts.toolCalls += 1;
+    };
+    const record = (completed) => {
+      if (FACTS) {
+        appendFileSync(
+          FACTS,
+          `${JSON.stringify({ ...facts, completed, semanticHash: semanticHash.digest("hex") })}\n`,
+        );
+      }
+    };
     if (step <= STEPS && tool !== undefined) {
-      const completed = await streamReasoningStep(res, id, step, tool.function.name, () => aborted);
+      const completed = await streamReasoningStep(
+        res,
+        id,
+        step,
+        tool.function.name,
+        () => aborted,
+        observe,
+      );
       if (!completed) {
+        record(false);
         log(`req#${step} client aborted mid-reasoning`);
         return;
       }
     } else {
-      await streamFinalAnswer(res, id, step);
+      await streamFinalAnswer(res, id, step, observe);
     }
     res.write("data: [DONE]\n\n");
     res.end();
+    record(true);
     log(`req#${step} done`);
   });
 });

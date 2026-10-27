@@ -1,11 +1,23 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
+import { seedFixtureModelCatalog } from "./model-catalog-fixture.mjs";
 
-const repoRoot = resolvePath(import.meta.dirname, "../..");
+const harnessRoot = resolvePath(import.meta.dirname, "../..");
 const benchDir = resolvePath(import.meta.dirname);
 
 const rawArgs = process.argv.slice(2);
@@ -14,6 +26,12 @@ const { values: options } = parseArgs({
   options: {
     mode: { type: "string", default: "fixed" },
     entry: { type: "string", default: "src" },
+    "target-root": { type: "string", default: harnessRoot },
+    output: { type: "string" },
+    gc: { type: "string", default: "diagnostic" },
+    "sample-ms": { type: "string", default: "5000" },
+    "workload-steps": { type: "string" },
+    "strict-cleanup": { type: "boolean", default: false },
     duration: { type: "string", default: "180" },
     warmup: { type: "string", default: "30" },
     "max-slope": { type: "string", default: "30" },
@@ -26,6 +44,7 @@ const { values: options } = parseArgs({
     help: { type: "boolean", default: false },
   },
 });
+const repoRoot = resolvePath(options["target-root"]);
 
 if (options.help) {
   process.stdout.write(`用法: node scripts/bench/chat-heap-growth.mjs [选项]
@@ -36,6 +55,12 @@ if (options.help) {
 选项:
   --mode fixed|baseline   fixed: 使用 CLI 默认（NODE_ENV=production）；baseline: 强制 NODE_ENV=development 复现修复前行为
   --entry src|dist        运行源码入口（默认）或 packages/core/dist 构建产物
+  --target-root <目录>    使用指定基线/候选 checkout；驱动与 fake Provider 保持同一份
+  --gc diagnostic|natural diagnostic 保留原 GC 诊断；natural 不执行强制 GC
+  --workload-steps <n>    固定工具调用次数，完成最后文本回复后测量；duration 为超时上限
+  --strict-cleanup       通过取消和 /exit 关闭，并验证退出码和 SQLite 工具事实
+  --sample-ms <毫秒>     探针采样间隔，默认 5000
+  --output <文件>        写 JSON 和原始 trace/Provider/终端日志
   --duration <秒>         采样总时长，默认 180
   --warmup <秒>           计算斜率时跳过的起始秒数，默认 30
   --max-slope <MB/min>    PASS 阈值，默认 30（修复后本机约 14，修复前约 150）
@@ -52,6 +77,21 @@ const MODES = new Set(["fixed", "baseline"]);
 const ENTRIES = new Set(["src", "dist"]);
 if (!MODES.has(options.mode) || !ENTRIES.has(options.entry)) {
   fail(`--mode 只接受 fixed|baseline，--entry 只接受 src|dist`);
+}
+if (!["diagnostic", "natural"].includes(options.gc)) fail("--gc 只接受 diagnostic|natural");
+const workloadSteps =
+  options["workload-steps"] === undefined ? undefined : Number(options["workload-steps"]);
+if (workloadSteps !== undefined && (!Number.isInteger(workloadSteps) || workloadSteps < 1)) {
+  fail("--workload-steps 必须为正整数");
+}
+if (!Number.isFinite(Number(options["sample-ms"])) || Number(options["sample-ms"]) < 100) {
+  fail("--sample-ms 至少为 100");
+}
+if (options.output) {
+  const outputPath = resolvePath(options.output);
+  if (existsSync(outputPath) || existsSync(`${outputPath}.raw`)) {
+    fail("输出路径已存在，请为本次测量选择新的 --output 路径");
+  }
 }
 
 const durationSeconds = Number(options.duration);
@@ -111,11 +151,17 @@ function startFakeServer(logsDir) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(benchDir, "fake-dashscope-server.mjs")], {
       env: {
-        ...process.env,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        NODE_OPTIONS: `--import ${join(benchDir, "heap-sampler.mjs")}`,
+        ROLL_BENCH_TRACE: join(logsDir, "provider-trace.jsonl"),
+        ROLL_BENCH_FORCE_GC: "false",
+        ROLL_BENCH_TRACE_MS: options["sample-ms"],
         FAKE_LLM_PORT: "0",
         FAKE_LLM_LOG: join(logsDir, "fake-llm.log"),
+        FAKE_LLM_FACTS: join(logsDir, "provider-facts.jsonl"),
         FAKE_LLM_REASONING_CHARS: options["reasoning-chars"],
         FAKE_LLM_DELTA_MS: options["delta-ms"],
+        ...(workloadSteps === undefined ? {} : { FAKE_LLM_STEPS: String(workloadSteps) }),
       },
       stdio: ["ignore", "pipe", "inherit"],
     });
@@ -133,6 +179,7 @@ function startFakeServer(logsDir) {
 }
 
 function writeConfig(root, port) {
+  seedFixtureModelCatalog(join(root, "home"));
   const config = [
     "llm:",
     "  default-provider: qwen",
@@ -201,6 +248,67 @@ function countCompletedSteps(logPath) {
     .filter((line) => / done$/.test(line)).length;
 }
 
+export function passesBenchmarkChecks({
+  workloadSteps,
+  slope,
+  maxSlope,
+  strictCleanup,
+  cleanExit,
+  toolFactsValid,
+}) {
+  return (
+    (workloadSteps !== undefined ? toolFactsValid : slope <= maxSlope) &&
+    (!strictCleanup || (cleanExit && toolFactsValid))
+  );
+}
+
+function readWorkFacts(root) {
+  const databasePath = join(root, "home/threads/threads.db");
+  if (!existsSync(databasePath)) return { toolExecutions: [], finalAnswer: false };
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const toolExecutions = database
+      .prepare("SELECT record_json FROM tool_executions ORDER BY sequence")
+      .all()
+      .map((row) => JSON.parse(row.record_json))
+      .map((record) => ({
+        toolCallId: record.toolCallId,
+        toolName: record.toolName,
+        outcome: record.outcome.kind,
+      }));
+    const finalAnswer = database
+      .prepare("SELECT content_json FROM messages WHERE role = 'assistant'")
+      .all()
+      .some((row) => row.content_json.includes("已完成全部步骤"));
+    return { toolExecutions, finalAnswer };
+  } finally {
+    database.close();
+  }
+}
+
+async function exitThroughCli(session, root) {
+  tmux(["send-keys", "-t", session, "Escape"]);
+  if (!(await waitForPrompt(session, 10_000))) throw new Error("取消后输入提示符未恢复");
+  tmux(["send-keys", "-t", session, "-l", "/exit"]);
+  const deadline = Date.now() + 10_000;
+  let submitted = false;
+  while (Date.now() < deadline) {
+    const screen = tmux(["capture-pane", "-p", "-t", session], { allowFailure: true }) ?? "";
+    if (!submitted && /›\s*\/exit/.test(screen)) {
+      tmux(["send-keys", "-t", session, "Enter"]);
+      submitted = true;
+    }
+    const statusPath = join(root, "logs/exit.status");
+    if (existsSync(statusPath)) {
+      const status = Number(readFileSync(statusPath, "utf8").trim());
+      if (status !== 0) throw new Error(`CLI 退出码为 ${status}`);
+      return true;
+    }
+    await sleep(100);
+  }
+  throw new Error("CLI 未能通过 /exit 正常退出；强制清理不能通过验收");
+}
+
 async function main() {
   requireTmux();
   const entry = resolveEntry();
@@ -216,9 +324,16 @@ async function main() {
     writeConfig(root, server.port);
     const tracePath = join(logsDir, "trace.jsonl");
     const env = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+      LANG: "en_US.UTF-8",
+      CI: "false",
       HOME: join(root, "home"),
       ROLL_BENCH_TRACE: tracePath,
-      NODE_OPTIONS: `--import ${join(benchDir, "heap-sampler.mjs")} --expose-gc`,
+      NODE_OPTIONS: `--import ${join(benchDir, "heap-sampler.mjs")}${options.gc === "diagnostic" ? " --expose-gc" : ""}`,
+      ROLL_BENCH_FORCE_GC: String(options.gc === "diagnostic"),
+      ROLL_BENCH_TRACE_MS: options["sample-ms"],
       ...(options.mode === "baseline" ? { NODE_ENV: "development" } : {}),
     };
     const envPrefix = Object.entries(env)
@@ -228,8 +343,9 @@ async function main() {
       options.entry === "src"
         ? "--disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite"
         : "--disable-warning=ExperimentalWarning --experimental-sqlite";
-    const command = `cd ${shellQuote(join(root, "work"))} && env -u NODE_ENV ${envPrefix} ${shellQuote(process.execPath)} ${nodeFlags} ${shellQuote(entry)} chat 2> ${shellQuote(join(logsDir, "chat-stderr.log"))}; sleep 5`;
+    const command = `cd ${shellQuote(join(root, "work"))} && env -i ${envPrefix} ${shellQuote(process.execPath)} ${nodeFlags} ${shellQuote(entry)} chat 2> ${shellQuote(join(logsDir, "chat-stderr.log"))}; roll_bench_exit=$?; printf '%s\\n' "$roll_bench_exit" > ${shellQuote(join(logsDir, "exit.status"))}; sleep 5`;
     tmux(["new-session", "-d", "-s", session, "-x", String(columns), "-y", String(rows), command]);
+    tmux(["pipe-pane", "-o", "-t", session, `cat > ${shellQuote(join(logsDir, "terminal.ansi"))}`]);
     if (!(await waitForPrompt(session, 30_000))) {
       const stderr = existsSync(join(logsDir, "chat-stderr.log"))
         ? readFileSync(join(logsDir, "chat-stderr.log"), "utf8")
@@ -237,33 +353,88 @@ async function main() {
       throw new Error(`roll chat 未在 30s 内进入输入状态\n${stderr}`);
     }
     tmux(["send-keys", "-t", session, "-l", "开始连续工作，读取 probe.txt"]);
+    await sleep(100);
     tmux(["send-keys", "-t", session, "Enter"]);
     process.stderr.write(
       `[chat-heap-growth] mode=${options.mode} entry=${options.entry} 采样 ${durationSeconds}s（tmux 会话 ${session}）\n`,
     );
     const deadline = Date.now() + durationSeconds * 1000;
+    const workloadStartedAt = Date.now();
+    let workloadCompleted = false;
     while (Date.now() < deadline) {
-      await sleep(5_000);
+      await sleep(workloadSteps === undefined ? 5_000 : 250);
       if (tmux(["has-session", "-t", session], { allowFailure: true }) === undefined) {
         throw new Error("roll chat 进程提前退出，见 logs/chat-stderr.log");
       }
+      if (
+        workloadSteps !== undefined &&
+        countCompletedSteps(join(logsDir, "fake-llm.log")) >= workloadSteps + 1
+      ) {
+        const facts = readWorkFacts(root);
+        if (facts.finalAnswer && facts.toolExecutions.length === workloadSteps) {
+          workloadCompleted = true;
+          break;
+        }
+      }
     }
-    tmux(["kill-session", "-t", session], { allowFailure: true });
+    const workloadDurationMs = Date.now() - workloadStartedAt;
+    if (workloadSteps !== undefined && !workloadCompleted) {
+      throw new Error("固定工作量未在时限内完成");
+    }
+    // End-of-work GC is diagnostic only; it never enters startup timing.
+    if (workloadSteps !== undefined) await sleep(Number(options["sample-ms"]) * 2);
+    const cleanExit = options["strict-cleanup"] ? await exitThroughCli(session, root) : false;
+    if (!cleanExit) tmux(["kill-session", "-t", session], { allowFailure: true });
     await sleep(500);
 
     const trace = readTrace(tracePath);
     const measured = trace.filter((sample) => sample.t >= warmupSeconds);
-    if (measured.length < 4) {
+    if (measured.length < (workloadSteps === undefined ? 4 : 2)) {
       throw new Error(`采样点不足（${measured.length}），无法计算斜率`);
     }
     const slope = leastSquaresSlopePerMinute(measured);
     const first = measured[0];
     const last = measured[measured.length - 1];
+    const workFacts = readWorkFacts(root);
+    const toolFactsValid =
+      workFacts.toolExecutions.length > 0 &&
+      workFacts.toolExecutions.every(
+        (item) => item.toolName === "read_file" && item.outcome === "success",
+      ) &&
+      new Set(workFacts.toolExecutions.map((item) => item.toolCallId)).size ===
+        workFacts.toolExecutions.length &&
+      (workloadSteps === undefined ||
+        (workFacts.finalAnswer && workFacts.toolExecutions.length === workloadSteps));
     const projectedMinutes =
-      slope > 0.5 ? Math.round((last.heapLimitMB - last.heapUsedMB) / slope) : Infinity;
+      workloadSteps !== undefined
+        ? null
+        : slope > 0.5
+          ? Math.round((last.heapLimitMB - last.heapUsedMB) / slope)
+          : Infinity;
     const result = {
       mode: options.mode,
       entry: options.entry,
+      targetRoot: repoRoot,
+      nodeVersion: process.version,
+      platform: process.platform,
+      architecture: process.arch,
+      gc: options.gc,
+      warmupSeconds,
+      durationSeconds,
+      workloadSteps: workloadSteps ?? null,
+      workloadDurationMs,
+      cleanExit,
+      workFacts,
+      toolFactsValid,
+      coreNaturalPeakRssBytes: Math.max(...trace.map((sample) => sample.naturalRssBytes)),
+      corePeakRssKB: Math.max(...trace.map((sample) => sample.peakRssKB)),
+      coreRetainedHeapBytes: last.retainedHeapBytes,
+      coreNaturalHeapEndBytes: last.naturalHeapUsedBytes,
+      providerTrace: readTrace(join(logsDir, "provider-trace.jsonl")),
+      providerFacts: readTrace(join(logsDir, "provider-facts.jsonl")),
+      terminalOutputBytes: existsSync(join(logsDir, "terminal.ansi"))
+        ? statSync(join(logsDir, "terminal.ansi")).size
+        : 0,
       nodeEnv: last.nodeEnv,
       samples: measured.length,
       windowSeconds: last.t - first.t,
@@ -275,15 +446,30 @@ async function main() {
       projectedMinutesToHeapLimit: projectedMinutes,
       perfMeasureEntries: last.perfMeasures,
       completedSteps: countCompletedSteps(join(logsDir, "fake-llm.log")),
-      pass: slope <= maxSlope,
+      absoluteSlopeApplicable: workloadSteps === undefined,
+      pass: passesBenchmarkChecks({
+        workloadSteps,
+        slope,
+        maxSlope,
+        strictCleanup: options["strict-cleanup"],
+        cleanExit,
+        toolFactsValid,
+      }),
     };
+    if (options.output) {
+      const outputPath = resolvePath(options.output);
+      const rawPath = `${outputPath}.raw`;
+      mkdirSync(rawPath, { recursive: true });
+      cpSync(logsDir, rawPath, { recursive: true });
+      writeFileSync(outputPath, `${JSON.stringify({ ...result, rawPath, trace }, null, 2)}\n`);
+    }
     const lines = [
       `模式            ${result.mode}（NODE_ENV=${result.nodeEnv || "<未设置>"}，entry=${result.entry}）`,
       `采样窗口        ${result.windowSeconds}s / ${result.samples} 个点（跳过前 ${warmupSeconds}s）`,
       `完成步数        ${result.completedSteps}`,
-      `堆占用(GC 后)   ${result.heapStartMB}MB → ${result.heapEndMB}MB（RSS ${result.rssEndMB}MB，堆上限 ${result.heapLimitMB}MB）`,
-      `堆增长斜率      ${result.slopeMBPerMinute} MB/min（阈值 ${maxSlope}）`,
-      `撞上限预计      ${Number.isFinite(projectedMinutes) ? `${projectedMinutes} 分钟` : "不会（增长≈0）"}`,
+      `堆占用(${options.gc === "diagnostic" ? "GC 后" : "自然运行"})   ${result.heapStartMB}MB → ${result.heapEndMB}MB（RSS ${result.rssEndMB}MB，堆上限 ${result.heapLimitMB}MB）`,
+      `堆增长斜率      ${result.slopeMBPerMinute} MB/min（${workloadSteps === undefined ? `阈值 ${maxSlope}` : "固定工作量，仅报告"}）`,
+      `撞上限预计      ${projectedMinutes === null ? "不适用（固定工作量）" : Number.isFinite(projectedMinutes) ? `${projectedMinutes} 分钟` : "不会（增长≈0）"}`,
       `perf measure    ${result.perfMeasureEntries} 条滞留（production 构建应为 0）`,
       `结论            ${result.pass ? "PASS" : "FAIL"}`,
     ];
@@ -298,12 +484,24 @@ async function main() {
   } finally {
     tmux(["kill-session", "-t", session], { allowFailure: true });
     server?.child.kill();
+    if (options.output && !existsSync(resolvePath(options.output))) {
+      const outputPath = resolvePath(options.output);
+      const rawPath = `${outputPath}.raw`;
+      mkdirSync(rawPath, { recursive: true });
+      cpSync(logsDir, rawPath, { recursive: true });
+      writeFileSync(
+        outputPath,
+        `${JSON.stringify({ pass: false, error: "benchmark did not complete", rawPath }, null, 2)}\n`,
+      );
+    }
     if (!options.keep) {
       rmSync(root, { recursive: true, force: true });
     }
   }
 }
 
-main().catch((error) => {
-  fail(error instanceof Error ? error.message : String(error));
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+  });
+}

@@ -27,6 +27,7 @@ import time
 import traceback
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Iterable, Mapping
 
 
@@ -36,7 +37,10 @@ REPO_ROOT = Path(
 ).resolve()
 FIXTURE = HARNESS_ROOT / "benchmarks" / "chat-pty" / "fixture.ts"
 AGENT_FIXTURE = HARNESS_ROOT / "benchmarks" / "chat-pty" / "agent-fixture.ts"
-CLI_ENTRY = REPO_ROOT / "packages" / "core" / "src" / "cli" / "index.ts"
+CLI_ENTRY_KIND = os.environ.get("ROLL_CHAT_BENCH_ENTRY", "src")
+CLI_ENTRY = REPO_ROOT / "packages" / "core" / CLI_ENTRY_KIND / "cli" / (
+    "index.js" if CLI_ENTRY_KIND == "dist" else "index.ts"
+)
 DEFAULT_OUTPUT = HARNESS_ROOT / "outputs" / "chat-pty" / "results.json"
 RESULT_SCHEMA_VERSION = 3
 SUITE_NAME = "roll-chat-real-pty"
@@ -127,6 +131,71 @@ def sanitized_child_env(source: Mapping[str, str]) -> dict[str, str]:
         for name, value in source.items()
         if SENSITIVE_ENV_NAME.search(name) is None and name != "NO_COLOR"
     }
+
+
+def validate_catalog_fetched_at(value: str | None = None) -> str:
+    stamp = value or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if not stamp.endswith("Z"):
+        raise ValueError("catalog timestamp must be UTC")
+    age = time.time() - datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    if not 0 <= age < 24 * 60 * 60:
+        raise ValueError("catalog fixture is future-dated or expired; start a new benchmark run")
+    return stamp
+
+
+def seed_model_catalog(home: Path) -> dict:
+    # Empty HOME would start an uncontrolled models.dev request in real Ink.
+    # Keep the bundled baseline dataset, only replacing its freshness timestamp.
+    data = json.loads((HARNESS_ROOT / "benchmarks/chat-pty/model-catalog-fixture.json").read_text())
+    data["fetchedAt"] = validate_catalog_fetched_at(os.environ.get("ROLL_CHAT_BENCH_CATALOG_FETCHED_AT"))
+    path = home / ".roll-agent/cache/model-catalog.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    return data
+
+
+class MachTimebaseInfo(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+def macos_clock_scale() -> float:
+    info = MachTimebaseInfo()
+    read_timebase = ctypes.CDLL("/usr/lib/libSystem.B.dylib").mach_timebase_info
+    read_timebase.argtypes = [ctypes.POINTER(MachTimebaseInfo)]
+    read_timebase.restype = ctypes.c_int
+    if read_timebase(ctypes.byref(info)) != 0 or info.denom == 0:
+        raise OSError("mach_timebase_info failed")
+    return info.numer / info.denom
+
+
+def process_resources(pid: int) -> dict[str, float | int]:
+    """Natural live-process counters; never inject GC into startup measurements."""
+    if sys.platform == "darwin":
+        try:
+            buffer = ctypes.create_string_buffer(256)
+            read_usage = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pid_rusage
+            read_usage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            read_usage.restype = ctypes.c_int
+            if read_usage(pid, 2, buffer) == 0:
+                # rusage_info_v2: uuid[16], user/system Mach ticks, then four
+                # wakeup/pagein/wired counters before resident_size at byte 64.
+                return {
+                    "rssBytes": int.from_bytes(buffer.raw[64:72], sys.byteorder),
+                    "cpuMs": (int.from_bytes(buffer.raw[16:24], sys.byteorder)
+                              + int.from_bytes(buffer.raw[24:32], sys.byteorder))
+                             * macos_clock_scale() / 1_000_000,
+                }
+        except (AttributeError, OSError, ValueError):
+            return {}
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = raw[raw.rfind(")") + 2:].split()
+        return {
+            "rssBytes": int(fields[21]) * os.sysconf("SC_PAGE_SIZE"),
+            "cpuMs": (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK") * 1_000,
+        }
+    except (OSError, ValueError, IndexError):
+        return {}
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -701,6 +770,8 @@ class PtyFixture:
             "CI": "false",
             "CONTINUOUS_INTEGRATION": "false",
             "ROLL_PTY_BENCHMARK": "1",
+            "ROLL_CHAT_BENCH_ENTRY": CLI_ENTRY_KIND,
+            "ROLL_CHAT_BENCH_TARGET_ROOT": str(REPO_ROOT),
         }
         command = [
             os.environ.get("NODE", "node"),
@@ -714,6 +785,7 @@ class PtyFixture:
             self._temporary_directory = tempfile.TemporaryDirectory(prefix="roll-chat-cli-")
             cwd = Path(self._temporary_directory.name)
             env["HOME"] = str(cwd)
+            seed_model_catalog(cwd)
             agents_dir = cwd / "agents"
             config = {
                 "llm": {
@@ -1101,29 +1173,9 @@ class PtyFixture:
             self.pump(min(0.05, deadline - time.monotonic()))
 
     def cpu_seconds(self) -> float | None:
-        proc_stat = Path(f"/proc/{self.process.pid}/stat")
-        if proc_stat.exists():
-            try:
-                raw = proc_stat.read_text(encoding="utf-8")
-                fields = raw[raw.rfind(")") + 2 :].split()
-                ticks = int(fields[11]) + int(fields[12])
-                return ticks / os.sysconf("SC_CLK_TCK")
-            except (OSError, ValueError, IndexError):
-                return None
-        if sys.platform == "darwin":
-            try:
-                # libproc reports nanosecond counters for a live process. The first
-                # two uint64 fields after the 16-byte UUID are user and system time.
-                buffer = ctypes.create_string_buffer(256)
-                proc_pid_rusage = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pid_rusage
-                proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-                proc_pid_rusage.restype = ctypes.c_int
-                if proc_pid_rusage(self.process.pid, 2, buffer) == 0:
-                    user_ns = int.from_bytes(buffer.raw[16:24], sys.byteorder)
-                    system_ns = int.from_bytes(buffer.raw[24:32], sys.byteorder)
-                    return (user_ns + system_ns) / 1_000_000_000
-            except (AttributeError, OSError, ValueError):
-                return None
+        usage = process_resources(self.process.pid)
+        if "cpuMs" in usage:
+            return usage["cpuMs"] / 1_000
         try:
             raw = subprocess.check_output(
                 ["ps", "-o", "time=", "-p", str(self.process.pid)], text=True
@@ -1447,8 +1499,28 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
                 8,
                 "production CLI runtime-server bootstrap",
             )
+            create_response, create_ms = fixture.rpc_request(
+                "session.create", {"title": "PTY zero-Agent benchmark"}, timeout=20
+            )
+            create_result = object_mapping(create_response.get("result"))
+            session_id = create_result.get("sessionId") if create_result else None
+            if not isinstance(session_id, str) or not session_id:
+                raise AssertionError("session.create response is missing sessionId")
+            first_session_ms = fixture.elapsed_ms()
+            capabilities, capabilities_ms = fixture.rpc_request(
+                "session.capabilities", {"sessionId": session_id}, timeout=5
+            )
+            catalog_hash = validate_capabilities(capabilities, fixture.topology)
+            assert_no_bootstrap_issues(fixture)
+            fixture.rpc_request("session.close", {"sessionId": session_id}, timeout=5)
             return {
                 "cliBootstrapReadyMs": ready_ms,
+                "sessionCreateReadyMs": create_ms,
+                "firstSessionFromSpawnMs": first_session_ms,
+                "firstCapabilitiesReadyMs": capabilities_ms,
+                "agentCount": 0,
+                "toolCount": 0,
+                "catalogHash": catalog_hash,
                 "configLoaded": True,
                 "runtimeServerStarted": True,
             }, fixture
@@ -1457,7 +1529,7 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
             "cli-server-1-agent-bootstrap",
             "cli-server-5-agent-bootstrap",
         ):
-            fixture.wait_for(
+            ready_ms = fixture.wait_for(
                 lambda screen: RUNTIME_SERVER_READY_TEXT in screen,
                 8,
                 "production CLI runtime-server readiness",
@@ -1471,7 +1543,8 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
             )
             if not isinstance(session_id, str) or not session_id:
                 raise AssertionError("session.create response is missing sessionId")
-            capabilities, _ = fixture.rpc_request(
+            first_session_ms = fixture.elapsed_ms()
+            capabilities, capabilities_ms = fixture.rpc_request(
                 "session.capabilities", {"sessionId": session_id}, timeout=5
             )
             catalog_hash = validate_capabilities(capabilities, fixture.topology)
@@ -1479,7 +1552,10 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
             assert_no_bootstrap_issues(fixture)
             fixture.rpc_request("session.close", {"sessionId": session_id}, timeout=5)
             return {
+                "cliBootstrapReadyMs": ready_ms,
                 "sessionCreateReadyMs": create_ms,
+                "firstSessionFromSpawnMs": first_session_ms,
+                "firstCapabilitiesReadyMs": capabilities_ms,
                 "agentCount": fixture.expected_agent_count,
                 "toolCount": fixture.expected_agent_count,
                 "sessionCapabilitiesAvailable": True,
@@ -2255,6 +2331,16 @@ def compare_baseline(
             f"({baseline.get('suite')!r} != {current.get('suite')!r})"
         )
 
+    current_environment = object_mapping(current.get("environment")) or {}
+    baseline_environment = object_mapping(baseline.get("environment")) or {}
+    # Historical results predate entry selection and always measured source.
+    current_entry = current_environment.get("entry", "src")
+    baseline_entry = baseline_environment.get("entry", "src")
+    if current_entry not in ("src", "dist") or baseline_entry not in ("src", "dist"):
+        return [*failures, "baseline and current entry must be src or dist"]
+    if current_entry != baseline_entry:
+        return [*failures, f"baseline entry differs ({baseline_entry} != {current_entry})"]
+
     current_scenarios = object_mapping(current.get("scenarios"))
     baseline_scenarios = object_mapping(baseline.get("scenarios"))
     if current_scenarios is None:
@@ -2290,6 +2376,10 @@ def compare_baseline(
             if metric_median(current_metrics, metric) is not None
             and metric_median(baseline_metrics, metric) is not None
         )
+        if "cpuMs" in optional_metrics:
+            if current_environment.get("cpuCounterVersion") != baseline_environment.get("cpuCounterVersion"):
+                failures.append("CPU counter version differs; regenerate the baseline before comparing cpuMs")
+                optional_metrics = tuple(metric for metric in optional_metrics if metric != "cpuMs")
         for metric in (*required_metrics, *optional_metrics):
             current_median = metric_median(current_metrics, metric)
             baseline_median = metric_median(baseline_metrics, metric)
@@ -2329,6 +2419,9 @@ def environment() -> dict[str, object]:
         "node": node_version,
         "cpuCount": os.cpu_count(),
         "commit": commit,
+        "entry": CLI_ENTRY_KIND,
+        "cpuCounterVersion": 2,
+        "loadAverage": os.getloadavg() if hasattr(os, "getloadavg") else None,
         "terminal": {"columns": 100, "rows": 36, "term": "xterm-256color"},
     }
 
@@ -2353,6 +2446,7 @@ def run_paired_member_sample(
     env = {
         **sanitized_child_env(os.environ),
         "ROLL_CHAT_BENCH_TARGET_ROOT": str(target_root),
+        "ROLL_CHAT_BENCH_ENTRY": CLI_ENTRY_KIND,
     }
     completed = subprocess.run(
         [
@@ -2410,7 +2504,9 @@ def run_paired_benchmark(args: argparse.Namespace) -> int:
         ("baseline", baseline_root),
         ("candidate", candidate_root),
     ):
-        entry = target_root / "packages" / "core" / "src" / "cli" / "index.ts"
+        entry = target_root / "packages" / "core" / CLI_ENTRY_KIND / "cli" / (
+            "index.js" if CLI_ENTRY_KIND == "dist" else "index.ts"
+        )
         if not entry.is_file():
             print(
                 f"paired {label} root does not contain the Roll CLI entrypoint: {entry}",
@@ -2544,6 +2640,7 @@ def run_paired_benchmark(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument("--entry", choices=("src", "dist"), default=CLI_ENTRY_KIND)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-regression-percent", type=float, default=25.0)
@@ -2576,10 +2673,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global CLI_ENTRY_KIND, CLI_ENTRY
     if os.name != "posix":
         print("chat PTY benchmark currently requires macOS or Linux", file=sys.stderr)
         return 2
     args = parse_args()
+    CLI_ENTRY_KIND = getattr(args, "entry", "src")
+    CLI_ENTRY = REPO_ROOT / "packages" / "core" / CLI_ENTRY_KIND / "cli" / (
+        "index.js" if CLI_ENTRY_KIND == "dist" else "index.ts"
+    )
     if getattr(args, "paired_baseline_root", None) is not None:
         return run_paired_benchmark(args)
     selected = tuple(args.scenarios or SCENARIOS)
@@ -2613,6 +2715,14 @@ def main() -> int:
             except ScenarioFailure as failure:
                 return persist_failure(failure, sample_index)
             final_screen = fixture.screen.render()
+            resources = process_resources(fixture.process.pid)
+            resource_metrics = {
+                "core" + key[0].upper() + key[1:]: value for key, value in resources.items()
+            }
+            agents = [process_resources(int(record["pid"])) for record in fixture.agent_lifecycle()]
+            if agents and all("rssBytes" in item and "cpuMs" in item for item in agents):
+                resource_metrics["agentRssBytes"] = sum(item["rssBytes"] for item in agents)
+                resource_metrics["agentCpuMs"] = sum(item["cpuMs"] for item in agents)
             try:
                 fixture.exit_cleanly()
                 if scenario not in CLI_SERVER_SCENARIOS:
@@ -2637,6 +2747,7 @@ def main() -> int:
                 )
             sample_result: dict[str, object] = {
                 **metrics,
+                **resource_metrics,
                 **fixture.cleanup_metrics(),
                 "finalScreenSha256": hashlib.sha256(final_screen.encode()).hexdigest(),
                 "artifacts": save_artifacts(
