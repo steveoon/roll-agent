@@ -6,7 +6,7 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-
 import type {
   ScheduleExtendAdmission,
   ScheduleToolPort,
-} from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+} from "../host-contracts/schedule-tools.ts";
 import { AgentSession } from "../engine/agent-session.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { buildChatSystemPromptFromManifest } from "../engine/system-prompt.ts";

@@ -459,6 +459,52 @@ describe("opt-in appOutput MCP contract", () => {
     assert.equal(count, 0);
   });
 
+  it("rejects refinements, overwrites and defaults that JSON Schema cannot enforce", async () => {
+    const schemas = [
+      z.object({ count: z.number() }).refine(({ count }) => count > 0),
+      z.object({
+        count: z.number().superRefine((count, ctx) => {
+          if (count <= 0) ctx.addIssue({ code: "custom", message: "positive only" });
+        }),
+      }),
+      z.object({ name: z.string().trim() }),
+      z.object({ name: z.string().regex(/name/i) }),
+      z.object({ count: z.number().default(1) }),
+      z.object({ count: z.number().prefault(1) }),
+      z.object({ count: z.coerce.number() }),
+      z.object({ count: z.number() }).check(z.property("count", z.number().positive())),
+      z.object({ id: z.string().check(z.stringFormat("uuid", (value) => value.startsWith("a"))) }),
+    ];
+    let executions = 0;
+    for (const output of schemas) {
+      const tool = {
+        name: "unrepresentable",
+        description: "unrepresentable output",
+        input: z.object({}),
+        output,
+        appOutput: { schemaId: "test.unrepresentable", schemaVersion: 1 },
+        execute: async () => {
+          executions += 1;
+          return { count: 1, name: "name" };
+        },
+      };
+      const server = new McpServer({ name: "unrepresentable", version: "1" });
+      try {
+        assert.throws(
+          () => registerTool(server, tool, TEST_CONTEXT),
+          /cannot represent|does not support/,
+        );
+        await assert.rejects(
+          executeToolForMcp(tool, TEST_CONTEXT, {}),
+          /cannot represent|does not support/,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+    assert.equal(executions, 0);
+  });
+
   it("leaves legacy tool results text-only even when output validation would fail", async () => {
     await withClient(
       {

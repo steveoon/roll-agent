@@ -4,7 +4,7 @@ import { modelMessageSchema, type ModelMessage } from "ai";
 
 import { z } from "zod";
 
-import { SKILL_SOURCES } from "@roll-agent/core/skills/library";
+import { SKILL_SOURCES } from "../skills/contracts.ts";
 
 import { SESSION_STATES } from "../bash/session/types.ts";
 

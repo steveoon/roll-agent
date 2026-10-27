@@ -166,11 +166,11 @@ export function buildRollConfigCatalog(agents: readonly RegisteredAgent[] = []):
 }
 
 function buildCatalogNode(
-  schema: z.ZodTypeAny,
+  schema: z.core.$ZodType,
   path: readonly string[],
   defaultValue: unknown,
 ): ConfigCatalogNode {
-  const effectiveRequired = !schema.safeParse(undefined).success;
+  const effectiveRequired = !z.safeParse(schema, undefined).success;
   const unwrapped = unwrapSchema(schema);
   const metadata = findGuidance(path);
   const base = buildNodeBase(schema, path, defaultValue, effectiveRequired, metadata);
@@ -194,7 +194,7 @@ function buildCatalogNode(
       ...base,
       kind: "record",
       widget: "record",
-      value: buildCatalogNode(unwrapped.valueSchema, [...path, "*"], undefined),
+      value: buildCatalogNode(unwrapped.valueType, [...path, "*"], undefined),
       ...(keyOptions ? { keyOptions } : {}),
     };
   }
@@ -208,7 +208,10 @@ function buildCatalogNode(
     };
   }
 
-  if (unwrapped instanceof z.ZodEnum) {
+  if (
+    unwrapped instanceof z.ZodEnum &&
+    unwrapped.options.every((option) => typeof option === "string")
+  ) {
     return {
       ...base,
       kind: "enum",
@@ -250,24 +253,29 @@ function deriveNumberConstraints(schema: z.ZodNumber): ConfigNumberConstraints {
   let minimum: { readonly value: number; readonly exclusive: boolean } | undefined;
   let maximum: { readonly value: number; readonly exclusive: boolean } | undefined;
 
-  for (const check of schema._def.checks) {
-    if (check.kind === "min") {
+  for (const check of schema._zod.def.checks ?? []) {
+    if (check instanceof z.core.$ZodCheckGreaterThan) {
+      const { value, inclusive } = check._zod.def;
+      if (typeof value !== "number") continue;
       if (
         minimum === undefined ||
-        check.value > minimum.value ||
-        (check.value === minimum.value && !check.inclusive)
+        value > minimum.value ||
+        (value === minimum.value && !inclusive)
       ) {
-        minimum = { value: check.value, exclusive: !check.inclusive };
+        minimum = { value, exclusive: !inclusive };
       }
       continue;
     }
-    if (
-      check.kind === "max" &&
-      (maximum === undefined ||
-        check.value < maximum.value ||
-        (check.value === maximum.value && !check.inclusive))
-    ) {
-      maximum = { value: check.value, exclusive: !check.inclusive };
+    if (check instanceof z.core.$ZodCheckLessThan) {
+      const { value, inclusive } = check._zod.def;
+      if (typeof value !== "number") continue;
+      if (
+        maximum === undefined ||
+        value < maximum.value ||
+        (value === maximum.value && !inclusive)
+      ) {
+        maximum = { value, exclusive: !inclusive };
+      }
     }
   }
 
@@ -281,7 +289,7 @@ function deriveNumberConstraints(schema: z.ZodNumber): ConfigNumberConstraints {
 }
 
 function buildNodeBase(
-  schema: z.ZodTypeAny,
+  schema: z.core.$ZodType,
   path: readonly string[],
   defaultValue: unknown,
   effectiveRequired: boolean,
@@ -308,26 +316,24 @@ function buildNodeBase(
   };
 }
 
-function inferSchemaDefault(schema: z.ZodTypeAny): { readonly defaultValue: unknown } | object {
-  const parsed = schema.safeParse(undefined);
+function inferSchemaDefault(schema: z.core.$ZodType): { readonly defaultValue: unknown } | object {
+  const parsed = z.safeParse(schema, undefined);
   return parsed.success && parsed.data !== undefined ? { defaultValue: parsed.data } : {};
 }
 
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
-  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
+function unwrapSchema(schema: z.core.$ZodType): z.core.$ZodType {
+  if (
+    schema instanceof z.ZodOptional ||
+    schema instanceof z.ZodNullable ||
+    schema instanceof z.ZodDefault ||
+    schema instanceof z.ZodPrefault ||
+    schema instanceof z.ZodCatch ||
+    schema instanceof z.ZodReadonly
+  ) {
     return unwrapSchema(schema.unwrap());
   }
-  if (schema instanceof z.ZodDefault) {
-    return unwrapSchema(schema.removeDefault());
-  }
-  if (schema instanceof z.ZodEffects) {
-    return unwrapSchema(schema.innerType());
-  }
-  if (schema instanceof z.ZodCatch) {
-    return unwrapSchema(schema.removeCatch());
-  }
-  if (schema instanceof z.ZodBranded) {
-    return unwrapSchema(schema.unwrap());
+  if (schema instanceof z.ZodPipe) {
+    return unwrapSchema(schema.in instanceof z.ZodTransform ? schema.out : schema.in);
   }
   return schema;
 }

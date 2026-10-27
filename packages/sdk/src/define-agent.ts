@@ -361,7 +361,7 @@ export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: Ag
       ...(tool.annotations ? { annotations: tool.annotations } : {}),
       ...(Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
     },
-    async (params: Record<string, unknown>, extra: { signal: AbortSignal }) =>
+    async (params: unknown, extra: { signal: AbortSignal }) =>
       await executeToolForMcp(tool, ctx, params, extra.signal),
   );
 }
@@ -410,7 +410,7 @@ function extractToolResultImages(result: unknown): {
 export async function executeToolForMcp(
   tool: AnyToolDefinition,
   ctx: AgentContext,
-  params: Record<string, unknown>,
+  params: unknown,
   signal?: AbortSignal,
 ): Promise<McpToolResult> {
   // Reject unsupported output contracts before any business effects, including direct calls.

@@ -181,7 +181,7 @@ export function withInteractionFeedback(
   return compactTaskRequest({
     ...request,
     state: {
-      ...z.record(z.unknown()).parse(request.state),
+      ...z.record(z.string(), z.unknown()).parse(request.state),
       interactionFeedback: {
         attempts: rows.map(([, a]) => ({
           operation: a.operation,

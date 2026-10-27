@@ -6,6 +6,10 @@ import addFormats from "ajv-formats";
 import { format } from "prettier";
 import { z } from "zod/v4";
 import {
+  expandTypeUnions,
+  preserveDiscriminatedUnion,
+} from "../../../scripts/wire-json-schema.mjs";
+import {
   RELAY_BROWSER_WSS_MESSAGE_TYPES_BY_DIRECTION,
   RELAY_COMPANION_WSS_MESSAGE_TYPES_BY_DIRECTION,
   RELAY_CONTROL_VERSION,
@@ -24,7 +28,12 @@ async function formatJson(value) {
 
 function generateJsonSchema(schema, metadata) {
   return {
-    ...z.toJSONSchema(schema, { target: "draft-2020-12" }),
+    ...expandTypeUnions(
+      z.toJSONSchema(schema, {
+        target: "draft-2020-12",
+        override: preserveDiscriminatedUnion,
+      }),
+    ),
     $schema: "https://json-schema.org/draft/2020-12/schema",
     ...metadata,
   };

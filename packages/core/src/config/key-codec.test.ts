@@ -14,6 +14,23 @@ import {
 import { rollConfigSchema } from "./schema.ts";
 
 describe("key-codec: schema derivation", () => {
+  it("traverses prefaults and pipelines through the input configuration shape", () => {
+    const schema = z.preprocess(
+      (value) => value,
+      z
+        .object({
+          shellConfig: z.object({ autoApprove: z.boolean().default(true) }).prefault({}),
+        })
+        .transform((value) => ({ normalized: value })),
+    );
+    const yaml = { "shell-config": { "auto-approve": false } };
+    const decoded = decodeFromYaml(yaml, buildKeyCodecNode(schema));
+    assert.deepEqual(decoded, { shellConfig: { autoApprove: false } });
+    assert.deepEqual(schema.parse(decoded), {
+      normalized: { shellConfig: { autoApprove: false } },
+    });
+  });
+
   it("derives every root configuration field from rollConfigSchema", () => {
     assert.equal(CONFIG_KEY_CODEC.kind, "object");
     assert.deepEqual(Object.keys(CONFIG_KEY_CODEC.fields), Object.keys(rollConfigSchema.shape));

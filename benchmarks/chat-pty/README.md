@@ -3,20 +3,21 @@
 This test-only harness separates production CLI startup from deterministic Ink rendering while running
 both paths inside a real Unix PTY.
 
-| Scenario | Boundary measured | Isolation and correctness oracle |
-| --- | --- | --- |
-| `cli-bootstrap` | Production `roll chat --server` process through config loading, lazy imports, provider construction, and runtime-server readiness | Temporary `HOME`, config, threads, and agents directories; dummy key and loopback-only base URL; no model request |
-| `cli-ink-cold-start` | Production `roll chat` process through the first interactive Ink prompt | Same isolated config; waits for the Prompt, opens `/`, requires the slash-menu navigation hint, clears it, makes no model request, and exits through bounded `/exit` cleanup |
-| `cli-server-1-agent-bootstrap` | A real `session.create` request through one stdio Agent connection and Tool discovery | One MCP process with a deterministic 400 ms `tools/list` delay; validates `session.capabilities`, the exact Agent Tool catalog, lifecycle, and clean EOF shutdown |
-| `cli-server-5-agent-bootstrap` | A real `session.create` request through five registered stdio Agents | Registration-order delays of 400/300/250/150/100 ms; validates all five Agents and Tools, stable topology/catalog hashes, observed list concurrency, and cleanup |
-| `cli-ink-5-agent-cold-start` | Production process start through the first prompt and visible `5 agents` banner | Uses the same five-Agent topology; validates each fixture's actual `tools/list` lifecycle and clean exit without inventing an unobservable catalog hash |
-| `fixture-ink-cold-start` | Real `runInkRepl()` startup through the first prompt | Deterministic in-process Session fixture; no provider or model request |
-| `keypress`, `text-stream`, `tool-stream`, `idle` | Real Ink input/render/stream/idle paths after deterministic fixture startup | Scenario-specific screen and stream oracles; `keypress` also requires a visible, CJK-width-aware terminal cursor for IME preedit anchoring |
-| `resize-cycle` | Deliberate shrink/expand checkpoints plus a 40×10 compact-layout probe | Long-history sentinels remain unique; slash popup borders and the IME cursor anchor remain correct at every size |
-| `resize-storm` | 25 rapid resizes followed by a distinct canonical final size | Requires a settled redraw containing every semantic sentinel exactly once with the draft cursor aligned |
-| `stream-resize` | 400-token stream while 21 resizes are delivered | Complete ordered token oracle, unique final sentinels, and a restored IME cursor after streaming |
+| Scenario                                         | Boundary measured                                                                                                                 | Isolation and correctness oracle                                                                                                                                             |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli-bootstrap`                                  | Production `roll chat --server` process through config loading, lazy imports, provider construction, and runtime-server readiness | Temporary `HOME`, config, threads, and agents directories; dummy key and loopback-only base URL; no model request                                                            |
+| `cli-ink-cold-start`                             | Production `roll chat` process through the first interactive Ink prompt                                                           | Same isolated config; waits for the Prompt, opens `/`, requires the slash-menu navigation hint, clears it, makes no model request, and exits through bounded `/exit` cleanup |
+| `cli-server-1-agent-bootstrap`                   | A real `session.create` request through one stdio Agent connection and Tool discovery                                             | One MCP process with a deterministic 400 ms `tools/list` delay; validates `session.capabilities`, the exact Agent Tool catalog, lifecycle, and clean EOF shutdown            |
+| `cli-server-5-agent-bootstrap`                   | A real `session.create` request through five registered stdio Agents                                                              | Registration-order delays of 400/300/250/150/100 ms; validates all five Agents and Tools, stable topology/catalog hashes, observed list concurrency, and cleanup             |
+| `cli-ink-5-agent-cold-start`                     | Production process start through the first prompt and visible `5 agents` banner                                                   | Uses the same five-Agent topology; validates each fixture's actual `tools/list` lifecycle and clean exit without inventing an unobservable catalog hash                      |
+| `fixture-ink-cold-start`                         | Real `runInkRepl()` startup through the first prompt                                                                              | Deterministic in-process Session fixture; no provider or model request                                                                                                       |
+| `keypress`, `text-stream`, `tool-stream`, `idle` | Real Ink input/render/stream/idle paths after deterministic fixture startup                                                       | Scenario-specific screen and stream oracles; `keypress` also requires a visible, CJK-width-aware terminal cursor for IME preedit anchoring                                   |
+| `resize-cycle`                                   | Deliberate shrink/expand checkpoints plus a 40×10 compact-layout probe                                                            | Long-history sentinels remain unique; slash popup borders and the IME cursor anchor remain correct at every size                                                             |
+| `resize-storm`                                   | 25 rapid resizes followed by a distinct canonical final size                                                                      | Requires a settled redraw containing every semantic sentinel exactly once with the draft cursor aligned                                                                      |
+| `stream-resize`                                  | 400-token stream while 21 resizes are delivered                                                                                   | Complete ordered token oracle, unique final sentinels, and a restored IME cursor after streaming                                                                             |
 
-The production CLI scenarios use the TypeScript source entrypoint for development/CI parity. Child
+The production CLI scenarios default to the TypeScript source entrypoint for development/CI parity;
+`--entry dist` selects the built CLI and built Ink fixture implementation. Child
 processes explicitly disable CI classification because Ink otherwise suppresses interactive rendering
 even inside a real PTY. Their temporary provider URL is `127.0.0.1:1`, so an accidental model call fails locally instead of reaching
 the network. They measure CLI architecture and UI readiness, not first-turn inference latency.
@@ -128,6 +129,67 @@ lower-is-better medians may regress by 25%; change this with `--max-regression-p
 The idle scenario also reports terminal redraw/output cost. Animation may make those values non-zero.
 It reads live-process CPU counters from `/proc` on Linux and `libproc` on macOS; otherwise it sets
 `cpuAvailable: false` and omits `cpuMs`.
+
+CPU counter version 2 converts macOS Mach ticks using `mach_timebase_info`. Historical CPU results
+without that version must be regenerated before CPU comparison.
+
+## Selecting a checkout or published build
+
+`--entry src|dist` selects the measured CLI and Ink implementation. Set
+`ROLL_CHAT_BENCH_TARGET_ROOT` to measure another checkout while keeping the driver and fixtures
+unchanged. Both the real CLI scenarios and deterministic Ink scenarios use that target.
+Baseline comparison rejects different entry kinds; older results without an entry field count as
+source measurements.
+
+A workspace `dist` CLI can still resolve internal packages to TypeScript source. For measurements
+of published code, first use `scripts/bench/published-layout.mjs` to copy the built packages and
+installed dependencies, apply `publishConfig`, and verify internal production dependencies resolve
+to their copied `dist` entries. The helper requires a new output directory and does not build the
+packages. This layout check does not replace the published tarball audit.
+
+```bash
+node scripts/bench/published-layout.mjs --root /path/to/checkout --output /tmp/roll-published
+ROLL_CHAT_BENCH_TARGET_ROOT=/tmp/roll-published python3 benchmarks/chat-pty/benchmark.py \
+  --entry dist --scenario cli-bootstrap --samples 1 --check \
+  --output /tmp/roll-pty-dist/result.json
+```
+
+Real CLI cases seed their isolated HOME with the fixed model-catalog fixture so a background
+catalog refresh cannot introduce an external network dependency. Paired measurements can set
+`ROLL_CHAT_BENCH_CATALOG_FETCHED_AT` to one shared UTC timestamp; it must remain less than 24 hours
+old. An expired or future timestamp fails before measurement.
+
+Server samples record process readiness, session creation, total time to the first session, and
+the first capabilities request separately. This exposes work moved from startup into session
+creation. Natural RSS and CPU counters for Core and Agent processes are sampled after the latency
+boundary; the startup measurement does not inject GC.
+
+## Memory and fixed-workload measurements
+
+`scripts/bench/chat-heap-growth.mjs` supports another `--target-root`, separate
+`--gc natural|diagnostic` modes, adjustable `--sample-ms`, and optional JSON/raw output. Run natural
+and diagnostic measurements in separate processes: retained heap after forced GC does not replace
+natural RSS or peak-memory observations. Provider counters are recorded separately from Core.
+
+`--workload-steps` fixes the number of successful tool calls and requires the final model response.
+Failed or incomplete tool facts fail fixed-workload checks even without `--strict-cleanup`.
+SQLite execution records and Provider output facts let callers compare equal work.
+`--strict-cleanup` requires normal CLI exit; forced cleanup cannot pass that check.
+Choose a new `--output` path for each run. An existing report or its `.raw` directory is rejected
+before work starts, so a failed rerun cannot be confused with an earlier successful report.
+
+```bash
+node scripts/bench/chat-heap-growth.mjs --target-root /path/to/checkout --entry src \
+  --duration 60 --warmup 0 --workload-steps 10 --gc natural --strict-cleanup \
+  --reasoning-chars 800 --delta-ms 1 --sample-ms 500 \
+  --output /tmp/roll-heap/result.json
+```
+
+With fixed work, duration is an upper bound and the heap-growth slope is informational; no time to
+heap exhaustion is extrapolated. Sustained
+runs retain the historical absolute slope limit. Neither that limit nor a successful correctness
+smoke establishes performance equivalence between two versions; review timing and memory results
+separately under controlled conditions.
 
 ## CI boundary
 

@@ -21,7 +21,7 @@ import type {
   LanguageModelV4StreamPart,
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
+import { SKILL_TOOL_ID, type SkillLibrary } from "../skills/contracts.ts";
 import { getFileChangeDisplay } from "@roll-agent/protocol";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
@@ -6386,7 +6386,7 @@ test("未配置 bash 时工具不存在", async () => {
 function fakeSkillLibrary(
   name: string,
   content: string,
-): import("@roll-agent/core/skills/library").SkillLibrary {
+): import("../skills/contracts.ts").SkillLibrary {
   const summary = { name, description: "测试 skill", source: "user" } as const;
   return {
     list: () => [summary],

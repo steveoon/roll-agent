@@ -107,7 +107,7 @@ describe("zhipin_select_recommend_job", () => {
     });
 
     const result = await zhipinSelectRecommendJob.execute(
-      { jobValue: "job-2", jobName: "后厨", useSearch: true },
+      zhipinSelectRecommendJob.input.parse({ jobValue: "job-2", jobName: "后厨", useSearch: true }),
       createTestContext(),
     );
 
@@ -182,7 +182,7 @@ describe("zhipin_select_recommend_job", () => {
     });
 
     const result = await zhipinSelectRecommendJob.execute(
-      { jobRef: "@j2", useSearch: false },
+      zhipinSelectRecommendJob.input.parse({ jobRef: "@j2", useSearch: false }),
       createTestContext(),
     );
 

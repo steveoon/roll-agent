@@ -3,10 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
 import type { ChatListItem } from "../pages/zhipin/chat-navigation.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
-import {
-  setZhipinReadMessagesDepsForTests,
-  zhipinReadMessages,
-} from "./zhipin-read-messages.ts";
+import { setZhipinReadMessagesDepsForTests, zhipinReadMessages } from "./zhipin-read-messages.ts";
 
 function createTestContext(): AgentContext {
   return {
@@ -115,7 +112,10 @@ describe("zhipin_read_messages", () => {
       createNativeVisualActivitySession: () => createNoopNativeSession() as never,
     });
 
-    const result = await zhipinReadMessages.execute({}, createTestContext());
+    const result = await zhipinReadMessages.execute(
+      zhipinReadMessages.input.parse({}),
+      createTestContext(),
+    );
 
     assert.equal(result.success, false);
     assert.equal(result.total, 0);

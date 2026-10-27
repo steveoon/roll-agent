@@ -36,8 +36,8 @@ import type {
 } from "@ai-sdk/provider";
 import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
-import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
-import type { JsonSchemaRefIssue } from "@roll-agent/core/tool-runtime/json-schema-refs";
+import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
+import type { JsonSchemaRefIssue } from "../tool-contracts/json-schema-refs.ts";
 import type {
   ContextCompactionReason,
   ContextCompactionStrategy,
@@ -235,6 +235,8 @@ export interface SessionModelSwitch {
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
+  /** @internal Synchronous engine admission before accepting input or starting compaction. */
+  readonly onBeforeTurn?: () => void;
   readonly modelRecovery?: ModelTurnRecovery;
   readonly sources: readonly AgentToolSource[];
   readonly maxSteps: number;
@@ -271,7 +273,7 @@ export interface AgentSessionOptions {
   readonly providerOptions?: SharedV4ProviderOptions;
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
-  /** `setProviderOptions()` 生效后触发；ConversationEngine 用它同步子 Agent Sampling。 */
+  /** 在 `setProviderOptions()` 写入前同步校验并更新宿主；抛错时保留原参数。 */
   readonly onProviderOptionsChange?: (providerOptions: SharedV4ProviderOptions | undefined) => void;
   readonly toolSchemaPolicy?: ToolSchemaPolicy;
   readonly onToolExcluded?: (exclusion: SessionToolExclusion) => void;
@@ -701,6 +703,7 @@ export class AgentSession {
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private readonly onClose: (() => void) | undefined;
+  private readonly onBeforeTurn: AgentSessionOptions["onBeforeTurn"];
   private providerOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputReasoning:
@@ -805,6 +808,7 @@ export class AgentSession {
     this.compaction = options.compaction;
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.onClose = options.onClose;
+    this.onBeforeTurn = options.onBeforeTurn;
     this.providerOptions = options.providerOptions;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
@@ -1206,6 +1210,7 @@ export class AgentSession {
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
+    this.onBeforeTurn?.();
     const normalizedInput = normalizeSessionSendInput(input);
 
     const queue = new AsyncEventQueue<SessionEvent>();
@@ -1239,6 +1244,7 @@ export class AgentSession {
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
+    this.onBeforeTurn?.();
 
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
@@ -2805,8 +2811,8 @@ export class AgentSession {
   }
 
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
-    this.providerOptions = providerOptions;
     this.onProviderOptionsChange?.(providerOptions);
+    this.providerOptions = providerOptions;
   }
 
   canSwitchModel(): boolean {

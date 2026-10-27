@@ -20,7 +20,7 @@ const originSchema = z
       return false;
     }
   }, "Expected canonical HTTP(S) origin");
-const parameterSchema = z.record(z.unknown()).superRefine((value, ctx) => {
+const parameterSchema = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
   try {
     validateParameterSchema(value);
   } catch (error) {
@@ -48,8 +48,8 @@ export const workflowDraftSchema = z
       .min(1)
       .max(4),
     allowedOrigins: z.array(originSchema).min(1).max(20),
-    preconditions: z.array(z.record(z.unknown())).max(30).default([]),
-    postconditions: z.array(z.record(z.unknown())).min(1).max(30),
+    preconditions: z.array(z.record(z.string(), z.unknown())).max(30).default([]),
+    postconditions: z.array(z.record(z.string(), z.unknown())).min(1).max(30),
     notes: z.string().max(8000).default(""),
     locatorExplanations: z.array(z.string().max(1000)).max(30).default([]),
   })

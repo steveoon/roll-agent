@@ -14,68 +14,73 @@ import type { AnyToolDefinition } from "./types/index.ts";
 
 // Only schemas whose validation semantics can survive the JSON Schema conversion.
 // Reject effects (including custom refinements), coercion and defaulting before execution.
-function assertRepresentable(schema: z.ZodType, seen = new Set<z.ZodType>()): void {
+function assertRepresentable(schema: z.core.$ZodType, seen = new Set<z.core.$ZodType>()): void {
   if (seen.has(schema)) return;
   seen.add(schema);
+  for (const check of schema._zod.def.checks ?? []) {
+    if (
+      check._zod.def.check === "custom" ||
+      check._zod.def.check === "overwrite" ||
+      check._zod.def.check === "property"
+    ) {
+      throw new Error("appOutput cannot represent custom refinements or transformations");
+    }
+    if (
+      check instanceof z.core.$ZodCustomStringFormat &&
+      (!check._zod.def.pattern || check._zod.def.pattern.flags)
+    ) {
+      throw new Error("appOutput cannot represent function-based or flagged string formats");
+    }
+    if (
+      check instanceof z.core.$ZodCheckStringFormat &&
+      check._zod.def.format === "regex" &&
+      check._zod.def.pattern?.flags
+    ) {
+      throw new Error("appOutput cannot represent regex flags");
+    }
+  }
   if (schema instanceof z.ZodObject) {
     for (const child of Object.values(schema.shape)) {
       if (child instanceof z.ZodType) assertRepresentable(child, seen);
     }
-    if (!(schema._def.catchall instanceof z.ZodNever)) {
-      assertRepresentable(schema._def.catchall, seen);
+    const catchall = schema._zod.def.catchall;
+    if (catchall !== undefined && !(catchall instanceof z.ZodNever)) {
+      assertRepresentable(catchall, seen);
     }
   } else if (schema instanceof z.ZodArray) {
     assertRepresentable(schema.element, seen);
   } else if (
     schema instanceof z.ZodOptional ||
     schema instanceof z.ZodNullable ||
-    schema instanceof z.ZodReadonly ||
-    schema instanceof z.ZodBranded
+    schema instanceof z.ZodReadonly
   ) {
     assertRepresentable(schema.unwrap(), seen);
   } else if (schema instanceof z.ZodUnion) {
     for (const option of schema.options) assertRepresentable(option, seen);
-  } else if (schema instanceof z.ZodDiscriminatedUnion) {
-    for (const option of schema.options) assertRepresentable(option, seen);
   } else if (schema instanceof z.ZodTuple) {
-    for (const item of schema.items) assertRepresentable(item, seen);
-    if (schema._def.rest) assertRepresentable(schema._def.rest, seen);
+    for (const item of schema._zod.def.items) assertRepresentable(item, seen);
+    if (schema._zod.def.rest) assertRepresentable(schema._zod.def.rest, seen);
   } else if (schema instanceof z.ZodRecord) {
-    assertRepresentable(schema.keySchema, seen);
-    assertRepresentable(schema.valueSchema, seen);
+    assertRepresentable(schema.keyType, seen);
+    assertRepresentable(schema.valueType, seen);
   } else if (
     schema instanceof z.ZodString ||
     schema instanceof z.ZodNumber ||
     schema instanceof z.ZodBoolean
   ) {
-    if (schema._def.coerce) throw new Error("appOutput does not support coercion");
-    if (schema instanceof z.ZodString) {
-      for (const check of schema._def.checks) {
-        if (
-          ["trim", "toLowerCase", "toUpperCase"].includes(check.kind) ||
-          (check.kind === "regex" && check.regex.flags !== "")
-        ) {
-          throw new Error("appOutput cannot represent string transformations or regex flags");
-        }
+    if (schema._zod.def.coerce) throw new Error("appOutput does not support coercion");
+  } else if (schema instanceof z.ZodLiteral) {
+    for (const value of schema.values) {
+      if (
+        value !== null &&
+        typeof value !== "string" &&
+        typeof value !== "boolean" &&
+        (typeof value !== "number" || !Number.isFinite(value))
+      ) {
+        throw new Error("appOutput requires JSON-compatible literals");
       }
     }
-  } else if (schema instanceof z.ZodLiteral) {
-    const value: unknown = schema.value;
-    if (
-      value !== null &&
-      typeof value !== "string" &&
-      typeof value !== "boolean" &&
-      (typeof value !== "number" || !Number.isFinite(value))
-    ) {
-      throw new Error("appOutput requires JSON-compatible literals");
-    }
-  } else if (
-    !(
-      schema instanceof z.ZodNull ||
-      schema instanceof z.ZodEnum ||
-      schema instanceof z.ZodNativeEnum
-    )
-  ) {
+  } else if (!(schema instanceof z.ZodNull || schema instanceof z.ZodEnum)) {
     throw new Error(`appOutput cannot represent ${schema.constructor.name} as JSON Schema`);
   }
 }

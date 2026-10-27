@@ -8,7 +8,7 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
 import { ThreadStore } from "../store/thread-store.ts";
 import { scheduledThreadOriginSchema } from "../store/thread-origin.ts";
 import { ConversationEngine } from "./conversation-engine.ts";
@@ -27,19 +27,10 @@ const origin = scheduledThreadOriginSchema.parse({
   ledgerDir: "/private-ledger-location",
 });
 
-function configFor(dir: string) {
-  return rollConfigSchema.parse({
-    ask: {},
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "current-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    agents: { dataDir: join(dir, "agents") },
-    runtime: {
-      shell: { enabled: false },
-      compaction: { enabled: true, strategy: "truncate", keepRecentTurns: 1, keepRecentTokens: 1 },
-    },
+function configFor() {
+  return runtimeSettingsSchema.parse({
+    shell: { enabled: false },
+    compaction: { enabled: true, strategy: "truncate", keepRecentTurns: 1, keepRecentTokens: 1 },
   });
 }
 
@@ -96,18 +87,20 @@ function assertReminder(call: LanguageModelV4CallOptions | undefined, capturedAt
 test("derived source reminder is model-only across fork, real compaction, and restart without replacing the real user goal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "roll-derived-model-context-"));
   let store = new ThreadStore(dir);
-  const config = configFor(dir);
+  const config = configFor();
   const calls: LanguageModelV4CallOptions[] = [];
   const createEngine = () =>
     new ConversationEngine({
-      config,
+      provider: "mock",
+      modelName: "current-model",
+      settings: config,
       model: new MockLanguageModelV4({
         doStream: async (options) => {
           calls.push(options);
           return stream(answer(`已解释结果 ${"完整原始分析 ".repeat(1_000)}`));
         },
       }),
-      agents: [],
+
       sources: [],
       store,
       skillLibrary: null,
@@ -185,7 +178,9 @@ test("derived conversation keeps current policy and never inherits scheduled una
   let checked = 0;
   let called = 0;
   const engine = new ConversationEngine({
-    config: configFor(dir),
+    provider: "mock",
+    modelName: "current-model",
+    settings: configFor(),
     store,
     model: new MockLanguageModelV4({
       doStream: async () => {
@@ -222,7 +217,7 @@ test("derived conversation keeps current policy and never inherits scheduled una
         ],
       },
     ],
-    agents: [],
+
     skillLibrary: null,
     workspaceInstructions: null,
     fileToolsEnabled: false,
@@ -259,9 +254,11 @@ test("previously stored explanation-like user text is preserved without heuristi
   const dir = mkdtempSync(join(tmpdir(), "roll-derived-existing-text-"));
   const store = new ThreadStore(dir);
   const engine = new ConversationEngine({
-    config: configFor(dir),
+    provider: "mock",
+    modelName: "current-model",
+    settings: configFor(),
     store,
-    agents: [],
+
     sources: [],
     skillLibrary: null,
     workspaceInstructions: null,

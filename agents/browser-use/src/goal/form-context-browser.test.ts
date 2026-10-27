@@ -230,7 +230,7 @@ test(
                 education: z.string(),
                 address: z.string(),
                 open: z.boolean(),
-                events: z.record(z.number()),
+                events: z.record(z.string(), z.number()),
               })
               .parse(
                 await c.evaluateJson(

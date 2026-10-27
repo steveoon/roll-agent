@@ -14,6 +14,18 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./skills": {
+      "types": "./src/skills/index.ts",
+      "default": "./src/skills/index.ts"
+    },
+    "./tool-contracts": {
+      "types": "./src/tool-contracts/index.ts",
+      "default": "./src/tool-contracts/index.ts"
+    },
+    "./host-contracts": {
+      "types": "./src/host-contracts/index.ts",
+      "default": "./src/host-contracts/index.ts"
     }
   },
   "publishConfig": {
@@ -22,6 +34,18 @@
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      },
+      "./skills": {
+        "types": "./dist/skills/index.d.ts",
+        "default": "./dist/skills/index.js"
+      },
+      "./tool-contracts": {
+        "types": "./dist/tool-contracts/index.d.ts",
+        "default": "./dist/tool-contracts/index.js"
+      },
+      "./host-contracts": {
+        "types": "./dist/host-contracts/index.d.ts",
+        "default": "./dist/host-contracts/index.js"
       }
     }
   },
@@ -38,17 +62,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^4.0.7",
+    "@ai-sdk/provider": "4.0.31",
     "@modelcontextprotocol/sdk": "1.32.0",
     "@roll-agent/protocol": "workspace:*",
     "@vscode/ripgrep": "1.18.0",
-    "ai": "^7.0.65",
+    "ai": "7.0.146",
     "diff": "9.0.0",
     "yaml": "2.8.3",
-    "zod": "^3.25.76"
+    "zod": "4.6.6"
   },
   "devDependencies": {
-    "@roll-agent/core": "workspace:*",
     "@types/node": "^22.0.0"
   }
 }

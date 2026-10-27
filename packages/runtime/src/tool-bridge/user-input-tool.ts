@@ -5,6 +5,7 @@ import {
   type UserInputResult,
 } from "@roll-agent/protocol";
 import type { ToolRegistry } from "./naming.ts";
+import { modelToolInputSchema } from "./model-input-schema.ts";
 import {
   successfulToolResult,
   toolResultToModelOutput,
@@ -77,7 +78,7 @@ export function buildUserInputTool(
       [id]: tool({
         description:
           "向用户展示一个结构化表单，仅用于补充完成当前任务所必需且无法从上下文推断的信息。不得请求密码、令牌、密钥或其他敏感凭证。",
-        inputSchema: userInputFormSchema,
+        inputSchema: modelToolInputSchema(userInputFormSchema),
         toModelOutput: ({ output }) => toolResultToModelOutput(output),
         execute: async (input, options): Promise<NormalizedToolResult> =>
           executeCoordinatedTool(

@@ -2,33 +2,31 @@ import { z } from "zod";
 
 const MAX_SCHEMA_UNWRAP_DEPTH = 8;
 
-export function getMcpCompatibleInputSchema(schema: z.ZodType): z.ZodTypeAny {
-  let current = schema as z.ZodTypeAny;
+export function getMcpCompatibleInputSchema(schema: z.ZodType): z.core.$ZodType {
+  let current: z.core.$ZodType = schema;
 
   for (let depth = 0; depth < MAX_SCHEMA_UNWRAP_DEPTH; depth += 1) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
 
     if (
       current instanceof z.ZodOptional ||
       current instanceof z.ZodNullable ||
-      current instanceof z.ZodBranded ||
+      current instanceof z.ZodDefault ||
+      current instanceof z.ZodPrefault ||
+      current instanceof z.ZodCatch ||
       current instanceof z.ZodReadonly
     ) {
       current = current.unwrap();
       continue;
     }
 
-    if (current instanceof z.ZodDefault) {
-      current = current.removeDefault();
-      continue;
-    }
-
-    if (current instanceof z.ZodCatch) {
-      current = current.removeCatch();
-      continue;
+    if (current instanceof z.ZodObject && current._zod.def.checks?.length) {
+      // Root refinements used to live in ZodEffects. Keep MCP's shape validation separate
+      // from parseToolInput(), which applies the original refinements exactly once.
+      return current.clone({ ...current._zod.def, checks: [] });
     }
 
     return current;

@@ -66,7 +66,7 @@ interface PendingConnection {
 export interface ConnectOptions {
   /** 连接超时（毫秒），默认 30s */
   readonly timeoutMs?: number;
-  /** 取消当前调用；若本调用发起底层连接，也会取消该连接 */
+  /** 取消当前调用；scoped 获取仅在最后一个持有者取消时中止底层连接。 */
   readonly signal?: AbortSignal;
   /** 为子 Agent 提供的 LLM model（启用 Sampling 支持） */
   readonly samplingModel?: LanguageModelV4;
@@ -83,6 +83,16 @@ export interface McpConnectionAcquisition {
   /** 放弃本次初始化；仅当同代连接无人使用且从未提交时才关闭。 */
   rollback(): Promise<void>;
 }
+
+/** An engine-owned acquisition. Committing retains ownership until release(). */
+export interface McpScopedConnectionAcquisition extends McpConnectionAcquisition {
+  release(serverExited?: boolean): Promise<void>;
+  /** Updates connection-wide Sampling state; ownership tokens do not isolate model contexts. */
+  setSampling(model: LanguageModelV4, providerOptions: SharedV4ProviderOptions | undefined): void;
+}
+
+/** A failed connection also failed to settle an external MCP resource. */
+export class McpConnectionCleanupError extends AggregateError {}
 
 export interface McpClientManagerOptions {
   /** 仅供内部测试/清理调优；不属于 roll.config.yaml。 */
@@ -231,12 +241,32 @@ export class McpClientManager {
     cwd: string,
     options: ConnectOptions = {},
   ): Promise<McpConnectionAcquisition> {
+    return this.acquireConnection(agentName, transport, cwd, options, false);
+  }
+
+  /** Shared connections stay alive until their last scoped owner releases them. */
+  async connectScoped(
+    agentName: string,
+    transport: AgentTransport,
+    cwd: string,
+    options: ConnectOptions = {},
+  ): Promise<McpScopedConnectionAcquisition> {
+    return this.acquireConnection(agentName, transport, cwd, options, true);
+  }
+
+  private async acquireConnection(
+    agentName: string,
+    transport: AgentTransport,
+    cwd: string,
+    options: ConnectOptions,
+    scoped: boolean,
+  ): Promise<McpScopedConnectionAcquisition> {
     options.signal?.throwIfAborted();
 
     const existing = this.connections.get(agentName);
     if (existing) {
       const token = this.registerConsumer(existing.generation);
-      return this.createAcquisition(agentName, existing, token);
+      return this.createAcquisition(agentName, existing, token, scoped);
     }
 
     const pending = this.pendingConnections.get(agentName);
@@ -245,10 +275,10 @@ export class McpClientManager {
       try {
         const connection = await waitForPendingConnection(pending.promise, options.signal);
         options.signal?.throwIfAborted();
-        return this.createAcquisition(agentName, connection, token);
+        return this.createAcquisition(agentName, connection, token, scoped);
       } catch (error) {
         pending.generation.consumers.delete(token);
-        await this.closeGenerationIfUnused(agentName, pending.generation);
+        await this.settleUnusedPending(agentName, pending, error);
         throw error;
       }
     }
@@ -262,7 +292,7 @@ export class McpClientManager {
     const token = this.registerConsumer(generation);
     const abortController = new AbortController();
     const signal =
-      options.signal === undefined
+      scoped || options.signal === undefined
         ? abortController.signal
         : AbortSignal.any([options.signal, abortController.signal]);
     const promise = this.connectNew(
@@ -277,17 +307,49 @@ export class McpClientManager {
     );
     const ownedPending = { promise, abortController, generation };
     this.pendingConnections.set(agentName, ownedPending);
-
-    try {
-      const connection = await promise;
-      return this.createAcquisition(agentName, connection, token);
-    } catch (error) {
-      generation.consumers.delete(token);
-      throw error;
-    } finally {
+    const clearPending = (): void => {
       if (this.pendingConnections.get(agentName) === ownedPending) {
         this.pendingConnections.delete(agentName);
       }
+    };
+    promise.then(clearPending, clearPending);
+
+    try {
+      const connection = await waitForPendingConnection(
+        promise,
+        scoped ? options.signal : undefined,
+      );
+      options.signal?.throwIfAborted();
+      return this.createAcquisition(agentName, connection, token, scoped);
+    } catch (error) {
+      generation.consumers.delete(token);
+      await this.settleUnusedPending(agentName, ownedPending, error);
+      throw error;
+    }
+  }
+
+  private async settleUnusedPending(
+    agentName: string,
+    pending: PendingConnection,
+    reason: unknown,
+  ): Promise<void> {
+    const { generation } = pending;
+    generation.cleanupRequested = true;
+    if (generation.committed || generation.consumers.size > 0) return;
+    pending.abortController.abort(reason);
+    // The cancelled last owner still settles the underlying connection; a late
+    // SDK result must not escape cleanup merely because its consumer stopped.
+    const [settlement] = await Promise.allSettled([pending.promise]);
+    try {
+      await this.closeGenerationIfUnused(agentName, generation);
+    } catch (cleanupError) {
+      throw new McpConnectionCleanupError(
+        [reason, cleanupError],
+        `Connection to "${agentName}" failed and MCP cleanup also failed.`,
+      );
+    }
+    if (settlement?.status === "rejected" && settlement.reason instanceof AggregateError) {
+      throw settlement.reason;
     }
   }
 
@@ -367,9 +429,21 @@ export class McpClientManager {
     agentName: string,
     connection: ManagedConnection,
     token: symbol,
-  ): McpConnectionAcquisition {
+    scoped: boolean,
+  ): McpScopedConnectionAcquisition {
     const { generation } = connection;
     let active = true;
+    let committed = false;
+    let releasePromise: Promise<void> | undefined;
+    const release = (serverExited = false): Promise<void> => {
+      active = false;
+      releasePromise ??= Promise.resolve().then(async () => {
+        generation.cleanupRequested = true;
+        generation.consumers.delete(token);
+        await this.closeGenerationIfUnused(agentName, generation, serverExited);
+      });
+      return releasePromise;
+    };
     return {
       client: connection.client,
       commit: () => {
@@ -377,16 +451,22 @@ export class McpClientManager {
         if (generation.closing) {
           throw new Error(`Connection to "${agentName}" is closing`);
         }
-        active = false;
-        generation.committed = true;
-        generation.consumers.delete(token);
+        committed = true;
+        if (!scoped) {
+          active = false;
+          generation.committed = true;
+          generation.consumers.delete(token);
+        }
       },
       rollback: async () => {
-        if (!active) return;
-        active = false;
-        generation.cleanupRequested = true;
-        generation.consumers.delete(token);
-        await this.closeGenerationIfUnused(agentName, generation);
+        if (!active || committed) return;
+        await release();
+      },
+      release,
+      setSampling: (model, providerOptions) => {
+        if (!active || generation.closing) return;
+        connection.samplingController?.setModel(model);
+        connection.samplingController?.setProviderOptions(providerOptions);
       },
     };
   }
@@ -394,9 +474,13 @@ export class McpClientManager {
   private async closeGenerationIfUnused(
     agentName: string,
     generation: ConnectionGeneration,
+    serverExited = false,
   ): Promise<void> {
+    if (generation.closing) {
+      await generation.connection?.closePromise;
+      return;
+    }
     if (
-      generation.closing ||
       generation.committed ||
       !generation.cleanupRequested ||
       generation.consumers.size > 0 ||
@@ -409,7 +493,7 @@ export class McpClientManager {
     if (this.connections.get(agentName) === connection) {
       this.connections.delete(agentName);
     }
-    await this.closeManagedConnection(agentName, connection);
+    await this.closeManagedConnection(agentName, connection, serverExited);
   }
 
   private createClient(
@@ -458,7 +542,7 @@ export class McpClientManager {
       cleanupErrors.push(error);
     }
     if (cleanupErrors.length > 0) {
-      throw new AggregateError(
+      throw new McpConnectionCleanupError(
         [connectionError, ...cleanupErrors],
         `Connection to "${agentName}" failed and MCP cleanup also failed.`,
       );
@@ -518,7 +602,7 @@ export class McpClientManager {
     connection: ManagedConnection,
     serverExited = false,
   ): Promise<void> {
-    connection.closePromise ??= (async () => {
+    connection.closePromise ??= Promise.resolve().then(async () => {
       const errors: unknown[] = [];
       if (!serverExited && connection.httpTransport?.sessionId !== undefined) {
         try {
@@ -536,7 +620,7 @@ export class McpClientManager {
       if (errors.length > 1) {
         throw new AggregateError(errors, `MCP connection cleanup failed for "${agentName}".`);
       }
-    })();
+    });
     return connection.closePromise;
   }
 

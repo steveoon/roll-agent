@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 export const ChoiceQuestionSchema = z.object({
   type: z.literal("choice"),
   instructions: z.string(),
-  criteria: z.record(z.string()),
+  criteria: z.record(z.string(), z.string()),
 });
 export type ChoiceQuestion = z.infer<typeof ChoiceQuestionSchema>;
 export type DecisionRequest = {
@@ -36,13 +36,13 @@ export type DecisionProvider = (
 const AnswerSchema = z.object({
   type: z.literal("choice"),
   choice: z.string(),
-  probabilities: z.record(z.number().finite().min(0).max(1)),
+  probabilities: z.record(z.string(), z.number().finite().min(0).max(1)),
   confidence: z.number().finite().min(0).max(1).optional(),
 });
 const JevResponseSchema = z.object({
   model: z.string(),
   provider: z.string().optional(),
-  answers: z.record(AnswerSchema),
+  answers: z.record(z.string(), AnswerSchema),
   usage: z
     .object({
       input_tokens: z.number().nonnegative().optional(),
@@ -234,7 +234,7 @@ export function createSamplingProvider(ctx: AgentContext): DecisionProvider {
     });
     signal.throwIfAborted();
     const choices = z
-      .record(z.string())
+      .record(z.string(), z.string())
       .parse(JSON.parse(text.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "")));
     validateChoices(request, choices);
     return {

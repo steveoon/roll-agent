@@ -75,6 +75,47 @@ test("ChatGPT recovery never treats authorization, quota or arbitrary 429 errors
   assert.equal(isRecoverableChatGptError(circular), false);
 });
 
+test("successful HTTP wrappers preserve typed body interruption without retrying parser or business errors", () => {
+  const transport = new ChatGptAuthError("network_error", "offline");
+  for (const statusCode of [200, 201, 206]) {
+    const wrapped = (cause: unknown, data?: unknown) =>
+      new APICallError({
+        message: "Failed to process successful response",
+        url: "https://api.openai.com/v1/responses",
+        requestBodyValues: undefined,
+        statusCode,
+        isRetryable: false,
+        cause,
+        data,
+      });
+    assert.equal(isRecoverableChatGptError(wrapped(transport)), true);
+    assert.equal(isRecoverableChatGptError(wrapped(new SyntaxError("invalid JSON"))), false);
+    assert.equal(isRecoverableChatGptError(wrapped(new Error("cancelled"))), false);
+    assert.equal(
+      isRecoverableChatGptError(wrapped(new ChatGptAuthError("login_required", "terminal"))),
+      false,
+    );
+    assert.equal(
+      isRecoverableChatGptError(wrapped(transport, { error: { code: "insufficient_quota" } })),
+      false,
+    );
+  }
+  for (const statusCode of [401, 403, 429]) {
+    assert.equal(
+      isRecoverableChatGptError(
+        new APICallError({
+          message: "terminal status despite transport cause",
+          url: "https://api.openai.com/v1/responses",
+          requestBodyValues: undefined,
+          statusCode,
+          cause: transport,
+        }),
+      ),
+      false,
+    );
+  }
+});
+
 test("HTTP body transport failure is typed and sanitized while abort remains cancellation", async () => {
   let notices = 0;
   const makeResponse = () =>

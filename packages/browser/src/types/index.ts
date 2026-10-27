@@ -114,7 +114,7 @@ export const BrowserRuntimeConfigSchema = z
     /** Session 持久化目录（默认 ~/.roll-agent/browser/sessions） */
     sessionsDir: z.string().optional(),
     /** 浏览器安全策略，默认宽松兼容现有行为 */
-    security: BrowserSecurityConfigSchema.default({}),
+    security: BrowserSecurityConfigSchema.prefault({}),
   })
   .superRefine((config, ctx) => {
     if (
@@ -272,7 +272,7 @@ const BrowserAxNodeBaseSchema = z.object({
   depth: z.number().int().nonnegative(),
   backendNodeId: z.number().int().positive().optional(),
   frameId: z.string().optional(),
-  properties: z.record(BrowserAxPropertyValueSchema).optional(),
+  properties: z.record(z.string(), BrowserAxPropertyValueSchema).optional(),
 });
 
 export type BrowserAxNode = z.infer<typeof BrowserAxNodeBaseSchema> & {

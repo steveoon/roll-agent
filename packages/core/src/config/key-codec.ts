@@ -15,7 +15,7 @@ const LEAF: KeyCodecNode = { kind: "leaf" };
  * object 字段使用 kebab-case；record 的动态 key 和 array 的索引保持原样。
  * 这让新增普通 Roll 配置字段无需再维护第二份 key 清单。
  */
-export function buildKeyCodecNode(schema: z.ZodTypeAny): KeyCodecNode {
+export function buildKeyCodecNode(schema: z.core.$ZodType): KeyCodecNode {
   const unwrapped = unwrapSchema(schema);
 
   if (unwrapped instanceof z.ZodObject) {
@@ -31,7 +31,7 @@ export function buildKeyCodecNode(schema: z.ZodTypeAny): KeyCodecNode {
   }
 
   if (unwrapped instanceof z.ZodRecord) {
-    return { kind: "record", value: buildKeyCodecNode(unwrapped.valueSchema) };
+    return { kind: "record", value: buildKeyCodecNode(unwrapped.valueType) };
   }
 
   if (unwrapped instanceof z.ZodArray) {
@@ -41,21 +41,19 @@ export function buildKeyCodecNode(schema: z.ZodTypeAny): KeyCodecNode {
   return LEAF;
 }
 
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
-  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
+function unwrapSchema(schema: z.core.$ZodType): z.core.$ZodType {
+  if (
+    schema instanceof z.ZodOptional ||
+    schema instanceof z.ZodNullable ||
+    schema instanceof z.ZodDefault ||
+    schema instanceof z.ZodPrefault ||
+    schema instanceof z.ZodCatch ||
+    schema instanceof z.ZodReadonly
+  ) {
     return unwrapSchema(schema.unwrap());
   }
-  if (schema instanceof z.ZodDefault) {
-    return unwrapSchema(schema.removeDefault());
-  }
-  if (schema instanceof z.ZodEffects) {
-    return unwrapSchema(schema.innerType());
-  }
-  if (schema instanceof z.ZodCatch) {
-    return unwrapSchema(schema.removeCatch());
-  }
-  if (schema instanceof z.ZodBranded) {
-    return unwrapSchema(schema.unwrap());
+  if (schema instanceof z.ZodPipe) {
+    return unwrapSchema(schema.in instanceof z.ZodTransform ? schema.out : schema.in);
   }
   return schema;
 }

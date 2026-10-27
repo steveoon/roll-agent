@@ -200,6 +200,43 @@ async function fixture() {
   };
 }
 
+test("discovery HTTP failure reports a safe diagnostic without opening the browser", async () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "roll-chatgpt-discovery-"));
+  const upstreamBody = "fixture-private-upstream-body";
+  let discoveryCalls = 0;
+  let browserOpens = 0;
+  const service = createChatGptAuthService({
+    directory,
+    issuer,
+    fetch: async (input, init) => {
+      assert.equal(input, `${issuer}/.well-known/openid-configuration`);
+      assert.equal(init?.method, "GET");
+      discoveryCalls += 1;
+      return new Response(upstreamBody, { status: 403 });
+    },
+    openBrowser: async () => {
+      browserOpens += 1;
+      assert.fail("Discovery rejection must not open the system browser");
+    },
+  });
+  try {
+    await assert.rejects(service.beginLogin(), (error: unknown) => {
+      assert.ok(error instanceof ChatGptAuthError);
+      assert.equal(error.code, "discovery_failed");
+      assert.equal(error.status, 403);
+      assert.match(error.message, /HTTP 403/);
+      assert.match(error.message, /Roll 进程的网络\/代理设置/);
+      assert.ok(!error.message.includes(upstreamBody));
+      return true;
+    });
+    assert.equal(discoveryCalls, 1);
+    assert.equal(browserOpens, 0);
+    assert.deepEqual((await service.status()).accounts, []);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("dynamic registration, PKCE, signature validation, protected storage and sanitized models", async () => {
   const f = await fixture();
   try {

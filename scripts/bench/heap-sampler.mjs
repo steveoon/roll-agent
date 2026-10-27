@@ -9,7 +9,10 @@ if (TRACE) {
   const startedAt = Date.now();
   const heapLimitMB = Math.round(getHeapStatistics().heap_size_limit / 1_048_576);
   const timer = setInterval(() => {
-    if (typeof globalThis.gc === "function") {
+    const natural = process.memoryUsage();
+    const forceGc =
+      process.env.ROLL_BENCH_FORCE_GC !== "false" && typeof globalThis.gc === "function";
+    if (forceGc) {
       globalThis.gc();
     }
     const usage = process.memoryUsage();
@@ -21,6 +24,13 @@ if (TRACE) {
       heapLimitMB,
       perfMeasures: performance.getEntriesByType("measure").length,
       nodeEnv: process.env.NODE_ENV ?? "",
+      pid: process.pid,
+      forcedGc: forceGc,
+      naturalRssBytes: natural.rss,
+      naturalHeapUsedBytes: natural.heapUsed,
+      retainedHeapBytes: forceGc ? usage.heapUsed : null,
+      peakRssKB: process.resourceUsage().maxRSS,
+      cpuMicros: process.cpuUsage(),
     };
     appendFileSync(TRACE, `${JSON.stringify(record)}\n`);
   }, INTERVAL_MS);

@@ -20,6 +20,10 @@ import {
   shouldOfferAgentInstall,
 } from "./capability-manifest.ts";
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 test("effective capability manifest derives names and schemas from the final toolset", () => {
   const tools = {
     roll__skill_1: tool({
@@ -294,15 +298,9 @@ test("safe capability snapshot drops schema examples/defaults and redacts bounde
   assert.ok(safeTool?.description);
   assert.ok(safeTool.description.length <= 512);
   assert.equal(snapshot.manifest.skills.length, 128);
-  assert.ok(
-    typeof safeTool.inputSchema === "object" &&
-      safeTool.inputSchema !== null &&
-      !Array.isArray(safeTool.inputSchema),
-  );
+  assert.ok(isRecord(safeTool.inputSchema));
   const safeProperties = safeTool.inputSchema["properties"];
-  assert.ok(
-    typeof safeProperties === "object" && safeProperties !== null && !Array.isArray(safeProperties),
-  );
+  assert.ok(isRecord(safeProperties));
   assert.ok(Object.keys(safeProperties).length <= 129);
   assert.doesNotMatch(serialized, /ultra-private-token-value|data:image|base64/u);
   assert.doesNotMatch(serialized, /"(?:default|example|examples)"/u);
@@ -422,9 +420,9 @@ test("safe capability snapshot redacts structured CJK secret keys without hiding
 
   const snapshot = createSafeCapabilitySnapshot(unsafeManifest, undefined);
   const schema = snapshot.manifest.tools[0]?.inputSchema;
-  assert.ok(typeof schema === "object" && schema !== null && !Array.isArray(schema));
+  assert.ok(isRecord(schema));
   const properties = schema["properties"];
-  assert.ok(typeof properties === "object" && properties !== null && !Array.isArray(properties));
+  assert.ok(isRecord(properties));
 
   assert.deepEqual(properties["数据库密码"], {
     description: "[sensitive value redacted]",

@@ -1,19 +1,14 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import {
-  StdioClientTransport,
-  getDefaultEnvironment,
-} from "@modelcontextprotocol/sdk/client/stdio.js";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
+import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import {
   runtimeMethodSchemas,
   operationIdSchema,
@@ -60,33 +55,47 @@ function model(): MockLanguageModelV4 {
 
 for (const invalid of [false, true]) {
   test(
-    `SDK to MCP to AgentSession to durable Runtime result (${invalid ? "invalid after execution" : "available"})`,
+    `Normalized host port to AgentSession to durable Runtime result (${invalid ? "invalid after execution" : "available"})`,
     { timeout: 15000 },
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "roll-app-output-integration-"));
       let store = new ThreadStore(dir);
-      const client = new Client({ name: "runtime", version: "1" });
       const data = {
         candidates: [
           { id: "candidate-1", name: "李明", score: 0.9, skills: ["TypeScript", "Node.js"] },
         ],
       };
-      const countFile = join(dir, "effects.txt");
-      const clientTransport = new StdioClientTransport({
-        command: process.execPath,
-        args: [
-          "--experimental-strip-types",
-          resolve(import.meta.dirname, "../../../../tests/structured-output/candidate-agent.mjs"),
-        ],
-        env: {
-          ...getDefaultEnvironment(),
-          ROLL_TEST_EFFECT_COUNT: countFile,
-          ROLL_TEST_INVALID_OUTPUT: invalid ? "1" : "0",
+      let executions = 0;
+      const outputSchema = {
+        type: "object",
+        properties: { candidates: { type: "array", items: { type: "object" } } },
+        required: ["candidates"],
+      };
+      const client: AgentToolSource["client"] = {
+        async callTool() {
+          executions += 1;
+          return {
+            content: [{ type: "text", text: "1 candidate available" }],
+            structuredContent: invalid ? { invalid: true } : data,
+            _meta: { "roll/executionStatus": "completed" },
+          };
         },
-        stderr: "pipe",
-      });
-      await client.connect(clientTransport);
-      const tools = normalizeListedTools((await client.listTools()).tools);
+      };
+      const tools: AgentToolSource["tools"] = [
+        {
+          tool: {
+            name: "list_candidates",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            appOutput: {
+              schemaId: "candidate-list",
+              schemaVersion: 1,
+              remoteReadable: true,
+              outputSchema,
+            },
+          },
+          annotations: { readOnlyHint: true },
+        },
+      ];
       const sessions = new Map<string, AgentSession>();
       const engine: RuntimeServiceEngine = {
         async createSession(input) {
@@ -99,7 +108,7 @@ for (const invalid of [false, true]) {
               {
                 agentName: "structured-output-demo",
                 client,
-                tools: tools.map((tool) => ({ tool, annotations: undefined })),
+                tools,
               },
             ],
             onToolExecution: (record) => {
@@ -163,7 +172,7 @@ for (const invalid of [false, true]) {
             assert.deepEqual(result.result.output.data, data);
           }
         }
-        assert.equal(Number(readFileSync(countFile, "utf8")), 1);
+        assert.equal(executions, 1);
         assert.deepEqual(
           service.snapshotThread({ threadId: thread.id, limit: 100 }).operations.items[0]
             ?.appOutput,
@@ -202,10 +211,9 @@ for (const invalid of [false, true]) {
             ?.appOutput,
           completed.event.appOutput,
         );
-        assert.equal(Number(readFileSync(countFile, "utf8")), 1);
+        assert.equal(executions, 1);
       } finally {
         await service.close();
-        await client.close();
         store.close();
         rmSync(dir, { recursive: true, force: true });
       }

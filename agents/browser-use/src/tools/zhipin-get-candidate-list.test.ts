@@ -136,7 +136,7 @@ describe("zhipin_get_candidate_list", () => {
     });
 
     const result = await zhipinGetCandidateList.execute(
-      { maxResults: 1, autoScroll: false },
+      zhipinGetCandidateList.input.parse({ maxResults: 1, autoScroll: false }),
       createTestContext(),
     );
 
@@ -167,7 +167,7 @@ describe("zhipin_get_candidate_list", () => {
     });
 
     const result = await zhipinGetCandidateList.execute(
-      { maxResults: 2, autoScroll: false },
+      zhipinGetCandidateList.input.parse({ maxResults: 2, autoScroll: false }),
       createTestContext(),
     );
 
@@ -186,7 +186,7 @@ describe("zhipin_get_candidate_list", () => {
     });
 
     const result = await zhipinGetCandidateList.execute(
-      { maxResults: 1, autoScroll: false },
+      zhipinGetCandidateList.input.parse({ maxResults: 1, autoScroll: false }),
       createTestContext(),
     );
 

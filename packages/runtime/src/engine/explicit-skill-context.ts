@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { isJSONObject } from "@ai-sdk/provider";
 import type { ModelMessage, UserModelMessage } from "ai";
-import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
+import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
 import { z } from "zod";
 import {
   SKILL_INVOCATION_PARSE_KINDS,
   parseSkillInvocationResult,
   type SkillInvocationSummary,
-} from "@roll-agent/core/skills/invocation";
+} from "../skills/invocation.ts";
 import { executeSkillTool } from "../tool-bridge/skill-tool.ts";
 import {
   TOOL_OUTCOME_KINDS,

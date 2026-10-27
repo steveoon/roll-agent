@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import type { SkillLibrary } from "@roll-agent/core/skills/library";
+import type { SkillLibrary } from "../skills/contracts.ts";
 import { ThreadStore } from "../store/thread-store.ts";
 import { AgentSession } from "./agent-session.ts";
 import type { SessionEvent } from "../types/events.ts";

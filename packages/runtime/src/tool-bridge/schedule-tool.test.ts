@@ -10,7 +10,7 @@ import type {
   ScheduleCreateAdmission,
   ScheduleExecutionReadiness,
   ScheduleToolPort,
-} from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+} from "../host-contracts/schedule-tools.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { ToolBridgeContext } from "./build-tools.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";

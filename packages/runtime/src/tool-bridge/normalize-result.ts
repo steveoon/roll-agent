@@ -1,7 +1,7 @@
 import type { AppOutputContract, AppOutputResult } from "@roll-agent/protocol";
 import { normalizeAppOutput, hasCompletedAppOutputMarker } from "./normalize-app-output.ts";
 import type { JSONValue } from "@ai-sdk/provider";
-import { extractTextContent, isToolErrorResult } from "@roll-agent/core/cli/utils/tool-results";
+import { extractTextContent, isToolErrorResult } from "../tool-contracts/results.ts";
 
 export const TOOL_OUTCOME_KINDS = {
   success: "success",

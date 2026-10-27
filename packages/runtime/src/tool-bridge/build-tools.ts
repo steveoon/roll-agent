@@ -2,19 +2,20 @@ import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "no
 import {
   inlineAcyclicLocalJsonSchemaReferences,
   type JsonSchemaRefIssue,
-} from "@roll-agent/core/tool-runtime/json-schema-refs";
+} from "../tool-contracts/json-schema-refs.ts";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
+import { preflightToolCall } from "../tool-contracts/preflight.ts";
+import { modelToolInputSchema } from "./model-input-schema.ts";
 import {
   readExecutionTimeoutMs,
   ROLL_EXECUTION_TIMEOUT_META_KEY,
-} from "@roll-agent/core/tool-runtime/execution-timeout";
-import type { AgentTool } from "@roll-agent/core/types/agent";
+} from "../tool-contracts/execution-timeout.ts";
+import type { AgentTool } from "../tool-contracts/agent-types.ts";
 import type { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import type { ApprovalDecision } from "../approval/approval-gate.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
@@ -41,9 +42,9 @@ import { currentObservationModelOutput } from "../engine/observation-projection.
 export {
   readExecutionTimeoutMs,
   ROLL_EXECUTION_TIMEOUT_META_KEY,
-} from "@roll-agent/core/tool-runtime/execution-timeout";
+} from "../tool-contracts/execution-timeout.ts";
 
-export const ROLL_RESOURCE_HINTS_META_KEY = "roll/resourceHints";
+export { ROLL_RESOURCE_HINTS_META_KEY } from "../tool-contracts/resource-hints.ts";
 
 export interface SourceTool {
   readonly tool: AgentTool;
@@ -54,7 +55,7 @@ export interface SourceTool {
 
 export interface AgentToolSource {
   readonly agentName: string;
-  readonly client: Client;
+  readonly client: Pick<Client, "callTool">;
   readonly tools: readonly SourceTool[];
   readonly agentSource?: ToolRouteMetadata["agentSource"];
   readonly transport?: ToolRouteMetadata["transport"];
@@ -518,7 +519,9 @@ export function buildAgentToolset(
       ctx.coordinator?.register(id, plan);
       tools[id] = tool({
         description: agentTool.description ?? `${agentTool.name} (via ${agentName})`,
-        inputSchema: jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
+        inputSchema: modelToolInputSchema(
+          jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
+        ),
         toModelOutput: ({ output }) =>
           output.outcome.kind === TOOL_OUTCOME_KINDS.success
             ? (currentObservationModelOutput(output.raw, observationRetention) ??

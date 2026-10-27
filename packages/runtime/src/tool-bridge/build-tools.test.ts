@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { asSchema } from "ai";
 import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -9,6 +10,50 @@ import {
   type ApprovalRequest,
   type ToolBridgeContext,
 } from "./build-tools.ts";
+
+test("MCP discriminated unions are projected for the model without changing the source or execution input", async () => {
+  const recurrence = {
+    oneOf: ["daily", "weekly"].map((kind) => ({
+      type: "object",
+      properties: { kind: { type: "string", const: kind } },
+      required: ["kind"],
+      additionalProperties: false,
+    })),
+  };
+  const inputSchema = {
+    type: "object" as const,
+    properties: { recurrence },
+    required: ["recurrence"],
+  };
+  const before = structuredClone(inputSchema);
+  const calls: unknown[] = [];
+  const built = buildAgentToolset(
+    [
+      {
+        agentName: "raw-agent",
+        client: {
+          callTool: async (request: unknown) => {
+            calls.push(request);
+            return { content: [{ type: "text", text: "ok" }] };
+          },
+        } as unknown as Client,
+        tools: [{ tool: { name: "repeat", inputSchema }, annotations: undefined }],
+      },
+    ],
+    { requestApproval: async () => ({ approved: true }) },
+  );
+  const tool = Object.values(built.tools)[0];
+  assert.ok(tool?.execute);
+  const wire = await asSchema(tool.inputSchema).jsonSchema;
+  assert.deepEqual(wire.properties?.recurrence, { anyOf: recurrence.oneOf });
+  assert.deepEqual(inputSchema, before);
+  const options = { toolCallId: "fixture", messages: [], context: undefined };
+  await tool.execute({}, options);
+  assert.equal(calls.length, 0, "preflight still rejects missing required input");
+  const input = { recurrence: { kind: "daily" } };
+  await tool.execute(input, { ...options, toolCallId: "fixture-valid" });
+  assert.deepEqual(calls, [{ name: "repeat", arguments: input }]);
+});
 
 test("execution timeout metadata is bounded and propagated with cancellation", async () => {
   for (const value of [undefined, -1, 0, 999, 1.5, Infinity, 1_800_001, "120000"]) {

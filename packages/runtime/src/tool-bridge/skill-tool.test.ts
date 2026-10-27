@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import type { SkillLibrary } from "@roll-agent/core/skills/library";
+import type { SkillLibrary } from "../skills/contracts.ts";
 import { AgentSession } from "../engine/agent-session.ts";
 import type { SessionEvent } from "../types/events.ts";
 import { buildSkillToolset, executeSkillTool, type SkillToolInput } from "./skill-tool.ts";

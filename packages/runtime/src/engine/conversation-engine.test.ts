@@ -1,105 +1,44 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { simulateReadableStream, type ModelMessage } from "ai";
-import { MockLanguageModelV4 } from "ai/test";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
-import type {
-  McpClientManager,
-  McpConnectionAcquisition,
-} from "@roll-agent/core/mcp/client-manager";
-import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-lease";
-import type { RegisteredAgent } from "@roll-agent/core/types/agent";
-import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import { ThreadStore } from "../store/thread-store.ts";
-import type { AgentSession } from "./agent-session.ts";
-import { ModelCatalog } from "./model-catalog.ts";
-import { DefaultToolPolicy } from "../policy/default-policy.ts";
-import type { SessionEvent } from "../types/events.ts";
 import {
+  runtimeSettingsSchema,
+  ThreadStore,
+  ModelCatalog,
+  DefaultToolPolicy,
   ConversationEngine,
-  type AgentBootstrapIssue,
   buildSessionBashSettings,
   buildSessionExecSettings,
-} from "./conversation-engine.ts";
-import { CAPABILITY_HOST_MODES } from "./capability-manifest.ts";
-import type { ShellProfile } from "../bash/profile.ts";
+  CAPABILITY_HOST_MODES,
+  type ConversationEngineOptions,
+  type EngineModelSwitch,
+  type SessionEvent,
+  type ShellProfile,
+  type AgentToolSource,
+} from "@roll-agent/runtime";
+import { test } from "node:test";
+
+import assert from "node:assert/strict";
+
+import { mkdtempSync, rmSync } from "node:fs";
+
+import { tmpdir } from "node:os";
+
+import { join } from "node:path";
+
+import { DatabaseSync } from "node:sqlite";
+
+import { simulateReadableStream, type ModelMessage } from "ai";
+
+import { MockLanguageModelV4 } from "ai/test";
+
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
+
 import { executeTranscriptTool } from "../tool-bridge/transcript-tool.ts";
+
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+
 import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
-import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
-}
-
-function makeManagedHttpAgent(name: string): RegisteredAgent {
-  return {
-    skill: { name, description: `${name} test fixture`, metadata: {} },
-    transport: { type: "streamable-http", endpoint: `http://127.0.0.1:3199/${name}` },
-    runtime: {
-      ownership: "core-managed",
-      start: { command: "node", args: ["dist/index.js"] },
-      endpoint: { path: `/${name}`, port: 3_199 },
-    },
-    installPath: `/tmp/${name}`,
-    registeredAt: "2026-07-23T00:00:00.000Z",
-    status: "online",
-  };
-}
-
-function fakeAgentUsageLease(agentName: string, release: () => Promise<void>): AgentUsageLease {
-  return {
-    agentName,
-    leaseId: "00000000-0000-4000-8000-000000000001" as AgentUsageLease["leaseId"],
-    runtimeIdentity: {
-      pid: 123,
-      processStartToken:
-        "pst-v2:0000000000000000000000000000000000000000000000000000000000000001" as AgentUsageLease["runtimeIdentity"]["processStartToken"],
-      startedAt: "2026-07-23T00:00:00.000Z",
-    },
-    release,
-  };
-}
-
-function fakeConnectionAcquisition(
-  client: unknown,
-  options: {
-    readonly commit?: () => void;
-    readonly rollback?: () => Promise<void>;
-  } = {},
-): McpConnectionAcquisition {
-  return {
-    client: client as McpConnectionAcquisition["client"],
-    commit: options.commit ?? (() => {}),
-    rollback: options.rollback ?? (async () => {}),
-  };
-}
-
-function bootstrapTimeoutConfig(dataDir: string, timeoutMs: number) {
-  const config = installEngineConfig(dataDir);
-  return {
-    ...config,
-    runtime: {
-      ...config.runtime,
-      agentBootstrap: {
-        ...config.runtime.agentBootstrap,
-        timeoutMs,
-      },
-    },
-  };
-}
-
-function waitUntilAborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
 }
 
 async function drain(events: AsyncIterable<unknown>): Promise<void> {
@@ -128,18 +67,9 @@ const powershellProfile: ShellProfile = {
 test("ConversationEngine records runtime model override on created threads", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      runtime: { model: "runtime-model" },
-      ask: {},
-      agents: { dataDir: "/tmp/roll-engine-test" },
-    });
+    const config = runtimeFixtureConfig({ provider: "mock", modelName: "runtime-model" });
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: new MockLanguageModelV4({}),
       store,
@@ -160,17 +90,9 @@ test("ConversationEngine records runtime model override on created threads", asy
 test("ConversationEngine 同一 thread 复用 live session，显式 close 后允许重建", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      agents: { dataDir: "/tmp/roll-engine-test" },
-    });
+    const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: new MockLanguageModelV4({}),
       store,
@@ -201,19 +123,11 @@ test("ConversationEngine 同一 thread 复用 live session，显式 close 后允
 
 test("ConversationEngine 经过 ThreadStore 重开后保留 Esc 前的对话与恢复上下文", async () => {
   const dir = tempDir();
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
   try {
     let calls = 0;
     const firstStore = new ThreadStore(dir);
-    const firstEngine = new ConversationEngine({
+    const firstEngine = createEngine({
       config,
       model: new MockLanguageModelV4({
         doStream: async () => {
@@ -259,7 +173,7 @@ test("ConversationEngine 经过 ThreadStore 重开后保留 Esc 前的对话与�
 
     let recoveryPrompt: LanguageModelV4CallOptions["prompt"] = [];
     const reopenedStore = new ThreadStore(dir);
-    const reopenedEngine = new ConversationEngine({
+    const reopenedEngine = createEngine({
       config,
       model: textModelCapture((options) => {
         recoveryPrompt = options.prompt;
@@ -317,17 +231,9 @@ test("ConversationEngine 经过 ThreadStore 重开后保留 Esc 前的对话与�
 test("ConversationEngine dispose 开始后拒绝新的 create 与 resume", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      agents: { dataDir: "/tmp/roll-engine-test" },
-    });
+    const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: new MockLanguageModelV4({}),
       store,
@@ -346,1206 +252,8 @@ test("ConversationEngine dispose 开始后拒绝新的 create 与 resume", async
   }
 });
 
-test("ConversationEngine dispose 与 in-flight bootstrap 竞态不注册迟到 session", async () => {
-  const dir = tempDir();
-  try {
-    const bootstrapStarted = Promise.withResolvers<void>();
-    const releaseBootstrap = Promise.withResolvers<void>();
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      agents: { dataDir: "/tmp/roll-engine-test" },
-    });
-    const agent: RegisteredAgent = {
-      skill: { name: "slow-agent", description: "slow", metadata: {} },
-      transport: { type: "streamable-http", endpoint: "http://127.0.0.1:3199/mcp" },
-      runtime: {
-        ownership: "core-managed",
-        start: { command: "node", args: ["dist/index.js"] },
-        endpoint: { path: "/mcp", port: 3199 },
-      },
-      installPath: "/tmp/slow-agent",
-      registeredAt: "2026-07-13T00:00:00.000Z",
-      status: "stopped",
-    };
-    let connectCalls = 0;
-    const clientManager = {
-      connect: async () => {
-        connectCalls += 1;
-        return { listTools: async () => ({ tools: [] }) };
-      },
-      disconnectAll: async () => {},
-    } as unknown as McpClientManager;
-    const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
-      config,
-      model: new MockLanguageModelV4({}),
-      store,
-      agents: [agent],
-      skillLibrary: null,
-      clientManager,
-      ensureAgentReady: async () => {
-        bootstrapStarted.resolve();
-        await releaseBootstrap.promise;
-      },
-    });
-
-    const creating = engine.createSession();
-    const rejectedCreate = assert.rejects(creating, /ConversationEngine is closing/u);
-    await bootstrapStarted.promise;
-    const disposing = engine.dispose();
-    releaseBootstrap.resolve();
-    await Promise.all([disposing, rejectedCreate]);
-    assert.equal(connectCalls, 0);
-    assert.deepEqual(store.listThreads(), []);
-    store.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("ConversationEngine dispose 等待并清理忽略 signal 的迟到新连接", async () => {
-  const agent = makeManagedHttpAgent("late-connect-agent");
-  const connectStarted = Promise.withResolvers<void>();
-  const releaseConnect = Promise.withResolvers<void>();
-  const order: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  const client = {
-    listTools: async () => {
-      order.push("list");
-      return { tools: [] };
-    },
-  };
-  const clientManager = {
-    connectWithOwnership: async () => {
-      order.push("connect");
-      connectStarted.resolve();
-      await releaseConnect.promise;
-      order.push("connected");
-      return fakeConnectionAcquisition(client, {
-        rollback: async () => {
-          order.push("disconnect");
-        },
-      });
-    },
-    disconnectAll: async () => {
-      order.push("disconnect-all");
-    },
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-late-connect"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const creating = engine.createSession();
-  await connectStarted.promise;
-  const disposing = engine.dispose();
-  releaseConnect.resolve();
-
-  await assert.rejects(creating, /ConversationEngine is closing/u);
-  await disposing;
-  assert.deepEqual(order, ["connect", "connected", "disconnect", "disconnect-all"]);
-  assert.deepEqual(issues, []);
-});
-
-test("ConversationEngine.dispose 等待 live session close 后才断开 MCP", async () => {
-  const order: string[] = [];
-  const closeStarted = Promise.withResolvers<void>();
-  const releaseClose = Promise.withResolvers<void>();
-  const clientManager = {
-    disconnectAll: async () => {
-      order.push("disconnect");
-    },
-  } as unknown as McpClientManager;
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const engine = new ConversationEngine({
-    config,
-    model: new MockLanguageModelV4({}),
-    sources: [],
-    clientManager,
-  });
-  const session = await engine.createSession();
-  const originalClose = session.close.bind(session);
-  session.close = async () => {
-    order.push("close-start");
-    closeStarted.resolve();
-    await releaseClose.promise;
-    await originalClose();
-    order.push("close-end");
-  };
-
-  const disposing = engine.dispose();
-  try {
-    await closeStarted.promise;
-    assert.deepEqual(order, ["close-start"]);
-    releaseClose.resolve();
-    await disposing;
-    assert.deepEqual(order, ["close-start", "close-end", "disconnect"]);
-  } finally {
-    releaseClose.resolve();
-    await disposing;
-  }
-});
-
-test("ConversationEngine.dispose 先断开 MCP，再释放持有的 Agent 使用租约", async () => {
-  const order: string[] = [];
-  const agent = makeManagedHttpAgent("leased-agent");
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    order.push("release");
-  });
-  const clientManager = {
-    connect: async () => ({
-      listTools: async () => ({ tools: [] }),
-    }),
-    disconnectAll: async () => {
-      order.push("disconnect");
-    },
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-lease-order"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-  });
-
-  await engine.createSession();
-  await engine.dispose();
-
-  assert.deepEqual(order, ["disconnect", "release"]);
-});
-
-test("ConversationEngine.dispose 在 MCP 断开失败时仍释放 Agent 使用租约", async () => {
-  const order: string[] = [];
-  const agent = makeManagedHttpAgent("disconnect-failure-agent");
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    order.push("release");
-  });
-  const clientManager = {
-    connect: async () => ({
-      listTools: async () => ({ tools: [] }),
-    }),
-    disconnectAll: async () => {
-      order.push("disconnect");
-      throw new Error("disconnect failed");
-    },
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-disconnect-failure"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-  });
-
-  await engine.createSession();
-  await assert.rejects(engine.dispose(), /disconnect failed/u);
-
-  assert.deepEqual(order, ["disconnect", "release"]);
-});
-
-test("ConversationEngine 在 MCP tools/list 失败时断开连接并释放刚取得的使用租约", async () => {
-  const order: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  const agent = makeManagedHttpAgent("broken-leased-agent");
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    order.push("release");
-  });
-  const client = {
-    listTools: async () => {
-      throw new Error("list failed");
-    },
-  };
-  const clientManager = {
-    connectWithOwnership: async () =>
-      fakeConnectionAcquisition(client, {
-        rollback: async () => {
-          order.push("disconnect");
-        },
-      }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-lease-failure"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  await engine.createSession();
-
-  assert.deepEqual(order, ["disconnect", "release"]);
-  assert.equal(issues[0]?.agentName, agent.skill.name);
-  assert.match(issues[0]?.message ?? "", /list failed/u);
-  await engine.dispose();
-});
-
-test("ConversationEngine.dispose 在 session close 失败时仍通过 finally 断开 MCP", async () => {
-  const order: string[] = [];
-  const clientManager = {
-    disconnectAll: async () => {
-      order.push("disconnect");
-    },
-  } as unknown as McpClientManager;
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const engine = new ConversationEngine({
-    config,
-    model: new MockLanguageModelV4({}),
-    sources: [],
-    clientManager,
-  });
-  const session = await engine.createSession();
-  session.close = async () => {
-    order.push("close");
-    throw new Error("close failed");
-  };
-
-  await assert.rejects(engine.dispose(), /close failed/u);
-  assert.deepEqual(order, ["close", "disconnect"]);
-});
-
-test("ConversationEngine reports agent bootstrap failures instead of swallowing them", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "broken-agent", description: "broken", metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath: "/tmp/broken-agent",
-    registeredAt: "2026-06-17T00:00:00.000Z",
-    status: "idle",
-  };
-  const issues: AgentBootstrapIssue[] = [];
-  const clientManager = {
-    connect: async () => {
-      throw new Error("connect failed");
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config,
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  await engine.createSession();
-
-  assert.deepEqual(issues, [{ agentName: "broken-agent", message: "connect failed" }]);
-  await engine.dispose();
-});
-
-test("ConversationEngine 并发 createSession 仍只执行一次 bootstrap", async () => {
-  const agents = [makeManagedHttpAgent("single-flight-a"), makeManagedHttpAgent("single-flight-b")];
-  const gates = agents.map(() => Promise.withResolvers<void>());
-  const starts = agents.map(() => Promise.withResolvers<void>());
-  const connectCalls: string[] = [];
-  const clientManager = {
-    connect: async (agentName: string) => {
-      const index = agents.findIndex((agent) => agent.skill.name === agentName);
-      assert.notEqual(index, -1);
-      const start = starts[index];
-      const gate = gates[index];
-      assert.ok(start);
-      assert.ok(gate);
-      connectCalls.push(agentName);
-      start.resolve();
-      await gate.promise;
-      return { listTools: async () => ({ tools: [] }) };
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-single-flight"),
-    model: new MockLanguageModelV4({}),
-    agents,
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-  });
-
-  const creating = Promise.all([engine.createSession(), engine.createSession()]);
-  await Promise.all(starts.map(({ promise }) => promise));
-  assert.deepEqual(connectCalls, ["single-flight-a", "single-flight-b"]);
-  for (const gate of gates) {
-    gate.resolve();
-  }
-  const sessions = await creating;
-
-  assert.equal(sessions.length, 2);
-  assert.equal(new Set(sessions.map((session) => session.id)).size, 2);
-  assert.deepEqual(connectCalls, ["single-flight-a", "single-flight-b"]);
-  await engine.dispose();
-});
-
-test("ConversationEngine 逆序完成时按注册顺序输出 issue、source 与 Tool ID 冲突归属", async () => {
-  const agents = [
-    makeManagedHttpAgent("alpha.beta"),
-    makeManagedHttpAgent("broken-agent"),
-    makeManagedHttpAgent("alpha_beta"),
-  ];
-  const gates = agents.map(() => Promise.withResolvers<void>());
-  const starts = agents.map(() => Promise.withResolvers<void>());
-  const completions = agents.map(() => Promise.withResolvers<void>());
-  const completionOrder: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  const clientManager = {
-    connect: async (agentName: string) => {
-      const index = agents.findIndex((agent) => agent.skill.name === agentName);
-      assert.notEqual(index, -1);
-      const start = starts[index];
-      const gate = gates[index];
-      const completion = completions[index];
-      assert.ok(start);
-      assert.ok(gate);
-      assert.ok(completion);
-      start.resolve();
-      await gate.promise;
-      completionOrder.push(agentName);
-      completion.resolve();
-      if (agentName === "broken-agent") {
-        throw new Error("broken connect");
-      }
-      return {
-        listTools: async () => ({
-          tools: [
-            {
-              name: "shared",
-              description: `${agentName} shared tool`,
-              inputSchema: { type: "object", properties: {} },
-              _meta: { "roll/resourceHints": "invalid" },
-            },
-          ],
-        }),
-      };
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-stable-bootstrap"),
-    model: new MockLanguageModelV4({}),
-    agents,
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const creating = engine.createSession();
-  await Promise.all([starts[0]?.promise, starts[1]?.promise]);
-  gates[1]?.resolve();
-  await completions[1]?.promise;
-  await starts[2]?.promise;
-  gates[2]?.resolve();
-  await completions[2]?.promise;
-  gates[0]?.resolve();
-  const session = await creating;
-
-  assert.deepEqual(completionOrder, ["broken-agent", "alpha_beta", "alpha.beta"]);
-  assert.deepEqual(
-    issues.map((issue) => issue.agentName),
-    ["alpha.beta", "broken-agent", "alpha_beta"],
-  );
-  assert.match(issues[0]?.message ?? "", /roll\/resourceHints 无效/u);
-  assert.equal(issues[1]?.message, "broken connect");
-  assert.match(issues[2]?.message ?? "", /roll\/resourceHints 无效/u);
-
-  const agentTools = session
-    .getCapabilityManifest()
-    .tools.filter((tool) => tool.agentName === "alpha.beta" || tool.agentName === "alpha_beta");
-  assert.deepEqual(
-    agentTools.map((tool) => ({ id: tool.id, agentName: tool.agentName })),
-    [
-      { id: "alpha_beta__shared", agentName: "alpha.beta" },
-      { id: "alpha_beta__shared_1", agentName: "alpha_beta" },
-    ],
-  );
-  assert.equal(session.getCapabilityManifest().agentCount, 2);
-  await engine.dispose();
-});
-
-test("ConversationEngine 全局 bootstrap 超时返回部分 catalog，且不启动排队 Agent", async () => {
-  const agents = [
-    makeManagedHttpAgent("ready-agent"),
-    ...Array.from({ length: 7 }, (_, index) => makeManagedHttpAgent(`slow-agent-${index + 1}`)),
-  ];
-  const fifthConnectStarted = Promise.withResolvers<void>();
-  const connectAbortObserved = Promise.withResolvers<void>();
-  const releaseCancelledConnects = Promise.withResolvers<void>();
-  const connectStarts: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  let createSettled = false;
-
-  const readyClient = {
-    listTools: async () => ({
-      tools: [
-        {
-          name: "ready",
-          inputSchema: { type: "object" as const, properties: {} },
-        },
-      ],
-    }),
-  };
-  const clientManager = {
-    connectWithOwnership: async (
-      agentName: string,
-      _transport: unknown,
-      _cwd: string,
-      options: { readonly signal?: AbortSignal },
-    ) => {
-      connectStarts.push(agentName);
-      if (connectStarts.length === 5) {
-        fifthConnectStarted.resolve();
-      }
-      if (agentName === "ready-agent") {
-        return fakeConnectionAcquisition(readyClient);
-      }
-      assert.ok(options.signal);
-      await waitUntilAborted(options.signal);
-      connectAbortObserved.resolve();
-      await releaseCancelledConnects.promise;
-      throw options.signal.reason;
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: bootstrapTimeoutConfig("/tmp/roll-engine-bootstrap-timeout", 50),
-    model: new MockLanguageModelV4({}),
-    agents,
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const creating = engine.createSession().then((session) => {
-    createSettled = true;
-    return session;
-  });
-  await fifthConnectStarted.promise;
-  await connectAbortObserved.promise;
-
-  assert.equal(createSettled, false);
-  assert.deepEqual(
-    connectStarts,
-    agents.slice(0, 5).map((agent) => agent.skill.name),
-  );
-
-  releaseCancelledConnects.resolve();
-  const session = await creating;
-
-  assert.equal(session.getCapabilityManifest().agentCount, 1);
-  assert.deepEqual(
-    issues.map((issue) => issue.agentName),
-    agents.slice(1).map((agent) => agent.skill.name),
-  );
-  for (const issue of issues) {
-    assert.equal(issue.message, "Agent bootstrap timed out after 50ms");
-  }
-  assert.deepEqual(
-    connectStarts,
-    agents.slice(0, 5).map((agent) => agent.skill.name),
-  );
-  await engine.dispose();
-});
-
-test("ConversationEngine tools/list 超时取消后清理新连接与新租约再返回", async () => {
-  const agent = makeManagedHttpAgent("list-timeout-agent");
-  const order: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    order.push("release");
-  });
-  const client = {
-    listTools: async (_params: unknown, options: { readonly signal?: AbortSignal } | undefined) => {
-      assert.ok(options?.signal);
-      await waitUntilAborted(options.signal);
-      order.push("list-abort");
-      throw options.signal.reason;
-    },
-  };
-  const clientManager = {
-    connectWithOwnership: async () =>
-      fakeConnectionAcquisition(client, {
-        rollback: async () => {
-          order.push("disconnect");
-        },
-      }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: bootstrapTimeoutConfig("/tmp/roll-engine-list-timeout", 50),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const session = await engine.createSession();
-
-  assert.equal(session.getCapabilityManifest().agentCount, 0);
-  assert.deepEqual(order, ["list-abort", "disconnect", "release"]);
-  assert.deepEqual(issues, [
-    {
-      agentName: agent.skill.name,
-      message: "Agent bootstrap timed out after 50ms",
-    },
-  ]);
-  await engine.dispose();
-  assert.deepEqual(order, ["list-abort", "disconnect", "release"]);
-});
-
-test("ConversationEngine 报告 bootstrap 清理失败并在 dispose 重试租约释放", async () => {
-  const agent = makeManagedHttpAgent("cleanup-failure-agent");
-  const order: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  let releaseCalls = 0;
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    releaseCalls += 1;
-    order.push(`release-${String(releaseCalls)}`);
-    if (releaseCalls === 1) {
-      throw new Error("lease cleanup failed");
-    }
-  });
-  const client = {
-    listTools: async (_params: unknown, options: { readonly signal?: AbortSignal } | undefined) => {
-      assert.ok(options?.signal);
-      await waitUntilAborted(options.signal);
-      order.push("list-abort");
-      throw options.signal.reason;
-    },
-  };
-  const clientManager = {
-    connectWithOwnership: async () =>
-      fakeConnectionAcquisition(client, {
-        rollback: async () => {
-          order.push("rollback");
-          throw new Error("connection cleanup failed");
-        },
-      }),
-    disconnectAll: async () => {
-      order.push("disconnect-all");
-    },
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: bootstrapTimeoutConfig("/tmp/roll-engine-cleanup-failure", 50),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const session = await engine.createSession();
-
-  assert.equal(session.getCapabilityManifest().agentCount, 0);
-  assert.deepEqual(order, ["list-abort", "rollback", "release-1"]);
-  assert.equal(issues[0]?.message, "Agent bootstrap timed out after 50ms");
-  assert.match(issues[1]?.message ?? "", /connection cleanup failed/u);
-  assert.match(issues[1]?.message ?? "", /lease cleanup failed/u);
-
-  await engine.dispose();
-  assert.deepEqual(order, ["list-abort", "rollback", "release-1", "disconnect-all", "release-2"]);
-});
-
-test("ConversationEngine refresh 不复用已经结束的 startup timeout signal", async () => {
-  const agent = makeManagedHttpAgent("refresh-after-timeout-agent");
-  const issues: AgentBootstrapIssue[] = [];
-  let connectCalls = 0;
-  const client = {
-    listTools: async () => ({ tools: [] }),
-  };
-  const clientManager = {
-    connectWithOwnership: async (
-      _agentName: string,
-      _transport: unknown,
-      _cwd: string,
-      options: { readonly signal?: AbortSignal },
-    ) => {
-      connectCalls += 1;
-      if (connectCalls === 1) {
-        assert.ok(options.signal);
-        await waitUntilAborted(options.signal);
-        throw options.signal.reason;
-      }
-      assert.equal(options.signal?.aborted, false);
-      return fakeConnectionAcquisition(client);
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: bootstrapTimeoutConfig("/tmp/roll-engine-refresh-after-timeout", 50),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const session = await engine.createSession();
-  assert.equal(session.getCapabilityManifest().agentCount, 0);
-  assert.equal(issues.length, 1);
-
-  const refresh = await engine.prepareAgentRefresh(agent);
-  assert.equal(refresh.source.agentName, agent.skill.name);
-  assert.equal(connectCalls, 2);
-  await engine.dispose();
-});
-
-test("ConversationEngine dispose 优先于 bootstrap timeout，并取消 readiness 且不报告伪 timeout", async () => {
-  const agent = makeManagedHttpAgent("closing-readiness-agent");
-  const readinessStarted = Promise.withResolvers<void>();
-  const readinessAborted = Promise.withResolvers<void>();
-  const issues: AgentBootstrapIssue[] = [];
-  let connectCalls = 0;
-  const clientManager = {
-    connectWithOwnership: async () => {
-      connectCalls += 1;
-      throw new Error("must not connect after readiness cancellation");
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: bootstrapTimeoutConfig("/tmp/roll-engine-closing-readiness", 5_000),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async (_readyAgent, _env, signal) => {
-      assert.ok(signal);
-      readinessStarted.resolve();
-      await waitUntilAborted(signal);
-      readinessAborted.resolve();
-      throw signal.reason;
-    },
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const creating = engine.createSession();
-  await readinessStarted.promise;
-  const disposing = engine.dispose();
-  await readinessAborted.promise;
-
-  await assert.rejects(creating, {
-    message: "ConversationEngine is closing",
-  });
-  await disposing;
-  assert.equal(connectCalls, 0);
-  assert.deepEqual(issues, []);
-});
-
-test("ConversationEngine refresh 失败不释放既有共享连接与既有租约", async () => {
-  const agent = makeManagedHttpAgent("shared-refresh-agent");
-  let listCalls = 0;
-  let disconnectCalls = 0;
-  let releaseCalls = 0;
-  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
-    releaseCalls += 1;
-  });
-  const client = {
-    listTools: async () => {
-      listCalls += 1;
-      if (listCalls === 2) {
-        throw new Error("refresh list failed");
-      }
-      return { tools: [] };
-    },
-  };
-  const clientManager = {
-    connectWithOwnership: async () => fakeConnectionAcquisition(client),
-    disconnect: async () => {
-      disconnectCalls += 1;
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-shared-refresh"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    acquireAgentUsage: async () => lease,
-  });
-
-  await engine.createSession();
-  await assert.rejects(engine.prepareAgentRefresh(agent), /refresh list failed/u);
-
-  assert.equal(disconnectCalls, 0);
-  assert.equal(releaseCalls, 0);
-  await engine.dispose();
-  assert.equal(releaseCalls, 1);
-});
-
-test("ConversationEngine explicitSources 继续直接绕过 Agent bootstrap", async () => {
-  const agent = makeManagedHttpAgent("must-not-connect");
-  let connectCalls = 0;
-  let readinessCalls = 0;
-  let catalogCalls = 0;
-  const clientManager = {
-    connect: async () => {
-      connectCalls += 1;
-      throw new Error("explicitSources must bypass connect");
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-explicit-sources"),
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    sources: [],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {
-      readinessCalls += 1;
-    },
-    resolveCatalogFn: async () => {
-      catalogCalls += 1;
-      throw new Error("explicitSources must bypass catalog resolution");
-    },
-  });
-
-  const session = await engine.createSession();
-
-  assert.equal(session.getCapabilityManifest().agentCount, 0);
-  assert.equal(connectCalls, 0);
-  assert.equal(readinessCalls, 0);
-  assert.equal(catalogCalls, 0);
-  await engine.dispose();
-});
-
-test("ConversationEngine catalog resolution 使用同一 bootstrap budget 与 signal", async () => {
-  const dir = tempDir();
-  let observedSignal: AbortSignal | undefined;
-  let engine: ConversationEngine | undefined;
-  try {
-    engine = new ConversationEngine({
-      config: bootstrapTimeoutConfig(dir, 50),
-      model: new MockLanguageModelV4({}),
-      skillLibrary: null,
-      shellProfile: null,
-      resolveCatalogFn: async (_config, options) => {
-        const signal = options?.signal;
-        assert.ok(signal);
-        observedSignal = signal;
-        await waitUntilAborted(signal);
-        throw signal.reason;
-      },
-    });
-
-    const startedAt = Date.now();
-    const session = await engine.createSession();
-    const elapsedMs = Date.now() - startedAt;
-
-    assert.equal(session.getCapabilityManifest().agentCount, 0);
-    assert.equal(observedSignal?.aborted, true);
-    assert.ok(elapsedMs >= 25, `catalog timeout returned too early: ${String(elapsedMs)}ms`);
-    assert.ok(elapsedMs < 1_000, `catalog timeout exceeded bounded budget: ${String(elapsedMs)}ms`);
-  } finally {
-    await engine?.dispose();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("ConversationEngine prepareAgentRefresh 保持串行并即时报告 resourceHints issue", async () => {
-  const agents = [makeManagedHttpAgent("refresh-a"), makeManagedHttpAgent("refresh-b")];
-  const firstAgent = agents[0];
-  const secondAgent = agents[1];
-  assert.ok(firstAgent);
-  assert.ok(secondAgent);
-  const gates = agents.map(() => Promise.withResolvers<void>());
-  const starts = agents.map(() => Promise.withResolvers<void>());
-  const connectOrder: string[] = [];
-  const issues: AgentBootstrapIssue[] = [];
-  const clientManager = {
-    connect: async (agentName: string) => {
-      const index = agents.findIndex((agent) => agent.skill.name === agentName);
-      assert.notEqual(index, -1);
-      const start = starts[index];
-      const gate = gates[index];
-      assert.ok(start);
-      assert.ok(gate);
-      connectOrder.push(agentName);
-      start.resolve();
-      await gate.promise;
-      return {
-        listTools: async () => ({
-          tools: [
-            {
-              name: "refresh",
-              inputSchema: { type: "object", properties: {} },
-              ...(agentName === "refresh-a" ? { _meta: { "roll/resourceHints": "invalid" } } : {}),
-            },
-          ],
-        }),
-      };
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-engine-refresh-chain"),
-    model: new MockLanguageModelV4({}),
-    agents: [],
-    skillLibrary: null,
-    shellProfile: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-  await engine.createSession();
-
-  const firstRefresh = engine.prepareAgentRefresh(firstAgent);
-  await starts[0]?.promise;
-  const secondRefresh = engine.prepareAgentRefresh(secondAgent);
-  await Promise.resolve();
-  assert.deepEqual(connectOrder, ["refresh-a"]);
-
-  gates[0]?.resolve();
-  await firstRefresh;
-  await starts[1]?.promise;
-  assert.deepEqual(connectOrder, ["refresh-a", "refresh-b"]);
-  assert.deepEqual(
-    issues.map((issue) => issue.agentName),
-    ["refresh-a"],
-  );
-  assert.match(issues[0]?.message ?? "", /roll\/resourceHints 无效/u);
-
-  gates[1]?.resolve();
-  await secondRefresh;
-  await engine.dispose();
-});
-
-test("ConversationEngine ensures core-managed agents before connecting", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: {
-      dataDir: "/tmp/roll-engine-test",
-      env: {
-        "browser-use-agent": {
-          TEST_ENV: "1",
-        },
-      },
-    },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "browser-use-agent", description: "browser", metadata: {} },
-    transport: { type: "streamable-http", endpoint: "http://127.0.0.1:3100/mcp" },
-    runtime: {
-      ownership: "core-managed",
-      start: { command: "node", args: ["dist/index.js"] },
-      endpoint: { path: "/mcp", port: 3100 },
-    },
-    installPath: "/tmp/browser-use-agent",
-    registeredAt: "2026-06-17T00:00:00.000Z",
-    status: "stopped",
-    source: { type: "remote-manifest", endpoint: "https://agents.example/browser" },
-  };
-  const ensured: Array<{
-    readonly agentName: string;
-    readonly env: Readonly<Record<string, string>> | undefined;
-  }> = [];
-  const connected: string[] = [];
-  const clientManager = {
-    connect: async (agentName: string) => {
-      connected.push(agentName);
-      return {
-        listTools: async () => ({
-          tools: [
-            {
-              name: "inspect",
-              description: "inspect browser",
-              inputSchema: { type: "object", properties: {} },
-              annotations: { readOnlyHint: true, destructiveHint: false },
-            },
-          ],
-        }),
-      };
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config,
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    ensureAgentReady: async (agent, env) => {
-      ensured.push({ agentName: agent.skill.name, env });
-    },
-  });
-
-  const session = await engine.createSession();
-
-  assert.deepEqual(ensured, [
-    {
-      agentName: "browser-use-agent",
-      env: { TEST_ENV: "1", BROWSER_OPERATE_ENGINE: "sampling" },
-    },
-  ]);
-  assert.deepEqual(connected, ["browser-use-agent"]);
-  const capability = session
-    .getCapabilityManifest()
-    .tools.find((tool) => tool.id === "browser-use-agent__inspect");
-  assert.equal(capability?.source, "remote-manifest");
-  assert.equal(capability?.transport, "streamable-http");
-  assert.equal(capability?.runtimeOwnership, "core-managed");
-  assert.deepEqual(capability?.annotations, {
-    readOnlyHint: true,
-    destructiveHint: false,
-  });
-  await engine.dispose();
-});
-
-test("ConversationEngine threads its providerOptions into sub-agent sampling connect calls", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "sampling-agent", description: "sampling", metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath: "/tmp/sampling-agent",
-    registeredAt: "2026-06-17T00:00:00.000Z",
-    status: "idle",
-  };
-  const connectOptionsCalls: Array<{
-    readonly samplingModel?: unknown;
-    readonly samplingProviderOptions?: unknown;
-  }> = [];
-  const updatedProviderOptions: unknown[] = [];
-  const clientManager = {
-    connect: async (
-      _agentName: string,
-      _transport: unknown,
-      _cwd: string,
-      options: { readonly samplingModel?: unknown; readonly samplingProviderOptions?: unknown },
-    ) => {
-      connectOptionsCalls.push(options);
-      return { listTools: async () => ({ tools: [] }) };
-    },
-    setSamplingProviderOptions: (providerOptions: unknown) => {
-      updatedProviderOptions.push(providerOptions);
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const providerOptions = { anthropic: { thinking: { type: "adaptive" }, effort: "high" } };
-  const engine = new ConversationEngine({
-    config,
-    model: new MockLanguageModelV4({}),
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    providerOptions,
-  });
-
-  const session = await engine.createSession();
-
-  assert.equal(connectOptionsCalls.length, 1);
-  assert.ok(connectOptionsCalls[0]?.samplingModel);
-  assert.deepEqual(connectOptionsCalls[0]?.samplingProviderOptions, providerOptions);
-  const nextProviderOptions = { anthropic: { thinking: { type: "adaptive" }, effort: "low" } };
-  session.setProviderOptions(nextProviderOptions);
-  assert.deepEqual(updatedProviderOptions, [nextProviderOptions]);
-
-  await engine.prepareAgentRefresh(agent);
-  assert.deepEqual(connectOptionsCalls[1]?.samplingProviderOptions, nextProviderOptions);
-  await engine.dispose();
-});
-
-test("ConversationEngine.switchModel updates live sessions, sampling and thread model", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "sampling-agent", description: "sampling", metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath: "/tmp/sampling-agent",
-    registeredAt: "2026-06-17T00:00:00.000Z",
-    status: "idle",
-  };
-  const samplingModels: unknown[] = [];
-  const samplingOptions: unknown[] = [];
-  const connectOptionsCalls: Array<{ readonly samplingModel?: unknown }> = [];
-  const clientManager = {
-    connect: async (
-      _agentName: string,
-      _transport: unknown,
-      _cwd: string,
-      options: { readonly samplingModel?: unknown },
-    ) => {
-      connectOptionsCalls.push(options);
-      return { listTools: async () => ({ tools: [] }) };
-    },
-    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
-    setSamplingModel: (model: unknown) => samplingModels.push(model),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const dir = tempDir();
-  const store = new ThreadStore(dir);
-  const initial = new MockLanguageModelV4({ modelId: "initial" });
-  const engine = new ConversationEngine({
-    config,
-    model: initial,
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    store,
-  });
-  try {
-    const session = await engine.createSession();
-    assert.equal(store.getThread(session.id)?.model, "default-model");
-
-    const next = new MockLanguageModelV4({ modelId: "gemini-3.8-flash" });
-    engine.switchModel({
-      provider: "mock",
-      modelName: "gemini-3.8-flash",
-      model: next,
-      providerOptions: { google: { thinkingConfig: { thinkingLevel: "medium" } } },
-    });
-
-    assert.deepEqual(samplingModels, [next]);
-    assert.deepEqual(samplingOptions, [
-      { google: { thinkingConfig: { thinkingLevel: "medium" } } },
-    ]);
-    assert.equal(store.getThread(session.id)?.model, "gemini-3.8-flash");
-    assert.equal(session.getContextWindow(), 1_000_000);
-
-    const created = await engine.createSession();
-    assert.equal(store.getThread(created.id)?.model, "gemini-3.8-flash");
-
-    await engine.prepareAgentRefresh(agent);
-    assert.equal(connectOptionsCalls.at(-1)?.samplingModel, next);
-  } finally {
-    await engine.dispose();
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("ConversationEngine.switchModel preflights live sessions before mutating any state", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const samplingModels: unknown[] = [];
-  const samplingOptions: unknown[] = [];
-  const clientManager = {
-    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
-    setSamplingModel: (model: unknown) => samplingModels.push(model),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const initial = new MockLanguageModelV4({ modelId: "initial" });
-  const next = new MockLanguageModelV4({ modelId: "next" });
-  const engine = new ConversationEngine({
-    config,
-    model: initial,
-    sources: [],
-    skillLibrary: null,
-    clientManager,
-  });
-  const idle = await engine.createSession();
-  const busy = await engine.createSession();
-  Reflect.set(busy, "activeTurn", {});
-  try {
-    assert.throws(
-      () => engine.switchModel({ provider: "mock", modelName: "next", model: next }),
-      /正在生成回复/u,
-    );
-    assert.equal(Reflect.get(idle, "model"), initial);
-    assert.equal(Reflect.get(engine, "modelOverride"), undefined);
-    assert.deepEqual(samplingModels, []);
-    assert.deepEqual(samplingOptions, []);
-  } finally {
-    Reflect.set(busy, "activeTurn", undefined);
-    await engine.dispose();
-  }
-});
-
 test("ConversationEngine resolves context window from the model catalog by provider and reports the source", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "openai",
-      defaultModel: "gpt-5.6-terra",
-      providers: { openai: { apiKey: "test" }, google: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "openai", modelName: "gpt-5.6-terra" });
   const catalog = new ModelCatalog({
     snapshot: {
       fetchedAt: "2026-09-04T00:00:00.000Z",
@@ -1555,7 +263,7 @@ test("ConversationEngine resolves context window from the model catalog by provi
       },
     },
   });
-  const engine = new ConversationEngine({
+  const engine = createEngine({
     config,
     model: new MockLanguageModelV4({ modelId: "gpt-5.6-terra" }),
     sources: [],
@@ -1566,7 +274,7 @@ test("ConversationEngine resolves context window from the model catalog by provi
     const session = await engine.createSession();
     assert.equal(session.getContextWindow(), 922_000);
 
-    const switched = engine.switchModel({
+    const switched = switchModel(engine, {
       provider: "google",
       modelName: "gemini-3.8-flash",
       model: new MockLanguageModelV4({ modelId: "gemini-3.8-flash" }),
@@ -1574,7 +282,7 @@ test("ConversationEngine resolves context window from the model catalog by provi
     assert.deepEqual(switched, { window: 1_048_576, source: "catalog" });
     assert.equal(session.getContextWindow(), 1_048_576);
 
-    const ruled = engine.switchModel({
+    const ruled = switchModel(engine, {
       provider: "xai",
       modelName: "grok-4.5",
       model: new MockLanguageModelV4({ modelId: "grok-4.5" }),
@@ -1585,139 +293,10 @@ test("ConversationEngine resolves context window from the model catalog by provi
   }
 });
 
-test("ConversationEngine excludes tools whose leftover refs the provider rejects and re-evaluates on model switch and agent refresh", async () => {
-  const makeAgent = (name: string): RegisteredAgent => ({
-    skill: { name, description: name, metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath: `/tmp/${name}`,
-    registeredAt: "2026-06-17T00:00:00.000Z",
-    status: "idle",
-  });
-  const recursiveRootTool = {
-    name: "tree",
-    inputSchema: {
-      type: "object",
-      $defs: { node: { type: "object", properties: { child: { $ref: "#/$defs/node" } } } },
-      properties: { root: { $ref: "#/$defs/node" } },
-    },
-  };
-  const brokenTool = {
-    name: "broken",
-    inputSchema: { type: "object", properties: { x: { $ref: "#/properties/nope" } } },
-  };
-  const plainTool = { name: "ping", inputSchema: { type: "object", properties: {} } };
-  const lateTool = {
-    name: "late",
-    inputSchema: { type: "object", properties: { y: { $ref: "#/properties/missing" } } },
-  };
-  const toolsByAgent: Record<string, readonly object[]> = {
-    "schema-agent": [recursiveRootTool, brokenTool, plainTool],
-    "late-agent": [lateTool],
-  };
-  const makeEngine = (provider: string) => {
-    const issues: string[] = [];
-    const engine = new ConversationEngine({
-      config: rollConfigSchema.parse({
-        llm: {
-          defaultProvider: provider,
-          defaultModel: "m",
-          providers: { [provider]: { apiKey: "k" } },
-        },
-        ask: {},
-        agents: { dataDir: "/tmp/roll-engine-test" },
-      }),
-      model: new MockLanguageModelV4({}),
-      agents: [makeAgent("schema-agent")],
-      skillLibrary: null,
-      clientManager: {
-        connect: async (agentName: string) => ({
-          listTools: async () => ({ tools: toolsByAgent[agentName] ?? [] }),
-        }),
-        setSamplingProviderOptions: () => {},
-        setSamplingModel: () => {},
-        disconnectAll: async () => {},
-      } as unknown as McpClientManager,
-      onAgentBootstrapIssue: (issue) => issues.push(issue.message),
-    });
-    return { engine, issues };
-  };
-  const toolIds = (session: AgentSession): readonly string[] =>
-    session.getCapabilityManifest().tools.map((tool) => tool.id);
-  const has = (ids: readonly string[], suffix: string): boolean =>
-    ids.some((id) => id.endsWith(suffix));
-
-  const google = makeEngine("google");
-  try {
-    const session = await google.engine.createSession();
-    let ids = toolIds(session);
-    assert.ok(has(ids, "ping"));
-    assert.ok(has(ids, "tree"), "root-level recursive $defs stay usable on google");
-    assert.ok(!has(ids, "broken"), "unresolvable #/properties ref is excluded on google");
-    assert.ok(
-      google.issues.some(
-        (message) => message.includes('"broken"') && message.includes("已从本会话工具集移除"),
-      ),
-    );
-
-    google.engine.switchModel({
-      provider: "openai",
-      modelName: "gpt",
-      model: new MockLanguageModelV4({ modelId: "gpt" }),
-    });
-    ids = toolIds(session);
-    assert.ok(has(ids, "broken"), "switching to a pass-through provider restores the tool");
-
-    google.engine.switchModel({
-      provider: "google",
-      modelName: "gemini",
-      model: new MockLanguageModelV4({ modelId: "gemini" }),
-    });
-    ids = toolIds(session);
-    assert.ok(!has(ids, "broken"), "switching back to google excludes it again");
-
-    const refresh = await google.engine.prepareAgentRefresh(makeAgent("late-agent"));
-    session.applyAgentRefresh(refresh);
-    ids = toolIds(session);
-    assert.ok(!has(ids, "late"), "tools installed mid-session go through the same policy");
-    assert.ok(google.issues.some((message) => message.includes('"late"')));
-  } finally {
-    await google.engine.dispose();
-  }
-
-  const openai = makeEngine("openai");
-  try {
-    const session = await openai.engine.createSession();
-    assert.ok(has(toolIds(session), "broken"));
-    openai.engine.switchModel({
-      provider: "google",
-      modelName: "gemini",
-      model: new MockLanguageModelV4({ modelId: "gemini" }),
-    });
-    assert.ok(!has(toolIds(session), "broken"), "stale toolset is re-validated on switch");
-    assert.ok(
-      openai.issues.some(
-        (message) => message.includes('"broken"') && message.includes('provider "google"'),
-      ),
-      "switch warnings name the target provider",
-    );
-  } finally {
-    await openai.engine.dispose();
-  }
-});
-
 test("ConversationEngine threads structured output controls into AgentSession", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
   const structuredOutputProviderOptions = { alibaba: { enableThinking: false } };
-  const engine = new ConversationEngine({
+  const engine = createEngine({
     config,
     model: new MockLanguageModelV4({}),
     sources: [],
@@ -1739,15 +318,7 @@ test("ConversationEngine threads structured output controls into AgentSession", 
 });
 
 test("ConversationEngine 将 skillLibrary 目录注入 system prompt 并注册 skill 工具", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
   const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
   const model = new MockLanguageModelV4({
     doStream: async (options) => {
@@ -1774,7 +345,7 @@ test("ConversationEngine 将 skillLibrary 目录注入 system prompt 并注册 s
       };
     },
   });
-  const engine = new ConversationEngine({
+  const engine = createEngine({
     config,
     model,
     sources: [],
@@ -1802,17 +373,9 @@ test("ConversationEngine 将 skillLibrary 目录注入 system prompt 并注册 s
 });
 
 test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const client = {} as never;
-  const engine = new ConversationEngine({
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
+  const client = { callTool: async () => ({ content: [] }) };
+  const engine = createEngine({
     config,
     model: new MockLanguageModelV4({}),
     workspaceInstructions: null,
@@ -1845,6 +408,7 @@ test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", asyn
 });
 
 const STOP_REASON = { unified: "stop", raw: "stop" } as const;
+
 const TOOL_CALLS_REASON = { unified: "tool-calls", raw: "tool-calls" } as const;
 
 function mockUsage(inputTokens = 1, outputTokens = 1) {
@@ -1940,21 +504,16 @@ function sequencedEngineModel(steps: readonly LanguageModelV4StreamPart[][]): Mo
 for (const scenario of ["summarize", "truncate", "empty", "larger"] as const) {
   test(`ConversationEngine Unicode compaction ${scenario} persists and resumes`, async () => {
     const dir = tempDir();
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           strategy: scenario === "truncate" ? "truncate" : "summarize",
           keepRecentTurns: 1,
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: join(dir, "agents") },
     });
     let engine: ConversationEngine | undefined;
     let store: ThreadStore | undefined;
@@ -1963,7 +522,7 @@ for (const scenario of ["summarize", "truncate", "empty", "larger"] as const) {
     try {
       store = new ThreadStore(dir);
       const inference = sequencedEngineModel([engineTextStep("已记录要求")]);
-      engine = new ConversationEngine({
+      engine = createEngine({
         config,
         store,
         sources: [],
@@ -2035,7 +594,7 @@ for (const scenario of ["summarize", "truncate", "empty", "larger"] as const) {
       store.close();
       store = new ThreadStore(dir);
       let prompt = "";
-      engine = new ConversationEngine({
+      engine = createEngine({
         config,
         store,
         sources: [],
@@ -2063,91 +622,19 @@ for (const scenario of ["summarize", "truncate", "empty", "larger"] as const) {
   });
 }
 
-test("ConversationEngine passes advertised tool timeout through discovery and execution", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-timeout-test" },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "deadline-agent", description: "test", metadata: {} },
-    transport: { type: "stdio", command: "node" },
-    runtime: { ownership: "on-demand" },
-    installPath: "/tmp/deadline-agent",
-    registeredAt: "2026-09-20T00:00:00Z",
-    status: "idle",
-  };
-  let timeout: unknown;
-  const clientManager = {
-    connect: async () => ({
-      listTools: async () => ({
-        tools: [
-          {
-            name: "run",
-            inputSchema: { type: "object", properties: {} },
-            _meta: { "roll/executionTimeoutMs": 120000 },
-          },
-        ],
-      }),
-      callTool: async (_request: unknown, _schema: unknown, options: { timeout?: number }) => {
-        timeout = options.timeout;
-        return { content: [{ type: "text", text: "ok" }] };
-      },
-    }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const model = sequencedEngineModel([
-    [
-      { type: "stream-start", warnings: [] },
-      {
-        type: "tool-call",
-        toolCallId: "deadline-call",
-        toolName: "deadline-agent__run",
-        input: "{}",
-      },
-      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
-    ],
-    engineTextStep("done"),
-  ]);
-  const engine = new ConversationEngine({
-    config,
-    model,
-    agents: [agent],
-    skillLibrary: null,
-    workspaceInstructions: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-  });
-  try {
-    const session = await engine.createSession();
-    await drain(session.send("run"));
-    assert.equal(timeout, 120000);
-  } finally {
-    await engine.dispose();
-  }
-});
 for (const strategy of ["truncate", "summarize"] as const) {
   test(`ConversationEngine 较早长轮分批 ${strategy} 后 SQLite 恢复保留证据且不重放`, async () => {
     const dir = tempDir();
     let store: ThreadStore | undefined;
     let engine: ConversationEngine | undefined;
     try {
-      const config = rollConfigSchema.parse({
-        llm: {
-          defaultProvider: "mock",
-          defaultModel: "default-model",
-          providers: { mock: { apiKey: "test" } },
-        },
-        ask: {},
-        runtime: {
+      const config = runtimeFixtureConfig({
+        provider: "mock",
+        modelName: "default-model",
+        settings: {
           contextWindow: 100_000,
           compaction: { strategy, keepRecentTurns: 1, keepRecentTokens: 1 },
         },
-        agents: { dataDir: join(dir, "agents") },
       });
       store = new ThreadStore(dir);
       const threadId = store.createThread();
@@ -2202,7 +689,7 @@ for (const strategy of ["truncate", "summarize"] as const) {
       const transcriptBefore = store.listTranscriptMessages(threadId);
       const executionsBefore = store.listToolExecutions(threadId);
       let toolCalls = 0;
-      const sources = [
+      const sources: readonly AgentToolSource[] = [
         {
           agentName: "probe",
           client: {
@@ -2210,7 +697,7 @@ for (const strategy of ["truncate", "summarize"] as const) {
               toolCalls += 1;
               return { content: [{ type: "text", text: "unexpected replay" }] };
             },
-          } as never,
+          },
           tools: [
             {
               tool: { name: "inspect", inputSchema: { type: "object" as const } },
@@ -2235,7 +722,7 @@ for (const strategy of ["truncate", "summarize"] as const) {
           };
         },
       });
-      engine = new ConversationEngine({
+      engine = createEngine({
         config,
         model,
         store,
@@ -2279,7 +766,7 @@ for (const strategy of ["truncate", "summarize"] as const) {
       assert.deepEqual(store.listTranscriptMessages(threadId), transcriptBefore);
       const prompts: LanguageModelV4CallOptions[] = [];
       const resumedModel = textModelCapture((options) => prompts.push(options));
-      engine = new ConversationEngine({
+      engine = createEngine({
         config,
         model: new MockLanguageModelV4({
           doGenerate: (options) => model.doGenerate(options),
@@ -2316,172 +803,6 @@ for (const strategy of ["truncate", "summarize"] as const) {
   });
 }
 
-test("ConversationEngine resourceHints 对 partial-invalid 整体回退，并规范化 field", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const agent: RegisteredAgent = {
-    skill: { name: "resource-agent", description: "resource", metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath: "/tmp/resource-agent",
-    registeredAt: "2026-07-17T00:00:00.000Z",
-    status: "idle",
-  };
-  const listedTool = (name: string) => ({
-    name,
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        conversationId: { type: "string" },
-      },
-      required: ["path", "conversationId"],
-    },
-    annotations: { destructiveHint: true },
-    _meta: {
-      "roll/resourceHints": [
-        { field: "path", kind: "file", mode: "write" },
-        name === "left"
-          ? { field: "conversationId", kind: "custom", mode: "write" }
-          : { field: "", kind: "conversation", mode: "write" },
-      ],
-    },
-  });
-  let active = 0;
-  let maxActive = 0;
-  const clientManager = {
-    connect: async () => ({
-      listTools: async () => ({ tools: [listedTool("left"), listedTool("right")] }),
-      callTool: async () => {
-        active += 1;
-        maxActive = Math.max(maxActive, active);
-        await new Promise<void>((resolve) => setTimeout(resolve, 20));
-        active -= 1;
-        return { content: [{ type: "text", text: "ok" }] };
-      },
-    }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const issues: AgentBootstrapIssue[] = [];
-  const model = sequencedEngineModel([
-    [
-      { type: "stream-start", warnings: [] },
-      {
-        type: "tool-call",
-        toolCallId: "left-call",
-        toolName: "resource-agent__left",
-        input: JSON.stringify({ path: "left.txt", conversationId: "shared" }),
-      },
-      {
-        type: "tool-call",
-        toolCallId: "right-call",
-        toolName: "resource-agent__right",
-        input: JSON.stringify({ path: "right.txt", conversationId: "shared" }),
-      },
-      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
-    ],
-    engineTextStep("done"),
-  ]);
-  const engine = new ConversationEngine({
-    config,
-    model,
-    agents: [agent],
-    skillLibrary: null,
-    clientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-
-  const session = await engine.createSession();
-  await drain(session.send("run partial-invalid batch"));
-
-  assert.equal(maxActive, 1);
-  assert.equal(issues.length, 2);
-  for (const issue of issues) {
-    assert.equal(issue.agentName, "resource-agent");
-    assert.match(issue.message, /roll\/resourceHints 无效.*已回退 Agent 级资源锁/u);
-  }
-  await engine.dispose();
-
-  let trimmedActive = 0;
-  let trimmedMaxActive = 0;
-  const trimmedIssues: AgentBootstrapIssue[] = [];
-  const trimmedClientManager = {
-    connect: async () => ({
-      listTools: async () => ({
-        tools: ["left", "right"].map((name) => ({
-          name,
-          inputSchema: {
-            type: "object",
-            properties: {
-              path: { type: "string" },
-              conversationId: { type: "string" },
-            },
-            required: ["path", "conversationId"],
-          },
-          annotations: { destructiveHint: true },
-          _meta: {
-            "roll/resourceHints": [
-              { field: " path ", kind: "file", mode: "write" },
-              { field: "conversationId", kind: "conversation", mode: "write" },
-            ],
-          },
-        })),
-      }),
-      callTool: async () => {
-        trimmedActive += 1;
-        trimmedMaxActive = Math.max(trimmedMaxActive, trimmedActive);
-        await new Promise<void>((resolve) => setTimeout(resolve, 20));
-        trimmedActive -= 1;
-        return { content: [{ type: "text", text: "ok" }] };
-      },
-    }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const trimmedModel = sequencedEngineModel([
-    [
-      { type: "stream-start", warnings: [] },
-      {
-        type: "tool-call",
-        toolCallId: "trimmed-left",
-        toolName: "resource-agent__left",
-        input: JSON.stringify({ path: "shared.txt", conversationId: "left" }),
-      },
-      {
-        type: "tool-call",
-        toolCallId: "trimmed-right",
-        toolName: "resource-agent__right",
-        input: JSON.stringify({ path: "shared.txt", conversationId: "right" }),
-      },
-      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
-    ],
-    engineTextStep("done"),
-  ]);
-  const trimmedEngine = new ConversationEngine({
-    config,
-    model: trimmedModel,
-    agents: [agent],
-    skillLibrary: null,
-    clientManager: trimmedClientManager,
-    ensureAgentReady: async () => {},
-    onAgentBootstrapIssue: (issue) => trimmedIssues.push(issue),
-  });
-
-  const trimmedSession = await trimmedEngine.createSession();
-  await drain(trimmedSession.send("run trimmed field batch"));
-
-  assert.equal(trimmedMaxActive, 1);
-  assert.deepEqual(trimmedIssues, []);
-  await trimmedEngine.dispose();
-});
-
 function textModelCapture(capture: (options: LanguageModelV4CallOptions) => void) {
   return new MockLanguageModelV4({
     doStream: async (options) => {
@@ -2506,14 +827,10 @@ function textModelCapture(capture: (options: LanguageModelV4CallOptions) => void
 test("ConversationEngine context overflow 重放后仅持久化一组当前 Turn", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -2522,7 +839,6 @@ test("ConversationEngine context overflow 重放后仅持久化一组当前 Turn
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: "/tmp/roll-engine-test" },
     });
     let modelCalls = 0;
     const steps = [
@@ -2550,7 +866,7 @@ test("ConversationEngine context overflow 重放后仅持久化一组当前 Turn
       { role: "user", content: "recent turn" },
       { role: "assistant", content: "recent answer" },
     ]);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model,
       store,
@@ -2615,14 +931,10 @@ test("ConversationEngine context overflow 重放后仅持久化一组当前 Turn
 test("ConversationEngine 将 ToolExecutionRecord 持久化并可跨进程恢复", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -2631,10 +943,9 @@ test("ConversationEngine 将 ToolExecutionRecord 持久化并可跨进程恢复"
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: "/tmp/roll-engine-test" },
     });
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: toolThenDoneModel("probe__inspect", { path: "secret.txt" }),
       store,
@@ -2647,7 +958,7 @@ test("ConversationEngine 将 ToolExecutionRecord 持久化并可跨进程恢复"
               structuredContent: { inspected: true },
               _meta: { trace: "kept-in-raw-ledger" },
             }),
-          } as never,
+          },
           resourceBaseDir: process.cwd(),
           tools: [
             {
@@ -2709,7 +1020,7 @@ test("ConversationEngine ledger 已提交但 transcript 失败时在下一次推
   let store: ThreadStore | undefined;
   let engine: ConversationEngine | undefined;
   try {
-    const config = installEngineConfig("/tmp/roll-engine-ledger-gap");
+    const config = installEngineConfig();
     const prompts: LanguageModelV4CallOptions[] = [];
     const steps = [
       engineToolCallStep("c1", "probe__write", { q: "once" }),
@@ -2731,7 +1042,7 @@ test("ConversationEngine ledger 已提交但 transcript 失败时在下一次推
     });
     let toolCalls = 0;
     store = new ThreadStore(dir);
-    engine = new ConversationEngine({
+    engine = createEngine({
       config,
       model,
       store,
@@ -2743,7 +1054,7 @@ test("ConversationEngine ledger 已提交但 transcript 失败时在下一次推
               toolCalls += 1;
               return { content: [{ type: "text", text: "side-effect-complete" }] };
             },
-          } as never,
+          },
           tools: [
             {
               tool: {
@@ -2827,14 +1138,14 @@ test("ConversationEngine 续跑 segment 提交失败时只恢复新 execution,�
   let store: ThreadStore | undefined;
   let engine: ConversationEngine | undefined;
   try {
-    const baseConfig = installEngineConfig("/tmp/roll-engine-continuation-gap");
+    const baseConfig = installEngineConfig();
     const config = {
       ...baseConfig,
-      runtime: {
-        ...baseConfig.runtime,
+      settings: {
+        ...baseConfig.settings,
         contextWindow: 20_000, // Engine includes file/schema overhead; measured 16k drives pause.
         compaction: {
-          ...baseConfig.runtime.compaction,
+          ...baseConfig.settings.compaction,
           enabled: true,
           strategy: "truncate" as const,
           threshold: 0.75,
@@ -2872,7 +1183,7 @@ test("ConversationEngine 续跑 segment 提交失败时只恢复新 execution,�
       { role: "user", content: "old-2" },
       { role: "assistant", content: "answer-2" },
     ]);
-    engine = new ConversationEngine({
+    engine = createEngine({
       config,
       model,
       store,
@@ -2884,7 +1195,7 @@ test("ConversationEngine 续跑 segment 提交失败时只恢复新 execution,�
               toolCalls += 1;
               return { content: [{ type: "text", text: `result-${String(toolCalls)}` }] };
             },
-          } as never,
+          },
           tools: [
             {
               tool: {
@@ -2960,7 +1271,7 @@ test("ConversationEngine 重启恢复仅投影未覆盖的 exact execution 且�
   let engine: ConversationEngine | undefined;
   let store: ThreadStore | undefined;
   try {
-    const config = installEngineConfig("/tmp/roll-engine-ledger-resume");
+    const config = installEngineConfig();
     store = new ThreadStore(dir);
     const threadId = store.createThread({ model: "default-model" });
     const first = createToolExecutionRecord({
@@ -2996,7 +1307,7 @@ test("ConversationEngine 重启恢复仅投影未覆盖的 exact execution 且�
 
     const prompts: LanguageModelV4CallOptions[] = [];
     store = new ThreadStore(dir);
-    engine = new ConversationEngine({
+    engine = createEngine({
       config,
       store,
       model: textModelCapture((options) => prompts.push(options)),
@@ -3017,7 +1328,7 @@ test("ConversationEngine 重启恢复仅投影未覆盖的 exact execution 且�
     store = undefined;
 
     store = new ThreadStore(dir);
-    engine = new ConversationEngine({
+    engine = createEngine({
       config,
       store,
       model: textModelCapture(() => {}),
@@ -3044,14 +1355,10 @@ test("ConversationEngine 重启恢复仅投影未覆盖的 exact execution 且�
 test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控 transcript 入口", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -3060,7 +1367,6 @@ test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: "/tmp/roll-engine-test" },
     });
     const store = new ThreadStore(dir);
     const threadId = store.createThread();
@@ -3071,7 +1377,7 @@ test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控
       { role: "assistant", content: "current-answer" },
     ]);
     let capturedPrompt = "";
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: textModelCapture((options) => {
         capturedPrompt = JSON.stringify(options.prompt);
@@ -3141,14 +1447,10 @@ test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控
 test("ConversationEngine 连续压缩记录近期 typed Tool state 并保留完整执行账本", async () => {
   const dir = tempDir();
   try {
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -3157,7 +1459,6 @@ test("ConversationEngine 连续压缩记录近期 typed Tool state 并保留完�
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: "/tmp/roll-engine-test" },
     });
     const store = new ThreadStore(dir);
     const model = sequencedEngineModel([
@@ -3168,7 +1469,7 @@ test("ConversationEngine 连续压缩记录近期 typed Tool state 并保留完�
       engineTextStep("second done".repeat(1000)),
       engineTextStep("second checkpoint boundary"),
     ]);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model,
       store,
@@ -3177,7 +1478,7 @@ test("ConversationEngine 连续压缩记录近期 typed Tool state 并保留完�
           agentName: "probe",
           client: {
             callTool: async () => ({ content: [{ type: "text", text: "inspected" }] }),
-          } as never,
+          },
           tools: [
             {
               tool: {
@@ -3236,14 +1537,10 @@ test("ConversationEngine 压缩旧工具轮次后仍可经 checkpoint transcript
   const dir = tempDir();
   try {
     const evidenceMarker = "ORIGINAL_TOOL_EVIDENCE_20260717";
-    const config = rollConfigSchema.parse({
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "default-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      ask: {},
-      runtime: {
+    const config = runtimeFixtureConfig({
+      provider: "mock",
+      modelName: "default-model",
+      settings: {
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -3252,10 +1549,9 @@ test("ConversationEngine 压缩旧工具轮次后仍可经 checkpoint transcript
           keepRecentTokens: 1,
         },
       },
-      agents: { dataDir: "/tmp/roll-engine-test" },
     });
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config,
       model: sequencedEngineModel([
         engineToolCallStep("call-large", "probe__large", {}),
@@ -3270,7 +1566,7 @@ test("ConversationEngine 压缩旧工具轮次后仍可经 checkpoint transcript
             callTool: async () => ({
               content: [{ type: "text", text: `${evidenceMarker}:${"x".repeat(6_000)}` }],
             }),
-          } as never,
+          },
           tools: [
             {
               tool: { name: "large", inputSchema: { type: "object" as const } },
@@ -3315,19 +1611,11 @@ test("ConversationEngine 压缩旧工具轮次后仍可经 checkpoint transcript
 });
 
 test("ConversationEngine 每 Turn 刷新 VCS context，而不重建稳定 capability manifest", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
   const prompts: string[] = [];
   let inspection = 0;
   let rulesResolution = 0;
-  const engine = new ConversationEngine({
+  const engine = createEngine({
     config,
     model: textModelCapture((options) => prompts.push(JSON.stringify(options.prompt))),
     sources: [],
@@ -3369,16 +1657,11 @@ test("ConversationEngine 每 Turn 刷新 VCS context，而不重建稳定 capabi
   await engine.dispose();
 });
 
-function bashEngineConfig(dataDir: string, autoApproveSafe: boolean) {
-  return rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    runtime: { shell: { enabled: true, autoApproveSafe } },
-    agents: { dataDir },
+function bashEngineConfig(autoApproveSafe: boolean) {
+  return runtimeFixtureConfig({
+    provider: "mock",
+    modelName: "default-model",
+    settings: { shell: { enabled: true, autoApproveSafe } },
   });
 }
 
@@ -3388,8 +1671,8 @@ test(
   async () => {
     const dir = tempDir();
     try {
-      const engine = new ConversationEngine({
-        config: bashEngineConfig(dir, true),
+      const engine = createEngine({
+        config: bashEngineConfig(true),
         model: toolThenDoneModel("roll__bash", { command: "pwd" }),
         sources: [],
         skillLibrary: null,
@@ -3418,8 +1701,8 @@ test(
   async () => {
     const dir = tempDir();
     try {
-      const engine = new ConversationEngine({
-        config: bashEngineConfig(dir, false),
+      const engine = createEngine({
+        config: bashEngineConfig(false),
         model: toolThenDoneModel("roll__bash", { command: "pwd" }),
         sources: [],
         skillLibrary: null,
@@ -3445,8 +1728,8 @@ test(
 test("supportsSafeCommandClassification=false 的 profile 谎报 known-safe 也仍逐条确认", async () => {
   const dir = tempDir();
   try {
-    const engine = new ConversationEngine({
-      config: bashEngineConfig(dir, true),
+    const engine = createEngine({
+      config: bashEngineConfig(true),
       model: toolThenDoneModel("roll__powershell", { command: "Get-Location" }),
       sources: [],
       skillLibrary: null,
@@ -3490,18 +1773,11 @@ function toolCapturingModel(capture: (names: string) => void): MockLanguageModel
   });
 }
 
-function sessionExecConfig(dataDir: string, autoApproveSafe = true) {
-  return rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    runtime: {
-      shell: { enabled: true, autoApproveSafe, session: { enabled: true } },
-    },
-    agents: { dataDir },
+function sessionExecConfig(autoApproveSafe = true) {
+  return runtimeFixtureConfig({
+    provider: "mock",
+    modelName: "default-model",
+    settings: { shell: { enabled: true, autoApproveSafe, session: { enabled: true } } },
   });
 }
 
@@ -3512,8 +1788,8 @@ test(
     for (const lifecycle of ["create", "resume"] as const) {
       const dir = tempDir();
       const store = lifecycle === "resume" ? new ThreadStore(join(dir, "threads")) : undefined;
-      const engine = new ConversationEngine({
-        config: sessionExecConfig(dir),
+      const engine = createEngine({
+        config: sessionExecConfig(),
         model: toolThenDoneModel("roll__exec_command", {
           command: "pwd",
           yield_time_ms: 250,
@@ -3557,8 +1833,8 @@ test(
   { skip: process.platform === "win32" },
   async () => {
     const dir = tempDir();
-    const engine = new ConversationEngine({
-      config: sessionExecConfig(dir, false),
+    const engine = createEngine({
+      config: sessionExecConfig(false),
       model: toolThenDoneModel("roll__exec_command", {
         command: "pwd",
         yield_time_ms: 250,
@@ -3592,8 +1868,8 @@ test(
     const dir = tempDir();
     try {
       let tools = "";
-      const engine = new ConversationEngine({
-        config: sessionExecConfig(dir),
+      const engine = createEngine({
+        config: sessionExecConfig(),
         model: toolCapturingModel((names) => {
           tools = names;
         }),
@@ -3626,8 +1902,8 @@ test(
     const dir = tempDir();
     try {
       let tools = "";
-      const engine = new ConversationEngine({
-        config: sessionExecConfig(dir),
+      const engine = createEngine({
+        config: sessionExecConfig(),
         model: toolCapturingModel((names) => {
           tools = names;
         }),
@@ -3655,8 +1931,8 @@ test("PowerShell profile 注册 roll__powershell 与 session exec", async () => 
   const dir = tempDir();
   try {
     let tools = "";
-    const engine = new ConversationEngine({
-      config: sessionExecConfig(dir),
+    const engine = createEngine({
+      config: sessionExecConfig(),
       model: toolCapturingModel((names) => {
         tools = names;
       }),
@@ -3686,8 +1962,8 @@ test("运行期 shell profile 探测在 engine 实例内缓存", async () => {
   const dir = tempDir();
   try {
     let calls = 0;
-    const engine = new ConversationEngine({
-      config: sessionExecConfig(dir),
+    const engine = createEngine({
+      config: sessionExecConfig(),
       model: toolCapturingModel(() => {}),
       sources: [],
       skillLibrary: null,
@@ -3716,8 +1992,8 @@ test("ConversationEngine 使用隔离的 Chat shell 环境且不读取后续全�
   };
   let observedEnv: Readonly<Record<string, string | undefined>> | undefined;
   try {
-    const engine = new ConversationEngine({
-      config: sessionExecConfig(dir),
+    const engine = createEngine({
+      config: sessionExecConfig(),
       model: toolCapturingModel(() => {}),
       sources: [],
       skillLibrary: null,
@@ -3756,8 +2032,8 @@ test(
     try {
       let calls = 0;
       const toolSnapshots: string[] = [];
-      engine = new ConversationEngine({
-        config: sessionExecConfig(dir),
+      engine = createEngine({
+        config: sessionExecConfig(),
         model: toolCapturingModel((names) => {
           toolSnapshots.push(names);
         }),
@@ -3798,261 +2074,16 @@ test(
   },
 );
 
-function installEngineConfig(dataDir: string) {
-  return rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir },
-  });
+function installEngineConfig() {
+  return runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
 }
-
-const INSTALL_TEST_CATALOG = [
-  {
-    shortName: "probe",
-    packageName: "@roll-agent/probe-agent",
-    skillName: "probe-agent",
-    description: "测试探针 Agent",
-    requiredEnv: [],
-  },
-];
-
-function makeProbeAgent(installPath: string): RegisteredAgent {
-  return {
-    skill: { name: "probe-agent", description: "测试探针", metadata: {} },
-    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
-    runtime: { ownership: "on-demand" },
-    installPath,
-    registeredAt: "2026-07-01T00:00:00.000Z",
-    status: "idle",
-    source: {
-      type: "installed-package",
-      packageName: "@roll-agent/probe-agent",
-      packageSpec: "@roll-agent/probe-agent",
-      installDir: installPath,
-      installedVersion: "1.0.0",
-    },
-  };
-}
-
-function installToolStream(): LanguageModelV4StreamPart[][] {
-  const usage = {
-    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1, text: 1, reasoning: 0 },
-  };
-  return [
-    [
-      { type: "stream-start", warnings: [] },
-      {
-        type: "tool-call",
-        toolCallId: "c1",
-        toolName: "roll__agent_install",
-        input: JSON.stringify({ agent: "probe" }),
-      },
-      { type: "finish", usage, finishReason: { unified: "tool-calls", raw: "tool-calls" } },
-    ],
-    [
-      { type: "stream-start", warnings: [] },
-      { type: "text-start", id: "t" },
-      { type: "text-delta", id: "t", delta: "完成" },
-      { type: "text-end", id: "t" },
-      { type: "finish", usage, finishReason: { unified: "stop", raw: "stop" } },
-    ],
-  ];
-}
-
-function installSequencedModel(): MockLanguageModelV4 {
-  const steps = installToolStream();
-  let index = 0;
-  return new MockLanguageModelV4({
-    doStream: async () => {
-      const chunks = steps[Math.min(index, steps.length - 1)] ?? [];
-      index += 1;
-      return {
-        stream: simulateReadableStream<LanguageModelV4StreamPart>({
-          chunks,
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      };
-    },
-  });
-}
-
-function fakeProbeClientManager(connectCalls: string[]): McpClientManager {
-  return {
-    connect: async (agentName: string) => {
-      connectCalls.push(agentName);
-      return {
-        listTools: async () => ({
-          tools: [
-            {
-              name: "probe_tool",
-              description: "探针工具",
-              inputSchema: { type: "object", properties: {} },
-            },
-          ],
-        }),
-      };
-    },
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-}
-
-test("chat 内安装不做持久 autoStart，改由会话租约启动并完成热刷新接线", async () => {
-  const dataDir = tempDir();
-  try {
-    const connectCalls: string[] = [];
-    const ensureReadyCalls: string[] = [];
-    const installInputs: unknown[] = [];
-    const engine = new ConversationEngine({
-      config: installEngineConfig(dataDir),
-      model: installSequencedModel(),
-      skillLibrary: null,
-      clientManager: fakeProbeClientManager(connectCalls),
-      ensureAgentReady: async (agent) => {
-        ensureReadyCalls.push(agent.skill.name);
-      },
-      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
-      installAgentFn: async (input) => {
-        installInputs.push(input);
-        return {
-          ok: true,
-          agent: makeProbeAgent(dataDir),
-          envReport: undefined,
-          started: true,
-        };
-      },
-    });
-
-    const session = await engine.createSession();
-    const outputs: string[] = [];
-    for await (const event of session.send("装 probe")) {
-      if (event.type === "confirmation-required") {
-        session.approve(event.approvalId);
-      }
-      if (event.type === "tool-result") {
-        assert.equal(event.isError, false);
-        outputs.push(JSON.stringify(event.output));
-      }
-    }
-
-    assert.equal(installInputs.length, 1);
-    const input = installInputs[0] as {
-      autoStart?: boolean;
-      skipBrowserSetup?: boolean;
-      packageSpec?: string;
-      expectedSkillName?: string;
-      replaceExisting?: boolean;
-    };
-    assert.equal(input.autoStart, false);
-    assert.equal(input.skipBrowserSetup, true);
-    assert.equal(input.packageSpec, "@roll-agent/probe-agent");
-    assert.equal(input.expectedSkillName, "probe-agent");
-    assert.equal(input.replaceExisting, undefined);
-    assert.deepEqual(ensureReadyCalls, ["probe-agent"]);
-    assert.deepEqual(connectCalls, ["probe-agent"]);
-    assert.match(outputs[0] ?? "", /下一轮对话开始可用/);
-    await engine.dispose();
-  } finally {
-    rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test("chat 内安装失败时不连接不刷新，错误如实透出", async () => {
-  const dataDir = tempDir();
-  try {
-    const connectCalls: string[] = [];
-    const engine = new ConversationEngine({
-      config: installEngineConfig(dataDir),
-      model: installSequencedModel(),
-      skillLibrary: null,
-      clientManager: fakeProbeClientManager(connectCalls),
-      ensureAgentReady: async () => {},
-      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
-      installAgentFn: async () => ({
-        ok: false,
-        step: "start",
-        message: 'Agent "probe-agent" 已安装，但自动启动失败：boom',
-      }),
-    });
-
-    const session = await engine.createSession();
-    let failureOutput = "";
-    for await (const event of session.send("装 probe")) {
-      if (event.type === "confirmation-required") {
-        session.approve(event.approvalId);
-      }
-      if (event.type === "tool-result") {
-        assert.equal(event.isError, true);
-        failureOutput = JSON.stringify(event.output);
-      }
-    }
-
-    assert.deepEqual(connectCalls, []);
-    assert.match(failureOutput, /自动启动失败/);
-    await engine.dispose();
-  } finally {
-    rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test("chat 内重装已接入的同名 agent 时不重复连接并提示重启", async () => {
-  const dataDir = tempDir();
-  try {
-    const { AgentStore } = await import("@roll-agent/core/registry/store");
-    new AgentStore(dataDir).add(makeProbeAgent(dataDir));
-
-    const connectCalls: string[] = [];
-    const reportLines: string[] = [];
-    const engine = new ConversationEngine({
-      config: installEngineConfig(dataDir),
-      model: installSequencedModel(),
-      skillLibrary: null,
-      clientManager: fakeProbeClientManager(connectCalls),
-      ensureAgentReady: async () => {},
-      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
-      installAgentFn: async (_input, deps) => {
-        deps.report?.({ type: "info", message: "重装 probe" });
-        return {
-          ok: true,
-          agent: makeProbeAgent(dataDir),
-          envReport: undefined,
-          started: true,
-        };
-      },
-    });
-
-    const session = await engine.createSession();
-    let output = "";
-    for await (const event of session.send("再装一次 probe")) {
-      if (event.type === "confirmation-required") {
-        session.approve(event.approvalId);
-      }
-      if (event.type === "tool-result") {
-        output = JSON.stringify(event.output);
-      }
-    }
-
-    assert.deepEqual(connectCalls, ["probe-agent"]);
-    assert.match(output, /重新运行 roll chat/);
-    assert.match(output, /已接入旧版本连接/);
-    reportLines.push(output);
-    await engine.dispose();
-  } finally {
-    rmSync(dataDir, { recursive: true, force: true });
-  }
-});
 
 test("ConversationEngine 默认注册文件工具并标记 file-read/file-edit capability role", async () => {
   const dir = tempDir();
   try {
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
-      config: installEngineConfig("/tmp/roll-engine-file-tools-default"),
+    const engine = createEngine({
+      config: installEngineConfig(),
       model: new MockLanguageModelV4({}),
       store,
       sources: [],
@@ -4081,8 +2112,8 @@ test("ConversationEngine fileToolsEnabled: false 时不注册文件工具", asyn
   const dir = tempDir();
   try {
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
-      config: installEngineConfig("/tmp/roll-engine-file-tools-disabled"),
+    const engine = createEngine({
+      config: installEngineConfig(),
       model: new MockLanguageModelV4({}),
       store,
       sources: [],
@@ -4111,8 +2142,8 @@ test("ConversationEngine resumeSession 重建 session 后文件工具行为与 c
   const dir = tempDir();
   try {
     const store = new ThreadStore(dir);
-    const engine = new ConversationEngine({
-      config: installEngineConfig("/tmp/roll-engine-file-tools-resume"),
+    const engine = createEngine({
+      config: installEngineConfig(),
       model: new MockLanguageModelV4({}),
       store,
       sources: [],
@@ -4138,15 +2169,10 @@ test("ConversationEngine resumeSession 重建 session 后文件工具行为与 c
 });
 
 function engineConfigWithInstructions(instructions: string) {
-  return rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-    chat: { instructions },
+  return runtimeFixtureConfig({
+    provider: "mock",
+    modelName: "default-model",
+    settings: { instructions },
   });
 }
 
@@ -4180,7 +2206,7 @@ function capturingModel(captured: Array<{ readonly role: string; readonly conten
 
 test("ConversationEngine 把显式 workspaceInstructions source 注入 session system prompt 并暴露 instructionsPath", async () => {
   const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
-  const engine = new ConversationEngine({
+  const engine = createEngine({
     config: engineConfigWithInstructions("auto"),
     model: capturingModel(captured),
     sources: [],
@@ -4208,7 +2234,7 @@ test("ConversationEngine 把显式 workspaceInstructions source 注入 session s
 test("ConversationEngine workspaceInstructions 为 null 或 config off 时不注入", async () => {
   for (const variant of ["null", "off"] as const) {
     const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config: engineConfigWithInstructions(variant === "off" ? "off" : "auto"),
       model: capturingModel(captured),
       sources: [],
@@ -4231,7 +2257,7 @@ test("ConversationEngine 按 config 构造 source 时把告警转给 onWorkspace
   try {
     const missing = join(dir, "nope.md");
     const issues: string[] = [];
-    const engine = new ConversationEngine({
+    const engine = createEngine({
       config: engineConfigWithInstructions(missing),
       model: new MockLanguageModelV4({}),
       sources: [],
@@ -4249,16 +2275,8 @@ test("ConversationEngine 按 config 构造 source 时把告警转给 onWorkspace
 });
 
 test("resolveDynamicCapabilityContext 的 origin 会透传到 turn context", async () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
-  const engine = new ConversationEngine({
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "default-model" });
+  const engine = createEngine({
     config,
     model: new MockLanguageModelV4({
       doStream: async () => ({
@@ -4296,19 +2314,10 @@ test("resolveDynamicCapabilityContext 的 origin 会透传到 turn context", asy
 });
 
 test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    runtime: { model: "runtime-model" },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "runtime-model" });
   const onCommandSpawn = () => {};
   const withHook = buildSessionBashSettings({
-    config,
+    settings: config.settings,
     profile: powershellProfile,
     env: { PATH: "/usr/bin" },
     onCommandSpawn,
@@ -4316,118 +2325,13 @@ test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", 
   assert.equal(withHook.onCommandSpawn, onCommandSpawn);
   assert.equal(withHook.profile, powershellProfile);
   assert.deepEqual(withHook.env, { PATH: "/usr/bin" });
-  assert.equal(withHook.turnTimeoutMs, config.runtime.turnTimeoutMs);
+  assert.equal(withHook.turnTimeoutMs, config.settings.turnTimeoutMs);
   const without = buildSessionBashSettings({
-    config,
+    settings: config.settings,
     profile: powershellProfile,
     env: { PATH: "/usr/bin" },
   });
   assert.equal("onCommandSpawn" in without, false);
-});
-
-test("ConversationEngine 从 MCP 声明接入观察投影并拒绝无效声明", async () => {
-  const agent = makeManagedHttpAgent("observing-agent");
-  const issues: AgentBootstrapIssue[] = [];
-  const prompts: LanguageModelV4CallOptions[] = [];
-  let modelIndex = 0;
-  let observationIndex = 0;
-  const model = new MockLanguageModelV4({
-    doStream: async (options) => {
-      prompts.push(options);
-      const index = modelIndex++;
-      const chunks =
-        index < 2
-          ? engineToolCallStep(`observation-${index}`, "observing-agent__snapshot", {})
-          : engineTextStep("done");
-      return {
-        stream: simulateReadableStream<LanguageModelV4StreamPart>({
-          chunks,
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      };
-    },
-  });
-  const clientManager = {
-    connect: async () => ({
-      listTools: async () => ({
-        tools: [
-          {
-            name: "snapshot",
-            inputSchema: { type: "object", properties: {} },
-            _meta: { "roll/observationRetention": { kind: "browser-ax-snapshot" } },
-          },
-          {
-            name: "invalid_observation",
-            inputSchema: { type: "object", properties: {} },
-            _meta: { "roll/observationRetention": { kind: "unknown" } },
-          },
-        ],
-      }),
-      callTool: async () => {
-        const index = observationIndex++;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                page: { url: "https://example.test" },
-                snapshot: {
-                  snapshotId: `snapshot-${index}`,
-                  browserInstance: "browser-a",
-                  pageId: "page-a",
-                  documentId: "document-a",
-                  nodes: [
-                    {
-                      role: "textbox",
-                      name: `field-${index}`,
-                      ref: "@e1",
-                      depth: 0,
-                      ignored: false,
-                    },
-                  ],
-                  refs: [
-                    {
-                      ref: "@e1",
-                      role: "textbox",
-                      name: `field-${index}`,
-                      nth: 0,
-                      disabled: false,
-                    },
-                  ],
-                  nodeCount: 1,
-                  truncated: false,
-                  maxNodes: 100,
-                  interactiveOnly: true,
-                },
-              }),
-            },
-          ],
-        };
-      },
-    }),
-    disconnectAll: async () => {},
-  } as unknown as McpClientManager;
-  const engine = new ConversationEngine({
-    config: installEngineConfig("/tmp/roll-observation-metadata"),
-    model,
-    agents: [agent],
-    clientManager,
-    ensureAgentReady: async () => {},
-    skillLibrary: null,
-    workspaceInstructions: null,
-    shellProfile: null,
-    onAgentBootstrapIssue: (issue) => issues.push(issue),
-  });
-  try {
-    const session = await engine.createSession();
-    await drain(session.send("inspect"));
-    assert.equal(observationIndex, 2);
-    assert.match(JSON.stringify(prompts[2]?.prompt), /historicalObservation/u);
-    assert.match(issues[0]?.message ?? "", /roll\/observationRetention 无效/u);
-  } finally {
-    await engine.dispose();
-  }
 });
 
 test("SQLite 重启后旧观察继续投影，工具原文与结果 ID 保持可查", async () => {
@@ -4486,10 +2390,10 @@ test("SQLite 重启后旧观察继续投影，工具原文与结果 ID 保持可
       },
     ],
   };
-  const config = installEngineConfig(dir);
+  const config = installEngineConfig();
   try {
     const firstStore = new ThreadStore(dir);
-    const firstEngine = new ConversationEngine({
+    const firstEngine = createEngine({
       config,
       model: sequencedEngineModel([
         engineToolCallStep("snapshot-call-0", "browser__snapshot", {}),
@@ -4513,7 +2417,7 @@ test("SQLite 重启后旧观察继续投影，工具原文与结果 ID 保持可
 
     const reopenedStore = new ThreadStore(dir);
     let prompt: LanguageModelV4CallOptions["prompt"] = [];
-    const resumedEngine = new ConversationEngine({
+    const resumedEngine = createEngine({
       config,
       model: textModelCapture((options) => {
         prompt = options.prompt;
@@ -4541,28 +2445,19 @@ test("SQLite 重启后旧观察继续投影，工具原文与结果 ID 保持可
 });
 
 test("buildSessionExecSettings 只在提供 onCommandSpawn 时写入该字段", () => {
-  const config = rollConfigSchema.parse({
-    llm: {
-      defaultProvider: "mock",
-      defaultModel: "default-model",
-      providers: { mock: { apiKey: "test" } },
-    },
-    runtime: { model: "runtime-model" },
-    ask: {},
-    agents: { dataDir: "/tmp/roll-engine-test" },
-  });
+  const config = runtimeFixtureConfig({ provider: "mock", modelName: "runtime-model" });
   const onCommandSpawn = () => {};
   const withHook = buildSessionExecSettings({
-    config,
+    settings: config.settings,
     profile: powershellProfile,
     env: { PATH: "/usr/bin" },
     onCommandSpawn,
   });
   assert.equal(withHook.onCommandSpawn, onCommandSpawn);
-  assert.equal(withHook.maxSessions, config.runtime.shell.session.maxSessions);
-  assert.equal(withHook.bufferCapacity, config.runtime.shell.maxCaptureBytes);
+  assert.equal(withHook.maxSessions, config.settings.shell.session.maxSessions);
+  assert.equal(withHook.bufferCapacity, config.settings.shell.maxCaptureBytes);
   const without = buildSessionExecSettings({
-    config,
+    settings: config.settings,
     profile: powershellProfile,
     env: { PATH: "/usr/bin" },
   });
@@ -4607,4 +2502,29 @@ function assertVisibleOrRecoverable(
         : store.getCheckpoint(threadId, checkpoint.previousCheckpointId);
   }
   assert.fail("omitted historical fact must remain available through optional transcript reads");
+}
+
+function runtimeFixtureConfig(input: {
+  readonly settings?: unknown;
+  readonly provider?: string;
+  readonly modelName?: string;
+}) {
+  return {
+    settings: runtimeSettingsSchema.parse(input.settings ?? {}),
+    provider: input.provider ?? "mock",
+    modelName: input.modelName ?? "default-model",
+  };
+}
+
+type FixtureEngineOptions = Omit<
+  ConversationEngineOptions,
+  "settings" | "provider" | "modelName"
+> & {
+  readonly config: ReturnType<typeof runtimeFixtureConfig>;
+};
+function createEngine({ config, ...input }: FixtureEngineOptions): ConversationEngine {
+  return new ConversationEngine({ ...config, ...input });
+}
+function switchModel(engine: ConversationEngine, input: EngineModelSwitch) {
+  return engine.switchModel(input);
 }

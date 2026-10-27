@@ -134,7 +134,11 @@ export const BrowserOperateOutputSchema = z.object({
       recovery: z.boolean().optional(),
       distributions: z
         .record(
-          z.object({ probabilities: z.record(z.number()), confidence: z.number().optional() }),
+          z.string(),
+          z.object({
+            probabilities: z.record(z.string(), z.number()),
+            confidence: z.number().optional(),
+          }),
         )
         .optional(),
       operation: z.string(),

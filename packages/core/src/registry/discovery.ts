@@ -56,7 +56,7 @@ const legacySkillEnvDeclarationSchema = z.object({
 });
 
 const legacySkillEnvDeclarationsSchema = z.object({
-  env: z.record(legacySkillEnvDeclarationSchema).optional(),
+  env: z.record(z.string(), legacySkillEnvDeclarationSchema).optional(),
 });
 
 interface RollAgentManifest {

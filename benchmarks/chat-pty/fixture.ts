@@ -1,6 +1,21 @@
 import { setTimeout as delay } from "node:timers/promises";
-import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
-import { runInkRepl } from "../../packages/core/src/cli/chat/ink/run-ink-repl.ts";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { AgentSession, SessionEvent } from "../../packages/runtime/src/index.ts";
+
+// Keep the deterministic driver identical while loading the selected measured
+// checkout. A static import here would silently measure the harness checkout.
+const targetRoot = process.env.ROLL_CHAT_BENCH_TARGET_ROOT ?? resolve(import.meta.dirname, "../..");
+const targetEntry = process.env.ROLL_CHAT_BENCH_ENTRY ?? "src";
+if (targetEntry !== "src" && targetEntry !== "dist") {
+  throw new Error("ROLL_CHAT_BENCH_ENTRY must be src or dist");
+}
+const inkPath = resolve(
+  targetRoot,
+  `packages/core/${targetEntry}/cli/chat/ink/run-ink-repl.${targetEntry === "dist" ? "js" : "ts"}`,
+);
+const { runInkRepl }: typeof import("../../packages/core/src/cli/chat/ink/run-ink-repl.ts") =
+  await import(pathToFileURL(inkPath).href);
 
 const SCENARIOS = [
   "fixture-ink-cold-start",
@@ -157,6 +172,9 @@ if (!isScenario(scenarioArg)) {
 } else {
   const session = createFixtureSession(scenarioArg);
   const store = {
+    listThreads() {
+      return [];
+    },
     updateTitle() {},
     countMessages() {
       return 0;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { executeWithToolApproval } from "./tool-approval-continuation.ts";
 import type { ApprovalRequest, ToolBridgeContext } from "./build-tools.ts";
-import type { AgentTool } from "@roll-agent/core/types/agent";
+import type { AgentTool } from "../tool-contracts/agent-types.ts";
 
 const agentTool: AgentTool = {
   name: "execute_program",

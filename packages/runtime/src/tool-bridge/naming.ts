@@ -2,13 +2,13 @@ import type { AppOutputContract } from "@roll-agent/protocol/app-output";
 import type {
   AgentRuntimeOwnership,
   AgentSourceType,
-  AgentTransport,
-} from "@roll-agent/core/types/agent";
+  AgentTransportKind,
+} from "../tool-contracts/agent-types.ts";
 import type { ToolAnnotations } from "../types/policy.ts";
 
 export interface ToolRouteMetadata {
   readonly agentSource?: AgentSourceType;
-  readonly transport?: AgentTransport["type"];
+  readonly transport?: AgentTransportKind;
   readonly runtimeOwnership?: AgentRuntimeOwnership;
   readonly annotations?: ToolAnnotations;
   readonly appOutput?: AppOutputContract;

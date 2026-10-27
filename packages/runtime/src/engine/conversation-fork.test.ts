@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { MockLanguageModelV4 } from "ai/test";
-import { rollConfigSchema } from "@roll-agent/core/config/schema";
+import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
 import { ThreadStore } from "../store/thread-store.ts";
 import { scheduledThreadOriginSchema } from "../store/thread-origin.ts";
 import { ConversationEngine } from "./conversation-engine.ts";
@@ -28,23 +28,16 @@ test("engine scheduled creation honors preallocated identity, rejects resume, an
   const store = new ThreadStore(dir);
   let calls = 0;
   const engine = new ConversationEngine({
-    config: rollConfigSchema.parse({
-      ask: {},
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "current-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      agents: { dataDir: join(dir, "agents") },
-      runtime: { shell: { enabled: false } },
-    }),
+    provider: "mock",
+    modelName: "current-model",
+    settings: runtimeSettingsSchema.parse({ shell: { enabled: false } }),
     model: new MockLanguageModelV4({
       doStream: async () => {
         calls += 1;
         throw new Error("unexpected model call");
       },
     }),
-    agents: [],
+
     sources: [],
     store,
     skillLibrary: null,
@@ -103,18 +96,11 @@ test("failed engine fork leaves current conversation intact and no empty derived
   const dir = mkdtempSync(join(tmpdir(), "roll-engine-fork-failure-"));
   const store = new ThreadStore(dir);
   const engine = new ConversationEngine({
-    config: rollConfigSchema.parse({
-      ask: {},
-      llm: {
-        defaultProvider: "mock",
-        defaultModel: "current-model",
-        providers: { mock: { apiKey: "test" } },
-      },
-      agents: { dataDir: join(dir, "agents") },
-      runtime: { shell: { enabled: false } },
-    }),
+    provider: "mock",
+    modelName: "current-model",
+    settings: runtimeSettingsSchema.parse({ shell: { enabled: false } }),
     model: new MockLanguageModelV4(),
-    agents: [],
+
     sources: [],
     store,
     skillLibrary: null,

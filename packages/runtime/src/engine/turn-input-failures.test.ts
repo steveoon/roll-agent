@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import type { SkillLibrary } from "@roll-agent/core/skills/library";
+import type { SkillLibrary } from "../skills/contracts.ts";
 import { AgentSession } from "./agent-session.ts";
 import type { SessionEvent } from "../types/events.ts";
 

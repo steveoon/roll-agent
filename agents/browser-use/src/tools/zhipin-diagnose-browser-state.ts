@@ -69,9 +69,9 @@ const StorageEntrySummarySchema = z.object({
   jsonKind: JsonKindSchema.optional(),
   jsonTopLevelKeys: z.array(z.string()).optional(),
   jsonArrayLength: z.number().int().nonnegative().optional(),
-  numericFields: z.record(z.number()).optional(),
-  booleanFields: z.record(z.boolean()).optional(),
-  arrayLengths: z.record(z.number().int().nonnegative()).optional(),
+  numericFields: z.record(z.string(), z.number()).optional(),
+  booleanFields: z.record(z.string(), z.boolean()).optional(),
+  arrayLengths: z.record(z.string(), z.number().int().nonnegative()).optional(),
 });
 
 const CookieSummarySchema = z.object({
@@ -107,9 +107,9 @@ const StorageCounterDiffSchema = z.object({
   key: z.string(),
   beforePresent: z.boolean(),
   afterPresent: z.boolean(),
-  numericDeltas: z.record(NumericFieldDeltaSchema).optional(),
-  booleanChanges: z.record(BooleanFieldChangeSchema).optional(),
-  arrayLengthDeltas: z.record(ArrayLengthDeltaSchema).optional(),
+  numericDeltas: z.record(z.string(), NumericFieldDeltaSchema).optional(),
+  booleanChanges: z.record(z.string(), BooleanFieldChangeSchema).optional(),
+  arrayLengthDeltas: z.record(z.string(), ArrayLengthDeltaSchema).optional(),
 });
 
 const PageEvaluateSummarySchema = z.object({
