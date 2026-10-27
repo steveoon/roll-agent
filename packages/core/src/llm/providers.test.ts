@@ -620,7 +620,8 @@ describe("resolveLLMCall", () => {
 
     assert.equal(capturedUrl, "https://api.x.ai/v1/responses");
     assert.ok(isRecord(capturedBody));
-    assert.deepEqual(capturedBody.reasoning, { effort: "medium", summary: "auto" });
+    // xAI always returns detailed summaries; the provider no longer sends the deprecated hint.
+    assert.deepEqual(capturedBody.reasoning, { effort: "medium" });
   });
 
   it("serializes Gemini thinking config through generateContent", async () => {
@@ -931,14 +932,14 @@ describe("tool schema compatibility after local ref inlining", () => {
     return body;
   }
 
-  it("google rejects the raw schema but accepts the inlined one", async () => {
+  it("Google receives fully inlined tool schemas from Roll", async () => {
     const model = createProviderModel("google", "gemini-3.8-flash", "k");
-    await assert.rejects(
-      () => captureToolRequest(model, rawSchema),
-      /direct children of root-level/u,
-    );
+    const rawBody = await captureToolRequest(model, rawSchema);
     const body = await captureToolRequest(model, inlined);
     assert.ok(isRecord(body));
+    // Newer Google providers pass these refs through, so Roll must still normalize them.
+    assert.match(JSON.stringify(rawBody), /"\$ref"/u);
+    assert.doesNotMatch(JSON.stringify(body), /"\$ref"/u);
     assert.match(JSON.stringify(body), /locationDistrict/u);
   });
 

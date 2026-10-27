@@ -45,10 +45,16 @@ export function isRecoverableChatGptError(error: unknown): boolean {
       return error.code === "network_error" || error.code === "jwks_unavailable";
     }
     if (APICallError.isInstance(error) && hasBusinessErrorCode(error.data)) return false;
-    if (APICallError.isInstance(error) && error.statusCode !== undefined) {
+    if (
+      APICallError.isInstance(error) &&
+      error.statusCode !== undefined &&
+      (error.statusCode < 200 || error.statusCode >= 300)
+    ) {
       // Only explicit transient transport/service statuses, not 429 (possibly quota).
       return [408, 502, 503, 504].includes(error.statusCode);
     }
+    // SDK body-reading errors retain the successful HTTP status. Only typed
+    // transport evidence in their cause makes them recoverable, not the 2xx itself.
     error = error instanceof Error ? error.cause : undefined;
   }
   return false;

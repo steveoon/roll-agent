@@ -765,8 +765,13 @@ describe("ChatGPT subscription Responses adapter", () => {
     });
     const result = Promise.resolve(model.doGenerate({ prompt, abortSignal: abort.signal }));
     await new Promise<void>((resolve) => setImmediate(resolve));
-    abort.abort(new Error("cancel active HTTP"));
-    await assert.rejects(result, /cancel active HTTP/);
+    const reason = new Error("cancel active HTTP");
+    abort.abort(reason);
+    await assert.rejects(result, (error: unknown) => {
+      assert.ok(APICallError.isInstance(error));
+      assert.equal(error.cause, reason);
+      return true;
+    });
     assert.equal(cancelled, true);
   });
 
