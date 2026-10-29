@@ -1,5 +1,62 @@
 # @roll-agent/core
 
+## 1.0.0
+
+### Major Changes
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Upgrade Zod to 4.6.6 to address oversized-array validation denial of service
+  (GHSA-mrhx-c7xc-m3w5). SDK tool schemas and the exported Core, Runtime, Browser,
+  Companion, and Reply Authority Client schemas now use Zod 4; TypeScript consumers using
+  Zod 3 must migrate their schema definitions and composition. See
+  `docs/how-to-migrate-zod4.md` for the required changes.
+  
+  Preserve nested configuration defaults, YAML key mapping, configuration UI
+  constraints, tool preprocessing/refinements, and application-output validation.
+  Runtime and Relay wire versions and payload formats remain unchanged; Protocol
+  1.6 envelopes retain strict validation and capability checks with Zod 4.6.
+  Protocol now exports `uuidSchema` so Relay can share the frozen UUID validation;
+  existing UUID and timestamp acceptance and Relay schema fingerprints are preserved.
+  Standalone installer builds resolve subpath manifests to the owning package so
+  that the bundled Zod license is included correctly.
+
+### Patch Changes
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Update AI SDK to 7.0.146 and refresh the OpenAI, Anthropic, Google, DeepSeek,
+  Alibaba, and xAI providers. Core and Runtime use provider types 4.0.31. The xAI
+  upgrade retains Roll's existing Responses API integration; configuration keys
+  and model selection remain unchanged.
+  
+  Pin OpenAI to 4.0.59: newer versions filter reasoning efforts using a fixed model
+  list, which would silently drop `none` even when the ChatGPT model catalog
+  advertises it. Preserve catalog-driven thinking settings without changing the
+  subscription transport.
+  
+  Preserve same-turn ChatGPT recovery when the SDK wraps an interrupted response
+  body in a successful-HTTP-status error. Recovery still requires typed transport
+  evidence; parser, authorization, and quota failures remain terminal.
+  
+  Update the shared AI SDK HTTP dependency, undici, to 7.30.1 to include its
+  security fixes. All selected versions satisfy the existing seven-day release
+  cooldown.
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - 修复 Anthropic 严格工具模式拒绝定时任务 schema 中的数组数量、字符串长度和数值范围等约束，导致普通聊天请求失败的问题。仅在发送严格工具定义时将不支持的值约束移到字段描述，保留类型、必填字段和判别分支；Runtime 继续使用原始 schema 完整校验参数，其他 provider 不受影响。
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - 开启 Anthropic 自适应推理时显式请求可展示的推理摘要，修复 Sonnet 5.5、Opus 5.5 等默认省略推理文本的模型在聊天中不显示推理进度的问题。聊天初始化、模型切换与推理等级调整统一使用该配置，保留既有推理强度和界面折叠设置。
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Update the resolved body-parser dependency to 2.4.0 to fix GHSA-27r3-jxmh-p828, a denial-of-service vulnerability in compressed HTTP request parsing.
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - ChatGPT 授权服务配置请求失败时显示 HTTP 状态码，并提示检查 Roll 进程的网络/代理设置。
+
+- [#293](https://github.com/steveoon/roll-agent/pull/293) [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486) Thanks [@steveoon](https://github.com/steveoon)! - Make Runtime independently consumable by removing its reverse dependency on Core. `ConversationEngine` now requires execution-only `RuntimeSettings`, an injected model and its provider/model identity; dynamic Agent integration uses an `AgentHost` instead of Core registries and MCP managers. Static tool sources remain caller-owned. Skills, tool validation and host contracts are available through dedicated leaf exports.
+  
+  Core assembles the existing chat, Runtime service, Companion and scheduler entry points through the new host boundary, preserving CLI configuration, approval, recovery, persistence and wire behavior. Direct Runtime TypeScript consumers must migrate their engine construction and model-switch integration to the new contracts.
+- Updated dependencies [[`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486), [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486), [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486), [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486), [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486), [`635a993`](https://github.com/steveoon/roll-agent/commit/635a993221f4e5364d278676754b388f09209486)]:
+  - @roll-agent/runtime@1.0.0
+  - @roll-agent/protocol@0.10.0
+  - @roll-agent/relay-protocol@0.5.1
+  - @roll-agent/companion@1.0.0
+  - @roll-agent/client-node@0.7.1
+
 ## 0.44.0
 
 ### Minor Changes
