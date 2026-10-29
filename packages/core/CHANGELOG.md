@@ -1,5 +1,13 @@
 # @roll-agent/core
 
+## 1.1.0
+
+### Minor Changes
+
+- [#295](https://github.com/steveoon/roll-agent/pull/295) [`3626d5f`](https://github.com/steveoon/roll-agent/commit/3626d5f88b3372501c8636965f1c42f8215d3b88) Thanks [@steveoon](https://github.com/steveoon)! - 为 ChatGPT 订阅模型新增默认关闭的 Fast 模式，可通过 `runtime.fast-mode`、配置台、`roll chat --fast/--no-fast` 和会话内 `/fast on|off` 控制。根据账号模型目录校验能力，为聊天、Sampling 和压缩发送 priority 请求；切换推理强度及重连保留 Fast 偏好，其他提供商不受影响。Fast 可能增加订阅额度消耗，实际加速由服务端决定；界面标记仅表示请求偏好，不确认服务端加速或计费档位。开启时输入框显示紫色边框和闪电标记，不支持 Unicode 的终端降级为 ASCII 标记；模型切换等成功提示使用低强调样式。
+  
+  全屏聊天支持 Ctrl+G 快捷切换并保留草稿，仅在当前使用 ChatGPT 订阅模型时显示提示并响应按键；快捷键被终端拦截时仍可使用 `/fast`。快捷键与 `/fast` 共用切换状态，快速连续切换以最后一次选择为准，迟到的连接结果不会重新开启 Fast；异步模型切换在提交时重新应用最新 Fast 偏好，保持界面、聊天、Sampling 和压缩参数一致。目录支持的非标准模型 slug 也会在最终请求中保留 priority 参数。重复设置相同 Fast 状态在完成能力校验后不再重切模型，避免无谓重置上下文预算校准，同时保留后续操作取消待完成切换的行为。
+
 ## 1.0.0
 
 ### Major Changes
