@@ -6,7 +6,17 @@ import { isCancel, select } from "@clack/prompts";
 import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
+import {
+  assertChatGptFastModeSupported,
+  withChatGptFastMode,
+} from "../../llm/chatgpt-fast-mode.ts";
+import {
+  createChatFastModeControl,
+  runFastModeCommand,
+  type ChatFastModeControl,
+} from "../chat/fast-mode.ts";
 import { chatGptThinkingLevels, legacyThinkingLevels } from "../../llm/thinking-levels.ts";
+import { resolveAndSwitchChatModel } from "../chat/model-switch.ts";
 import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
 import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
 import { getChatGptAuthService } from "../../auth/chatgpt/service.ts";
@@ -94,6 +104,7 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
+  readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal?: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
   readonly input: Readable;
@@ -368,6 +379,14 @@ export async function runRepl(
         } else log.info("当前连接无需 ChatGPT 授权恢复。");
         continue;
       }
+      if (input === "/fast" || input.startsWith("/fast ")) {
+        const notice = await runFastModeCommand(input.slice("/fast".length), io.fastMode);
+        if (notice !== undefined) {
+          if (notice.tone === "warning") log.warn(notice.text);
+          else log.info(notice.text);
+        }
+        continue;
+      }
       if (input === "/compact") {
         log.debug("chat.repl manual compact requested");
         for await (const event of session.compact("manual")) {
@@ -540,6 +559,10 @@ export default defineCommand({
     provider: { type: "string", description: "本次聊天模型提供商（chatgpt 为实验订阅通道）" },
     model: { type: "string", description: "本次聊天模型；ChatGPT 使用订阅目录的 slug" },
     account: { type: "string", description: "ChatGPT 订阅注册 ID（优先于配置）" },
+    fast: {
+      type: "boolean",
+      description: "开启 ChatGPT Fast 模式（可能增加额度消耗）；--no-fast 关闭",
+    },
     "from-run": { type: "string", description: "基于指定定时运行的快照开始普通对话" },
     attempt: { type: "string", description: "--from-run 的尝试序号（默认最新有关联的尝试）" },
     last: { type: "boolean", description: "继续最近一个会话", default: false },
@@ -570,6 +593,7 @@ export default defineCommand({
       }
       if (args.model !== undefined) runtime.model = args.model;
       if (args.account !== undefined) runtime.chatgptAccountId = args.account;
+      if (args.fast !== undefined) runtime.fastMode = args.fast;
       return { ...loaded, runtime };
     };
     config = applyLlmOverrides(config);
@@ -704,6 +728,7 @@ export default defineCommand({
     let currentProvider = provider;
     let currentModel = modelName;
     let currentThinkingLevel = config.runtime.thinkingLevel;
+    let currentFastMode = config.runtime.fastMode;
     const chatConnection =
       selection.connection ??
       new ChatGptConnection(
@@ -790,6 +815,41 @@ export default defineCommand({
       });
       signalScope.setEngine(engine);
       const chatEngine = engine;
+      const fastMode = createChatFastModeControl({
+        isAvailable: () => currentProvider === "chatgpt",
+        getEnabled: () => currentProvider === "chatgpt" && currentFastMode,
+        prepareEnable: async () => {
+          if (currentProvider !== "chatgpt") {
+            throw new Error("Fast 模式仅适用于 ChatGPT 订阅模型。");
+          }
+          await chatConnection.ensure();
+        },
+        apply: (enabled) => {
+          if (currentProvider !== "chatgpt") {
+            if (enabled) throw new Error("Fast 模式仅适用于 ChatGPT 订阅模型。");
+            currentFastMode = false;
+            return;
+          }
+          assertChatGptFastModeSupported(
+            enabled,
+            chatConnection.models.find(({ slug }) => slug === currentModel),
+          );
+          // The controller already invalidated older requests; preserve calibration on no-op sets.
+          if (enabled === currentFastMode) return;
+          const nextSelection = {
+            ...activeSelection,
+            providerOptions: withChatGptFastMode(activeSelection.providerOptions, enabled),
+            structuredOutputProviderOptions: withChatGptFastMode(
+              activeSelection.structuredOutputProviderOptions,
+              enabled,
+            ),
+          };
+          // Engine switching updates live sessions, Sampling and compaction together.
+          chatEngine.switchModel(nextSelection);
+          activeSelection = nextSelection;
+          currentFastMode = enabled;
+        },
+      });
       sessionPreparation = createChatGptSessionPreparation({
         connection: chatConnection,
         engine: chatEngine,
@@ -887,6 +947,7 @@ export default defineCommand({
               inkReplSpecifier
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
+              fastMode,
               model: modelName,
               connection: chatConnection,
               beforeSend: sessionPreparation.prepare,
@@ -906,9 +967,12 @@ export default defineCommand({
               onThinkingChange: (level) => {
                 const nextOptions =
                   currentProvider === "chatgpt"
-                    ? chatGptThinkingOptions(
-                        level,
-                        chatConnection.models.find(({ slug }) => slug === currentModel),
+                    ? withChatGptFastMode(
+                        chatGptThinkingOptions(
+                          level,
+                          chatConnection.models.find(({ slug }) => slug === currentModel),
+                        ),
+                        currentFastMode,
                       )
                     : thinkingProviderOptions(currentProvider, currentModel, level);
                 session.setProviderOptions(nextOptions);
@@ -974,27 +1038,33 @@ export default defineCommand({
                   if (!choice) {
                     throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
                   }
-                  const nextSelection = await resolveInteractiveChatSwitch(
-                    config,
-                    choice,
-                    selectedEffort ?? currentThinkingLevel,
-                    subscriptionAccountId,
-                    undefined,
-                    chatConnection,
-                  );
-                  const resolution = chatEngine.switchModel(nextSelection);
-                  activeSelection = nextSelection;
-                  currentProvider = choice.provider;
-                  chatConnection.setEnabled(choice.provider === "chatgpt");
-                  currentModel = choice.model;
-                  currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
-                  return {
-                    thinkingLevel: currentThinkingLevel,
-                    id: choice.id,
-                    model: choice.model,
-                    contextWindow: resolution?.window,
-                    ...(resolution ? { contextWindowSource: resolution.source } : {}),
-                  };
+                  return resolveAndSwitchChatModel({
+                    resolve: () =>
+                      resolveInteractiveChatSwitch(
+                        { ...config, runtime: { ...config.runtime, fastMode: currentFastMode } },
+                        choice,
+                        selectedEffort ?? currentThinkingLevel,
+                        subscriptionAccountId,
+                        undefined,
+                        chatConnection,
+                      ),
+                    getFastMode: () => currentFastMode,
+                    commit: (nextSelection) => {
+                      const resolution = chatEngine.switchModel(nextSelection);
+                      activeSelection = nextSelection;
+                      currentProvider = choice.provider;
+                      chatConnection.setEnabled(choice.provider === "chatgpt");
+                      currentModel = choice.model;
+                      currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
+                      return {
+                        thinkingLevel: currentThinkingLevel,
+                        id: choice.id,
+                        model: choice.model,
+                        contextWindow: resolution?.window,
+                        ...(resolution ? { contextWindowSource: resolution.source } : {}),
+                      };
+                    },
+                  });
                 },
                 setAsDefault: async (id) => {
                   const choice = findLlmModelChoice(
@@ -1028,6 +1098,7 @@ export default defineCommand({
             `${renderBannerText(buildBannerLines(banner, process.stdout.columns || 80))}\n`,
           );
           await runRepl(session, store, isNewSession, {
+            fastMode,
             input: process.stdin,
             output: process.stdout,
             connection: chatConnection,

@@ -14,12 +14,10 @@ import type { LineBufferState } from "./line-buffer.ts";
 import { isMouseProtocolInput } from "./mouse-input.ts";
 import { isSlashCommandShaped } from "./commands.ts";
 import { CHAT_CURSOR_REFRESH_EVENT } from "./terminal-output.ts";
+import { displayWidth } from "./display-width.ts";
 
 const PROMPT_BORDER_WIDTH = 2;
 const PROMPT_HORIZONTAL_PADDING = 4;
-const PROMPT_PREFIX_WIDTH = 2;
-const PROMPT_CONTENT_LEFT =
-  PROMPT_BORDER_WIDTH / 2 + PROMPT_HORIZONTAL_PADDING / 2 + PROMPT_PREFIX_WIDTH;
 
 export interface TextPromptAttachmentChip {
   readonly name: string;
@@ -43,6 +41,7 @@ export interface TextPromptProps {
   readonly tip?: string;
   readonly onShortcutsToggle?: () => void;
   readonly autoApprove: boolean;
+  readonly fastMode?: boolean;
   readonly attachments?: readonly TextPromptAttachmentChip[];
   readonly attachmentsPending?: boolean;
   readonly onChange: (value: string) => void;
@@ -90,6 +89,9 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   } = props;
   const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
+  const prefixText = props.fastMode ? `${GLYPHS.fast} ` : "› ";
+  const prefixWidth = displayWidth(prefixText);
+  const contentLeft = PROMPT_BORDER_WIDTH / 2 + PROMPT_HORIZONTAL_PADDING / 2 + prefixWidth;
   const [, setCursorRevision] = useState(0);
   useEffect(() => {
     if (disabled) {
@@ -105,7 +107,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   }, [disabled, stdout]);
   const editorWidth = Math.max(
     1,
-    width - PROMPT_BORDER_WIDTH - PROMPT_HORIZONTAL_PADDING - PROMPT_PREFIX_WIDTH,
+    width - PROMPT_BORDER_WIDTH - PROMPT_HORIZONTAL_PADDING - prefixWidth,
   );
   const [initialEditor] = useState(() => createLineBuffer(value));
   const editorRef = useRef<LineBufferState>(initialEditor);
@@ -315,7 +317,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   setCursorPosition(
     !disabled
       ? {
-          x: PROMPT_CONTENT_LEFT + metrics.cursorColumn,
+          x: contentLeft + metrics.cursorColumn,
           y: promptTop + attachmentRows + 1 + visibleCursorRow,
         }
       : undefined,
@@ -332,10 +334,14 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     ...lines.map((line, index) => {
       const prefix = h(
         Box,
-        { width: PROMPT_PREFIX_WIDTH, flexShrink: 0 },
+        { width: prefixWidth, flexShrink: 0 },
         index === 0
-          ? h(Text, disabled ? { dimColor: true } : { color: "green" }, "› ")
-          : h(Text, null, "  "),
+          ? h(
+              Text,
+              disabled ? { dimColor: true } : { color: props.fastMode ? "magenta" : "green" },
+              prefixText,
+            )
+          : null,
       );
       if (disabled) {
         return h(
@@ -353,13 +359,14 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     { flexDirection: "column", height: visibleBodyRows, overflowY: "hidden" },
     bodyContent,
   );
+  const fastHint = props.fastMode === undefined ? "" : " · Ctrl+G 加速";
   const hintText = disabled
     ? (props.disabledHint ?? "Esc 中断本轮")
     : slashActive
       ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
       : autoApprove
-        ? "Shift+Tab 关闭 · Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · ? 快捷键"
-        : "Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准 · ? 快捷键";
+        ? `Shift+Tab 关闭 · Enter 发送${fastHint} · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · ? 快捷键`
+        : `Enter 发送${fastHint} · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准 · ? 快捷键`;
   // 自定义 disabled 提示是状态变更通知（如中断确认），用暗黄色让反馈落在视线焦点处
   const hintProps =
     disabled && props.disabledHint !== undefined
@@ -444,7 +451,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
       Box,
       {
         borderStyle: "round",
-        borderColor: disabled ? "gray" : "cyan",
+        borderColor: disabled ? "gray" : props.fastMode ? "magenta" : "cyan",
         paddingX: 2,
         height: visibleBodyRows + 2,
         overflowY: "hidden",

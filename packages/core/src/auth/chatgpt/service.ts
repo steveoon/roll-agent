@@ -64,6 +64,8 @@ const modelResponseSchema = z.object({
       visibility: z.string(),
       context_window: z.number().int().positive().optional(),
       supported_reasoning_levels: z.array(z.object({ effort: z.string().min(1) })).optional(),
+      service_tiers: z.array(z.object({ id: z.string() })).nullish(),
+      additional_speed_tiers: z.array(z.string()).nullish(),
     }),
   ),
 });
@@ -157,6 +159,9 @@ export class ChatGptAuthService {
       .map((model) => ({
         slug: model.slug,
         displayName: model.display_name,
+        supportsFastMode:
+          model.service_tiers?.some(({ id }) => id === "priority") === true ||
+          model.additional_speed_tiers?.includes("fast") === true,
         ...(model.context_window === undefined ? {} : { contextWindow: model.context_window }),
         ...(model.supported_reasoning_levels === undefined
           ? {}

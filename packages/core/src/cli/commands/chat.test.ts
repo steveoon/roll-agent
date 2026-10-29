@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { parseArgs } from "citty";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { AgentSession, SessionEvent, ShellProfile } from "@roll-agent/runtime";
 import type { ChatUserInputPrompt, ChatUserInputResult } from "../utils/user-input-prompts.ts";
 import { rollConfigSchema } from "../../config/schema.ts";
-import {
+import chatCommand, {
   CHAT_ENGINE_SURFACES,
   chatHostModeForSurface,
   createChatEngine,
@@ -1134,6 +1135,48 @@ function replFakeSession(id: string): {
   } as unknown as AgentSession;
   return { session, sent: () => sent, isClosed: () => closed };
 }
+
+test("chat Fast CLI flag distinguishes absence from explicit disabling", async () => {
+  const args =
+    typeof chatCommand.args === "function" ? await chatCommand.args() : await chatCommand.args;
+  assert.ok(args);
+  assert.equal(parseArgs([], args).fast, undefined);
+  assert.equal(parseArgs(["--fast"], args).fast, true);
+  assert.equal(parseArgs(["--no-fast"], args).fast, false);
+});
+
+test("basic REPL consumes Fast commands locally and continues accepting messages", async () => {
+  const f = replFakeSession("fast-session");
+  let enabled = false;
+  const changes: boolean[] = [];
+  const input = new PassThrough();
+  const store = { countMessages: () => 1 } as unknown as Parameters<typeof runRepl>[1];
+  const done = runRepl(f.session, store, false, {
+    input,
+    output: sink(),
+    fastMode: {
+      isAvailable: () => true,
+      getEnabled: () => enabled,
+      getRequestedEnabled: () => enabled,
+      setEnabled: async (next) => {
+        enabled = next;
+        changes.push(next);
+        return true;
+      },
+    },
+  });
+  await delay(20);
+  input.write("/fast on\n");
+  await delay(30);
+  input.write("/fast off\n");
+  await delay(30);
+  input.write("hello\n");
+  await delay(30);
+  input.end("exit\n");
+  await done;
+  assert.deepEqual(changes, [true, false]);
+  assert.deepEqual(f.sent(), ["hello"]);
+});
 
 test("runRepl switches sessions via /resume", async () => {
   const first = replFakeSession("s1");

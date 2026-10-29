@@ -274,6 +274,16 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: `runtime:\n  thinking-level: ${DEFAULT_CONFIG.runtime.thinkingLevel}`,
   },
 
+  {
+    path: "runtime.fast-mode",
+    title: "Fast 模式（ChatGPT）",
+    purpose:
+      "为支持 Fast 的 ChatGPT 订阅模型请求更快的生成速度，作用于聊天、MCP sampling 和压缩；可能增加订阅额度消耗。",
+    defaultBehavior:
+      "默认关闭；其他提供商不受影响。开启前会验证账号模型目录中的 Fast 能力，实际速度取决于服务端。",
+    example: "runtime:\n  fast-mode: true",
+  },
+
   // Agent bootstrap
   {
     path: "runtime.agent-bootstrap",

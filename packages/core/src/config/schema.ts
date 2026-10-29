@@ -106,6 +106,7 @@ export const runtimeConfigSchema = z.object({
   threadsDir: z.string().default("~/.roll-agent/threads"),
   contextWindow: z.number().int().min(1).optional(),
   thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
+  fastMode: z.boolean().default(false),
   approval: runtimeApprovalConfigSchema.prefault({}),
   compaction: runtimeCompactionConfigSchema.prefault({}),
   agentBootstrap: runtimeAgentBootstrapConfigSchema.prefault({}),

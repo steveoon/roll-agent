@@ -6,6 +6,8 @@ import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { render } from "ink-testing-library";
 import { cursorPositionOf, TextPrompt } from "./text-prompt.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
+import { displayWidth } from "./display-width.ts";
 
 const MIXED_WIDTH_DRAFT =
   "这里被丢弃的“孤儿消息”属于父 thread 已经删除的 session，本来就无法通过正常界面恢复，不会影响仍存在的旧对话。";
@@ -34,6 +36,7 @@ interface HarnessProps {
   readonly viewportRows?: number;
   readonly maxRows?: number;
   readonly showHint?: boolean;
+  readonly fastMode?: boolean;
 }
 
 function Harness(props: HarnessProps): ReactElement {
@@ -52,6 +55,7 @@ function Harness(props: HarnessProps): ReactElement {
     slashActive,
     slashPopupActive: props.slashPopupActive ?? slashActive,
     autoApprove: false,
+    fastMode: props.fastMode ?? false,
     onChange: (next: string) => {
       props.sink.changes.push(next);
       if (props.ignoreChanges !== true) {
@@ -77,6 +81,32 @@ async function type(stdin: Stdin, ...chunks: readonly string[]): Promise<void> {
     await delay(10);
   }
 }
+
+test("Fast prompt keeps its width and draft cursor when toggled with mixed-width input", async () => {
+  const sink = makeSink();
+  const props = { sink, initial: "中文🙂abcdefghi", width: 20, showHint: false };
+  const { stdin, lastFrame, rerender, unmount } = render(h(Harness, props));
+  try {
+    await delay(10);
+    await type(stdin, "\x1b[D");
+    rerender(h(Harness, { ...props, fastMode: true }));
+    await delay(20);
+    const frame = stripVTControlCharacters(lastFrame() ?? "");
+    assert.ok(frame.includes(`${GLYPHS.fast} 中文🙂`));
+    for (const line of frame.split("\n")) {
+      assert.equal(displayWidth(line), props.width, `prompt border must stay aligned: ${line}`);
+    }
+    await type(stdin, "X");
+    assert.equal(sink.value, "中文🙂abcdefghXi");
+    rerender(h(Harness, props));
+    await delay(20);
+    assert.ok(!stripVTControlCharacters(lastFrame() ?? "").includes(GLYPHS.fast));
+    await type(stdin, "Y", "\r");
+    assert.deepEqual(sink.submitted, ["中文🙂abcdefghXYi"]);
+  } finally {
+    unmount();
+  }
+});
 
 test("left arrow moves cursor so insertion lands mid-string", async () => {
   const sink = makeSink();

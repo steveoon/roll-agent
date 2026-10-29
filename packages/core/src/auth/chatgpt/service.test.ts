@@ -15,7 +15,7 @@ const keys = await generateKeyPair("RS256");
 const wrongKeys = await generateKeyPair("RS256");
 const jwk = { ...(await exportJWK(keys.publicKey)), kid: "fixture", alg: "RS256", use: "sig" };
 
-async function fixture() {
+async function fixture(modelCapabilities: Record<string, unknown> = {}) {
   const directory = mkdtempSync(resolve(tmpdir(), "roll-chatgpt-auth-"));
   const store = new ChatGptCredentialStore(directory);
   const authorizationUrls: URL[] = [];
@@ -60,6 +60,7 @@ async function fixture() {
             visibility: "list",
             context_window: 128000,
             supported_reasoning_levels: [{ effort: "low", description: "Fast" }, { effort: "max" }],
+            ...modelCapabilities,
           },
           { slug: "hidden", display_name: "Hidden", visibility: "hidden" },
           { slug: "model-a", display_name: "Model A", visibility: "list" },
@@ -200,6 +201,24 @@ async function fixture() {
   };
 }
 
+test("model catalog exposes and caches Fast capability only from advertised speed tiers", async () => {
+  for (const capabilities of [
+    { service_tiers: [{ id: "priority", name: "Fast" }] },
+    { additional_speed_tiers: ["fast"] },
+  ]) {
+    const f = await fixture(capabilities);
+    try {
+      await f.login();
+      const models = await f.service.models();
+      assert.equal(models.find(({ slug }) => slug === "model-b")?.supportsFastMode, true);
+      assert.equal(models.find(({ slug }) => slug === "model-a")?.supportsFastMode, false);
+      assert.deepEqual(f.service.cachedModels(), models);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test("discovery HTTP failure reports a safe diagnostic without opening the browser", async () => {
   const directory = mkdtempSync(resolve(tmpdir(), "roll-chatgpt-discovery-"));
   const upstreamBody = "fixture-private-upstream-body";
@@ -260,8 +279,9 @@ test("dynamic registration, PKCE, signature validation, protected storage and sa
         displayName: "Model B",
         contextWindow: 128000,
         reasoningEfforts: ["low", "max"],
+        supportsFastMode: false,
       },
-      { slug: "model-a", displayName: "Model A" },
+      { slug: "model-a", displayName: "Model A", supportsFastMode: false },
     ]);
     const status = await f.service.status();
     assert.equal(status.accounts[0]?.authorized, true);

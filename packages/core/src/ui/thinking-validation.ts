@@ -13,6 +13,11 @@ export function validateUiThinkingConfig(
     provider === "chatgpt"
       ? getModels(config.runtime.chatgptAccountId).find(({ slug }) => slug === config.runtime.model)
       : undefined;
+  if (config.runtime.fastMode && model?.supportsFastMode === false) {
+    throw new Error(
+      "Config validation failed:\n  - runtime.fastMode: 当前 ChatGPT 模型不支持 Fast 模式。",
+    );
+  }
   // Missing model/effort data is unknown, not evidence that only the legacy four levels exist.
   if (provider === "chatgpt" && model?.reasoningEfforts === undefined) return;
   const options = provider === "chatgpt" ? chatGptThinkingLevels(model) : legacyThinkingLevels;

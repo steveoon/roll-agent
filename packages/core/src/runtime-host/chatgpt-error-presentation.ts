@@ -24,6 +24,10 @@ const PRESENTATIONS = {
     message: "当前模型不支持所选推理强度，请使用 /effort 或调整压缩推理强度。",
     invalidatesConnection: false,
   },
+  fast: {
+    message: "当前账号的模型未提供 Fast 模式，请使用 /fast off 或关闭 runtime.fast-mode。",
+    invalidatesConnection: false,
+  },
   rateLimit: {
     message: "ChatGPT 请求受到限流或额度限制，请查看账号额度并稍后重试。",
     invalidatesConnection: false,
@@ -75,6 +79,7 @@ const CODE_PRESENTATIONS: Readonly<Record<string, keyof typeof PRESENTATIONS>> =
   subscription_sharing_unsupported_capability: "model",
   subscription_sharing_route_not_supported: "model",
   unsupported_effort: "effort",
+  unsupported_fast_mode: "fast",
   rate_limit_exceeded: "rateLimit",
   network_error: "network",
   jwks_unavailable: "network",

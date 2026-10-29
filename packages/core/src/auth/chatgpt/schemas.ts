@@ -19,6 +19,7 @@ export const chatGptModelSchema = z.object({
   displayName: z.string().min(1),
   contextWindow: z.number().int().positive().optional(),
   reasoningEfforts: z.array(z.string().min(1)).optional(),
+  supportsFastMode: z.boolean().optional(),
 });
 export const chatGptLoginStates = [
   "waiting",

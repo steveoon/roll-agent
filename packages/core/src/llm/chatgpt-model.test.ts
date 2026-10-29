@@ -7,6 +7,117 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-
 import { createChatGptModel } from "./chatgpt-model.ts";
 import { isRecoverableChatGptError } from "./chatgpt-recovery.ts";
 import { chatGptThinkingOptions } from "../runtime-host/chatgpt-resolution.ts";
+import { withChatGptFastMode } from "./chatgpt-fast-mode.ts";
+
+for (const modelId of ["gpt-6.1-sol", "subscription-slug"]) {
+  it(`serializes Fast for ${modelId} in streaming, Sampling and structured compaction`, async () => {
+    for (const enabled of [true, false]) {
+      const captured: unknown[] = [];
+      const model = createChatGptModel({
+        modelId,
+        getAccessToken: async () => "fixture",
+        fetch: async (url, init) => {
+          assert.equal(String(url), "https://api.openai.com/v1/responses");
+          captured.push(JSON.parse(String(init?.body)));
+          const done = completion();
+          return sse([
+            ...events('{"summary":"ok"}', false),
+            { ...done, response: { ...done.response, service_tier: "default" } },
+          ]);
+        },
+      });
+      const providerOptions = withChatGptFastMode(
+        modelId === "subscription-slug" ? undefined : chatGptThinkingOptions("low"),
+        enabled,
+      );
+      const parts = await collect((await model.doStream({ prompt, providerOptions })).stream);
+      assert.equal(
+        parts.some((part) => part.type === "error"),
+        false,
+      );
+      assert.equal(
+        parts.some(
+          (part) =>
+            part.type === "stream-start" &&
+            part.warnings.some(
+              (warning) => warning.type === "unsupported" && warning.feature === "serviceTier",
+            ),
+        ),
+        false,
+      );
+      await generateText({ model, prompt: "Sampling", providerOptions });
+      const result = await generateText({
+        model,
+        prompt: "Summarize",
+        providerOptions,
+        output: Output.object({ schema: z.object({ summary: z.string() }) }),
+      });
+      assert.deepEqual(result.output, { summary: "ok" });
+      assert.equal(captured.length, 3);
+      for (const request of captured) {
+        assert.ok(isRecord(request));
+        assert.equal(Object.hasOwn(request, "service_tier"), enabled);
+        assert.equal(request.service_tier, enabled ? "priority" : undefined);
+        assert.equal(request.model, modelId);
+        if (modelId !== "subscription-slug") {
+          assert.ok(isRecord(request.reasoning));
+          assert.equal(request.reasoning.effort, "low");
+        }
+        assert.equal(request.stream, true);
+        assert.equal(request.store, false);
+      }
+      assert.equal(providerOptions.openai?.serviceTier, enabled ? "priority" : undefined);
+    }
+  });
+}
+
+it("isolates Fast from ordinary calls sharing a model while token retrieval finishes out of order", async () => {
+  let finishFirst: (() => void) | undefined;
+  let firstStarted: (() => void) | undefined;
+  const firstToken = new Promise<void>((resolve) => {
+    finishFirst = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  let tokenReads = 0;
+  const captured: unknown[] = [];
+  const model = createChatGptModel({
+    modelId: "subscription-slug",
+    getAccessToken: async () => {
+      if (++tokenReads === 1) {
+        assert.ok(firstStarted);
+        firstStarted();
+        await firstToken;
+      }
+      return "fixture";
+    },
+    fetch: async (_url, init) => {
+      captured.push(JSON.parse(String(init?.body)));
+      return sse(events());
+    },
+  });
+  const fastOptions = withChatGptFastMode(undefined, true);
+  const fast = model.doStream({ prompt, providerOptions: fastOptions });
+  try {
+    await started;
+    const ordinary = await model.doStream({ prompt });
+    await collect(ordinary.stream);
+    assert.ok(finishFirst);
+    finishFirst();
+    await collect((await fast).stream);
+    assert.equal(captured.length, 2);
+    const [normalRequest, fastRequest] = captured;
+    assert.ok(isRecord(normalRequest));
+    assert.ok(isRecord(fastRequest));
+    assert.equal(Object.hasOwn(normalRequest, "service_tier"), false);
+    assert.equal(fastRequest.service_tier, "priority");
+    assert.equal(fastRequest.model, "subscription-slug");
+    assert.equal(fastOptions.openai?.serviceTier, "priority");
+  } finally {
+    finishFirst?.();
+  }
+});
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

@@ -6,6 +6,7 @@ import type { EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { getChatGptAuthService } from "../auth/chatgpt/service.ts";
 import { createChatGptModel } from "../llm/chatgpt-model.ts";
+import { assertChatGptFastModeSupported, withChatGptFastMode } from "../llm/chatgpt-fast-mode.ts";
 import { providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
 import { chatGptThinkingLevels } from "../llm/thinking-levels.ts";
 import type { LlmModelChoice } from "../llm/model-choices.ts";
@@ -72,9 +73,11 @@ export async function resolveInteractiveChatLlm(
       options.connection?.models ?? (accountId ? (auth.cachedModels?.(accountId) ?? []) : []);
     const modelName = config.runtime.model ?? "未选择 ChatGPT 模型";
     const connection = options.connection ?? new ChatGptConnection(auth, accountId, models);
-    const effortOptions = (level: RollConfig["runtime"]["thinkingLevel"]) => ({
-      openai: { reasoningEffort: level === "off" ? "none" : level },
-    });
+    const effortOptions = (level: RollConfig["runtime"]["thinkingLevel"]) =>
+      withChatGptFastMode(
+        { openai: { reasoningEffort: level === "off" ? "none" : level } },
+        config.runtime.fastMode,
+      );
     const model = wrapLanguageModel({
       model: createChatGptModel({
         modelId: modelName,
@@ -92,6 +95,10 @@ export async function resolveInteractiveChatLlm(
               `当前账号不提供模型 "${modelName}"；请使用 /model 选择可用模型，会话和输入已保留。`,
             );
           }
+          assertChatGptFastModeSupported(
+            params.providerOptions?.openai?.serviceTier === "priority",
+            live,
+          );
           const effort = params.providerOptions?.openai?.reasoningEffort;
           const allowed = chatGptThinkingLevels(live).map((level) =>
             level === "off" ? "none" : level,
@@ -135,6 +142,7 @@ export async function resolveInteractiveChatLlm(
       `当前 ChatGPT 账号不提供模型 "${modelName}"。请运行 roll auth chatgpt models --account ${accountId} 后重新选择。`,
     );
   }
+  assertChatGptFastModeSupported(config.runtime.fastMode, selectedModel);
   if (options.enableRecovery) {
     // Startup model selection and deferred startup share live model/effort authorization,
     // including after recovery refreshes the catalog. Noninteractive resolution is unchanged.
@@ -164,10 +172,16 @@ export async function resolveInteractiveChatLlm(
       modelId: modelName,
       getAccessToken: (signal) => auth.getAccessToken(accountId, signal),
     }),
-    providerOptions: chatGptThinkingOptions(config.runtime.thinkingLevel, selectedModel),
-    structuredOutputProviderOptions: chatGptThinkingOptions(
-      config.runtime.compaction.thinkingLevel ?? config.runtime.thinkingLevel,
-      selectedModel,
+    providerOptions: withChatGptFastMode(
+      chatGptThinkingOptions(config.runtime.thinkingLevel, selectedModel),
+      config.runtime.fastMode,
+    ),
+    structuredOutputProviderOptions: withChatGptFastMode(
+      chatGptThinkingOptions(
+        config.runtime.compaction.thinkingLevel ?? config.runtime.thinkingLevel,
+        selectedModel,
+      ),
+      config.runtime.fastMode,
     ),
   };
 }

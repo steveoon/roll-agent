@@ -1,4 +1,6 @@
 import { ConnectionNotice } from "./connection-notice.ts";
+import { runFastModeCommand, type ChatFastModeControl } from "../fast-mode.ts";
+import type { ChatNotice } from "../notice.ts";
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import { useChatConnection } from "./use-chat-connection.ts";
 import { randomUUID } from "node:crypto";
@@ -97,6 +99,7 @@ export interface ChatModelSwitching {
 }
 
 export interface ChatAppProps {
+  readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
   readonly session: AgentSession;
@@ -171,10 +174,10 @@ export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键"
 
 const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
-function helpText(): string {
+function helpText(fastModeAvailable: boolean): string {
   return [
     ...SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`),
-    "快捷键: Ctrl+T 释放/恢复鼠标 · Ctrl+Y 复制本轮对话",
+    `快捷键: ${fastModeAvailable ? "Ctrl+G 切换 Fast（也可 /fast） · " : ""}Ctrl+T 释放/恢复鼠标 · Ctrl+Y 复制本轮对话`,
   ].join("\n");
 }
 
@@ -272,6 +275,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
     ...(props.connection ? { connection: props.connection } : {}),
+    ...(props.fastMode ? { fastMode: props.fastMode } : {}),
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
@@ -293,6 +297,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
 function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const { session, model, onUserSubmit, onExit } = props;
   const connection = useChatConnection(props.connection);
+  const fastModeAvailable = props.fastMode?.isAvailable() ?? false;
   const windowSize = useWindowSize();
   const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
   const contextWindow = session.getContextWindow();
@@ -353,8 +358,15 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const modelPickerRequest = useRef(0);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const modelSwitching = props.modelSwitching;
-  const notice = (text: string): void => {
-    commitHistory({ kind: "notice", id: randomUUID(), text });
+  const notice = (text: string, tone: ChatNotice["tone"] = "warning"): void => {
+    commitHistory({ kind: "notice", id: randomUUID(), text, tone });
+  };
+  const changeFastMode = (argument = ""): void => {
+    runFastModeCommand(argument, props.fastMode).then((result) => {
+      if (result !== undefined) {
+        commitHistory({ kind: "notice", id: randomUUID(), ...result }, true);
+      }
+    });
   };
   const openModelPicker = (): boolean => {
     if (!modelSwitching) {
@@ -418,6 +430,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         props.onModelChanged(result.model, result.thinkingLevel ?? state.status.thinkingLevel);
         notice(
           `已切换到 ${result.id}（${formatContextWindowNotice(result.contextWindow, result.contextWindowSource)}，仅本次 roll chat 生效）`,
+          "info",
         );
         setModelPicker({
           stage: MODEL_PICKER_STAGES.confirmDefault,
@@ -460,7 +473,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     modelSwitching.setAsDefault(chosenId).then(
       (text) => {
         setModelPicker(undefined);
-        notice(text);
+        notice(text, "info");
       },
       (error: unknown) => {
         setModelPicker(undefined);
@@ -489,7 +502,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const copyLastRound = (): void => {
     const text = lastRoundCopyText(displayHistory);
     if (text === undefined) {
-      commitHistory({ kind: "notice", id: randomUUID(), text: "暂无可复制的消息" });
+      notice("暂无可复制的消息", "info");
       return;
     }
     const copy = props.copyToClipboard ?? ((value: string) => copyTextToClipboard(value, stdout));
@@ -498,6 +511,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         kind: "notice",
         id: randomUUID(),
         text: ok ? "已复制本轮对话" : "复制失败,请重试",
+        tone: ok ? "info" : "warning",
       });
     });
   };
@@ -549,6 +563,15 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     }
     if (state.phase === CHAT_PHASES.busy && key.escape && !key.meta) {
       cancel();
+    } else if (key.ctrl && !key.meta && !key.shift && input === "g") {
+      if (
+        fastModeAvailable &&
+        state.phase === CHAT_PHASES.idle &&
+        !layout.tooSmall &&
+        (key.eventType === undefined || key.eventType === "press")
+      ) {
+        changeFastMode();
+      }
     } else if (key.tab && key.shift) {
       toggleAutoMode();
     } else if (key.meta && input === ".") {
@@ -690,7 +713,11 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       if (props.connection) {
         // The live failed snapshot owns recovery feedback; never append duplicate history.
         props.connection.retry().catch(() => {});
-      } else notice("当前连接无需 ChatGPT 授权恢复。");
+      } else notice("当前连接无需 ChatGPT 授权恢复。", "info");
+      return;
+    }
+    if (name === "/fast") {
+      changeFastMode(parts.slice(1).join(" "));
       return;
     }
     if (name === "/compact") {
@@ -710,7 +737,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     if (name === "/effort") {
       const levels = thinkingLevels();
       if (arg === "") {
-        notice(`当前推理强度：${level}；可选档位：${levels.join(" · ") || "无"}`);
+        notice(`当前推理强度：${level}；可选档位：${levels.join(" · ") || "无"}`, "info");
       } else if (arg !== "off" && isThinkingLevel(arg) && levels.includes(arg)) {
         setThinking(arg);
       } else {
@@ -746,6 +773,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       commitHistory({
         kind: "notice",
         id: randomUUID(),
+        tone: "info",
         text:
           next === "expanded"
             ? `已完成的思考将完整显示${SHOW_THINK_SCOPE_HINT}`
@@ -756,7 +784,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     if (name === "/diff") {
       const next = resolveDiffDisplayToggle(arg, state.diffDisplay);
       setDiffDisplay(next);
-      commitHistory({ kind: "notice", id: randomUUID(), text: diffDisplayNotice(next) });
+      notice(diffDisplayNotice(next), "info");
       return;
     }
     if (name === "/auto") {
@@ -796,7 +824,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     if (name === "/help") {
-      commitHistory({ kind: "notice", id: randomUUID(), text: helpText() });
+      notice(helpText(fastModeAvailable), "info");
       return;
     }
     if (name === "/exit") {
@@ -937,6 +965,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                   setShortcutsOpen((current) => !current);
                 },
                 autoApprove: state.status.autoApprove,
+                ...(fastModeAvailable ? { fastMode: props.fastMode?.getEnabled() ?? false } : {}),
                 attachments,
                 attachmentsPending: clipboardPending,
                 onChange: setDraft,
@@ -1014,7 +1043,11 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       Box,
       { flexShrink: 0, marginTop: turnActivity === undefined ? 0 : 1 },
       turnActivity === undefined
-        ? h(StatusLine, { status: state.status, width: layout.columns, connection })
+        ? h(StatusLine, {
+            status: state.status,
+            width: layout.columns,
+            connection,
+          })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns, connection }),
     ),
     h(ConnectionNotice, { snapshot: connection, width: layout.columns }),
@@ -1026,7 +1059,11 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
           maxRows: layout.popupRows,
         })
       : shortcutsVisible
-        ? h(ShortcutsPanel, { width: layout.columns, maxRows: layout.popupRows })
+        ? h(ShortcutsPanel, {
+            width: layout.columns,
+            maxRows: layout.popupRows,
+            fastModeAvailable,
+          })
         : null,
     footer,
   );
