@@ -18,6 +18,7 @@ import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { BannerLine } from "../banner.ts";
 import type { DiffDisplayMode } from "../diff-display.ts";
+import type { ChatNotice } from "../notice.ts";
 
 export interface ToolRowState {
   readonly toolCallId: string;
@@ -73,7 +74,13 @@ export type HistoryItem =
       readonly text: string;
       readonly reason: TurnCancelledReason;
     }
-  | { readonly kind: "notice"; readonly id: string; readonly text: string }
+  | {
+      readonly kind: "notice";
+      readonly id: string;
+      readonly text: string;
+      /** Omitted on existing operational warnings. */
+      readonly tone?: ChatNotice["tone"];
+    }
   | { readonly kind: "error"; readonly id: string; readonly message: string };
 
 export interface LiveState {

@@ -48,6 +48,36 @@ runtime:
 
 默认仍为 `medium`。更高强度可能增加延迟和订阅用量，不保证每个任务效果更好；`max` 不代表固定推理 token 数。
 
+## Fast 模式
+
+支持 Fast 的订阅模型可以请求更快的生成速度。默认关闭，可能增加订阅额度消耗，实际速度由服务端决定。
+
+```bash
+roll chat --provider chatgpt --model <模型 slug> --fast
+roll chat --no-fast  # 本次覆盖配置中的 Fast 开关
+```
+
+使用 ChatGPT 订阅模型且全屏聊天输入区空闲时，按 **Ctrl+G** 开启或关闭 Fast，已输入的草稿会保留。切到其他提供商后，输入区、快捷键面板及 `/help` 不再提示 Ctrl+G，按键也不会改变 Fast 偏好。也可用 `/fast on`、`/fast off`，不带参数的 `/fast` 切换开关；基础 REPL 使用这些命令。
+
+若 Ctrl+G 被系统、终端或终端复用器的快捷键拦截，Roll 无法可靠检测或覆盖该绑定；请改用 `/fast on`、`/fast off`，或自行调整冲突的软件设置。Roll 不注册系统全局快捷键，目前也不提供自定义 Fast 快捷键配置。
+
+开启时，全屏聊天输入框使用紫色边框，左侧显示 `⚡`；不支持 Unicode 的终端（包括旧 Windows 控制台）降级为 `>>`。切换推理强度、模型、恢复会话或重连会保留偏好；切到其他提供商时不发送 Fast 参数。
+要让后续聊天和定时任务默认开启，在 `roll ui` 的 Runtime 页面设置 **Fast 模式（ChatGPT）**，或保存：
+
+```yaml
+runtime:
+  provider: chatgpt
+  model: <支持 Fast 的模型 slug>
+  fast-mode: true
+```
+
+Fast 同时应用于聊天、MCP Sampling 和上下文压缩，不改变推理强度。Roll 根据当前账号模型目录中的
+`service_tiers`（`priority`）或 `additional_speed_tiers`（`fast`）判断支持情况；未声明支持的模型会明确报错，
+可用 `/fast off` 恢复普通请求。切换到不支持 Fast 的订阅模型后，也需要关闭 Fast 才能继续请求。
+
+开启时发送 `service_tier: "priority"`，关闭时省略该字段。输入框标记表示请求偏好；返回的
+`service_tier` 可能是 `default`，Roll 不据此自动关闭 Fast，也不把它作为加速成功或计费档位的确认。
+
 `runtime.provider/model/chatgptAccountId` 是聊天和定时任务共用的默认选择，`/model` 的“设为默认”和配置台保存都会影响后续任务。旧 `chat --server`、Runtime 服务和 Companion 暂不支持订阅，使用订阅默认值时会拒绝新请求；保存前会提示此边界。`roll ask` 独立使用 `llm.defaultProvider` 和 API Key，聊天切换到订阅不会阻断它。未支持入口和额度错误不会自动改走付费 API Key。
 
 当订阅聊天配置为 `xhigh/max` 时，独立 `ask/run` 命令仍使用原有 API 模型；其 API Sampling 明确提示使用默认 `medium`，不把订阅高档位发送给 API，也不切换授权通道。API 聊天自身配置不支持的档位仍会报错。

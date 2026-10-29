@@ -9,6 +9,8 @@ import type { HistoryItem } from "./state.ts";
 import { displayWidth } from "./display-width.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { DiffDisplayMode } from "../diff-display.ts";
+import { CHAT_NOTICE_TONES } from "../notice.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
 
 const REASONING_BODY = "先检查输入状态，再定位工具调用边界。";
 
@@ -162,15 +164,24 @@ test("tool 行的 args 在窄终端里单行截断，不整体掉到下一行", 
   }
 });
 
+test("informational feedback is quiet while warnings keep their warning prefix", () => {
+  for (const tone of CHAT_NOTICE_TONES) {
+    const frame = renderFrame({ kind: "notice", id: tone, text: "模型切换结果", tone });
+    const prefix = tone === "info" ? GLYPHS.info : GLYPHS.warning;
+    assert.equal(frame, `${prefix} 模型切换结果`);
+  }
+});
+
 test("user / notice / error 行的长文本在固定宽度内换行，前缀与空格完整保留", () => {
   const long =
     "请用 roll__write_file 新建 .superpowers/kai-big.txt，内容 60 行，第 N 行是 row N（N 从 1 到 60），不要问我直接写，然后再检查一下结果。";
   const items: HistoryItem[] = [
     { kind: "user", id: "u-long", text: long },
     { kind: "notice", id: "n-long", text: long },
+    { kind: "notice", id: "i-long", text: long, tone: "info" },
     { kind: "error", id: "e-long", message: long },
   ];
-  const prefixes = ["▌ ", "⚠ ", "✗ "];
+  const prefixes = ["▌ ", `${GLYPHS.warning} `, `${GLYPHS.info} `, "✗ "];
   items.forEach((item, index) => {
     const { lastFrame, unmount } = render(h(Box, { width: 40 }, h(HistoryItemView, { item })));
     try {

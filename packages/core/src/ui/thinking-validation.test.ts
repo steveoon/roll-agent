@@ -28,6 +28,35 @@ function fixture() {
   };
 }
 
+test("UI Fast preview/save rejects unsupported models and persists the explicit supported preference", async () => {
+  const f = fixture();
+  let supportsFastMode = false;
+  try {
+    const controller = createRollUiRuntimeController({
+      configPath: f.configPath,
+      getChatGptModels: () => [{ slug: "fixture", displayName: "Fixture", supportsFastMode }],
+    });
+    const request = {
+      mode: "structured" as const,
+      expectedRevision: f.snapshot().revision,
+      persisted: { ...f.initial, runtime: { ...f.initial.runtime, fastMode: true } },
+    };
+    const before = readFileSync(f.configPath, "utf8");
+    assert.throws(() => controller.previewConfig(request), /不支持 Fast/);
+    assert.throws(() => controller.saveConfig(request), /不支持 Fast/);
+    assert.equal(readFileSync(f.configPath, "utf8"), before);
+    supportsFastMode = true;
+    await controller.previewConfig(request);
+    await controller.saveConfig(request);
+    assert.equal(
+      validateConfigText(readFileSync(f.configPath, "utf8"), f.configPath).runtime.fastMode,
+      true,
+    );
+  } finally {
+    f.close();
+  }
+});
+
 test("UI preview/save resolve environment references and preserve the original YAML values", async () => {
   const env = {
     ROLL_P2_PROVIDER: "chatgpt",

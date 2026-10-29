@@ -343,63 +343,86 @@ export function createChatGptModel(options: {
   fetch?: typeof globalThis.fetch;
 }): LanguageModelV4 {
   const send = options.fetch ?? globalThis.fetch;
-  const authenticatedFetch: typeof globalThis.fetch = async (url, init) => {
-    const target = new URL(url instanceof Request ? url.url : String(url));
-    if (target.origin !== "https://api.openai.com" || target.pathname !== "/v1/responses") {
-      throw new Error("ChatGPT token can only be sent to the official Responses endpoint.");
-    }
-    init?.signal?.throwIfAborted();
-    const token = await accessTokenWithAbort(
-      () => options.getAccessToken(init?.signal ?? undefined),
-      init?.signal,
-    );
-    init?.signal?.throwIfAborted();
-    const headers = new Headers(init?.headers);
-    headers.set("Authorization", `Bearer ${token}`);
-    if (typeof init?.body !== "string") {
-      throw new Error("ChatGPT Responses requests require a JSON body.");
-    }
-    const body: unknown = JSON.parse(init.body);
-    if (!isRecord(body)) throw new Error("Invalid ChatGPT Responses request body.");
-    for (const field of forbiddenBodyFields) delete body[field];
-    body.store = false;
-    body.stream = true;
-    try {
-      const response = await send(url, {
-        ...init,
-        redirect: "error",
-        headers,
-        body: JSON.stringify(body),
-      });
-      return guardChatGptResponseBody(response, init?.signal, options.onNetworkError);
-    } catch (cause) {
+  const createAuthenticatedFetch =
+    (priority: boolean): typeof globalThis.fetch =>
+    async (url, init) => {
+      const target = new URL(url instanceof Request ? url.url : String(url));
+      if (target.origin !== "https://api.openai.com" || target.pathname !== "/v1/responses") {
+        throw new Error("ChatGPT token can only be sent to the official Responses endpoint.");
+      }
       init?.signal?.throwIfAborted();
-      const error = new ChatGptAuthError(
-        "network_error",
-        "ChatGPT 网络连接中断，无法确认请求是否已被接收；输入已保留，请恢复网络后重试。",
-        undefined,
-        undefined,
-        { cause },
+      const token = await accessTokenWithAbort(
+        () => options.getAccessToken(init?.signal ?? undefined),
+        init?.signal,
       );
-      options.onNetworkError?.(error);
-      throw new APICallError({
-        message: error.message,
-        url: target.toString(),
-        requestBodyValues: undefined,
-        isRetryable: false,
-        cause: error,
-      });
-    }
+      init?.signal?.throwIfAborted();
+      const headers = new Headers(init?.headers);
+      headers.set("Authorization", `Bearer ${token}`);
+      if (typeof init?.body !== "string") {
+        throw new Error("ChatGPT Responses requests require a JSON body.");
+      }
+      const body: unknown = JSON.parse(init.body);
+      if (!isRecord(body)) throw new Error("Invalid ChatGPT Responses request body.");
+      for (const field of forbiddenBodyFields) delete body[field];
+      body.store = false;
+      body.stream = true;
+      if (priority) body.service_tier = "priority";
+      try {
+        const response = await send(url, {
+          ...init,
+          redirect: "error",
+          headers,
+          body: JSON.stringify(body),
+        });
+        return guardChatGptResponseBody(response, init?.signal, options.onNetworkError);
+      } catch (cause) {
+        init?.signal?.throwIfAborted();
+        const error = new ChatGptAuthError(
+          "network_error",
+          "ChatGPT 网络连接中断，无法确认请求是否已被接收；输入已保留，请恢复网络后重试。",
+          undefined,
+          undefined,
+          { cause },
+        );
+        options.onNetworkError?.(error);
+        throw new APICallError({
+          message: error.message,
+          url: target.toString(),
+          requestBodyValues: undefined,
+          isRetryable: false,
+          cause: error,
+        });
+      }
+    };
+  const createSdkModel = (priority: boolean): LanguageModelV4 =>
+    createOpenAI({
+      // The SDK requires an API key to serialize headers. It is always replaced
+      // before the only HTTP transport, and never reads OPENAI_API_KEY/BASE_URL.
+      apiKey: "chatgpt-subscription-transport",
+      baseURL: "https://api.openai.com/v1",
+      fetch: createAuthenticatedFetch(priority),
+    }).responses(options.modelId);
+  // Fixed transports keep simultaneous Fast and ordinary calls isolated while tokens refresh.
+  const sdkModel = createSdkModel(false);
+  const prioritySdkModel = createSdkModel(true);
+  const stream = (params: LanguageModelV4CallOptions) => {
+    const openaiOptions = { ...params.providerOptions?.openai };
+    const priority = openaiOptions.serviceTier === "priority";
+    // Core checks the account catalog. Bypass only the SDK's model-name priority allowlist;
+    // the selected transport writes the authorized tier into the final request body.
+    if (priority) delete openaiOptions.serviceTier;
+    const selected = priority ? prioritySdkModel : sdkModel;
+    return startChatGptStream(
+      () =>
+        selected.doStream({
+          ...params,
+          providerOptions: { ...params.providerOptions, openai: openaiOptions },
+        }),
+      params,
+    );
   };
-  const openai = createOpenAI({
-    // The SDK requires an API key to serialize headers. It is always replaced
-    // before the only HTTP transport, and never reads OPENAI_API_KEY/BASE_URL.
-    apiKey: "chatgpt-subscription-transport",
-    baseURL: "https://api.openai.com/v1",
-    fetch: authenticatedFetch,
-  });
   return wrapLanguageModel({
-    model: openai.responses(options.modelId),
+    model: sdkModel,
     providerId: "chatgpt.responses",
     middleware: {
       specificationVersion: "v4",
@@ -470,9 +493,8 @@ export function createChatGptModel(options: {
               }),
         };
       },
-      wrapStream: async ({ doStream, params }) => startChatGptStream(doStream, params),
-      wrapGenerate: async ({ doStream, params }) =>
-        aggregateStream(await startChatGptStream(doStream, params)),
+      wrapStream: async ({ params }) => stream(params),
+      wrapGenerate: async ({ params }) => aggregateStream(await stream(params)),
     },
   });
 }

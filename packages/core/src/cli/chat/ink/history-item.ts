@@ -16,6 +16,11 @@ import { DiffBlock, DiffSummary, diffBodyLineCount } from "./diff-view.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
 
+const NOTICE_APPEARANCE = {
+  info: { prefix: GLYPHS.info, textProps: { dimColor: true } },
+  warning: { prefix: GLYPHS.warning, textProps: { color: "yellow" } },
+} as const;
+
 function isDenialText(text: string): boolean {
   const trimmed = text.trimStart();
   return DENIAL_TEXT_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
@@ -160,12 +165,14 @@ export function HistoryItemView({
         ),
       );
     }
-    case "notice":
+    case "notice": {
+      const appearance = NOTICE_APPEARANCE[item.tone ?? "warning"];
       return h(
         PrefixedLine,
-        { prefix: h(Text, { color: "yellow" }, "⚠ ") },
-        h(Text, { color: "yellow" }, item.text),
+        { prefix: h(Text, appearance.textProps, `${appearance.prefix} `) },
+        h(Text, appearance.textProps, item.text),
       );
+    }
     case "error":
       return h(
         PrefixedLine,

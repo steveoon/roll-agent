@@ -47,6 +47,102 @@ function fixture() {
   return { auth, selected };
 }
 
+test("Fast covers normal and compaction options, survives model/effort switches, and leaves API providers alone", async () => {
+  const { auth } = fixture();
+  auth.models = async () => [
+    { slug: "subscription-slug", displayName: "Fixture", supportsFastMode: true },
+  ];
+  const cfg = config({
+    provider: "chatgpt",
+    model: "subscription-slug",
+    fastMode: true,
+    thinkingLevel: "high",
+    compaction: { thinkingLevel: "low" },
+  });
+  for (const deferConnection of [false, true]) {
+    const resolved = await resolveInteractiveChatLlm(cfg, {
+      auth,
+      deferConnection,
+      enableRecovery: deferConnection,
+    });
+    try {
+      assert.deepEqual(resolved.providerOptions, {
+        openai: { reasoningEffort: "high", serviceTier: "priority" },
+      });
+      assert.deepEqual(resolved.structuredOutputProviderOptions, {
+        openai: { reasoningEffort: "low", serviceTier: "priority" },
+      });
+      const switched = await resolveInteractiveChatSwitch(
+        cfg,
+        { provider: "chatgpt", model: "subscription-slug" },
+        "medium",
+        current,
+        auth,
+        resolved.connection,
+      );
+      assert.deepEqual(switched.providerOptions, {
+        openai: { reasoningEffort: "medium", serviceTier: "priority" },
+      });
+      assert.deepEqual(
+        switched.structuredOutputProviderOptions,
+        resolved.structuredOutputProviderOptions,
+      );
+    } finally {
+      resolved.connection?.dispose();
+    }
+  }
+  const api = await resolveInteractiveChatLlm(config({ fastMode: true }), { auth });
+  assert.equal(api.providerOptions?.openai?.serviceTier, undefined);
+});
+
+test("Fast rejects unsupported live capabilities before inference and rechecks after reconnect", async () => {
+  const { auth } = fixture();
+  const cfg = config({ provider: "chatgpt", model: "subscription-slug", fastMode: true });
+  await assert.rejects(resolveInteractiveChatLlm(cfg, { auth }), /未提供 Fast.*\/fast off/);
+  let supportsFastMode = true;
+  let tokenReads = 0;
+  auth.models = async () => [
+    { slug: "subscription-slug", displayName: "Fixture", supportsFastMode },
+  ];
+  auth.getAccessToken = async () => {
+    tokenReads += 1;
+    throw new Error("unexpected inference");
+  };
+  const resolved = await resolveInteractiveChatLlm(cfg, {
+    auth,
+    deferConnection: true,
+    enableRecovery: true,
+  });
+  assert.ok(resolved.connection);
+  try {
+    await resolved.connection.ensure();
+    supportsFastMode = false;
+    await resolved.connection.retry();
+    const providerOptions = resolved.providerOptions;
+    assert.ok(providerOptions);
+    await assert.rejects(
+      async () =>
+        resolved.model.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+          providerOptions,
+        }),
+      (error: unknown) => {
+        assert.match(resolved.modelRecovery?.formatError?.(error) ?? "", /\/fast off/);
+        return true;
+      },
+    );
+    assert.equal(tokenReads, 0);
+    assert.equal(resolved.connection.getSnapshot().state, "connected");
+    const ordinary = await resolveInteractiveChatLlm(
+      config({ provider: "chatgpt", model: "subscription-slug" }),
+      { auth },
+    );
+    assert.equal(Object.hasOwn(ordinary.providerOptions?.openai ?? {}, "serviceTier"), false);
+  } finally {
+    resolved.connection.dispose();
+  }
+});
+
 test("subscription account precedence: CLI, config, current registration", async () => {
   for (const [accountId, savedId, expected] of [
     [cli, saved, cli],

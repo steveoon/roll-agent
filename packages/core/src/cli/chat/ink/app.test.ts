@@ -6,6 +6,7 @@ import { Box } from "ink";
 import { cleanup, render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
+import { createChatFastModeControl } from "../fast-mode.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
@@ -1816,6 +1817,322 @@ test("ChatApp 未知命令提示后保留草稿", async () => {
   unmount();
 });
 
+for (const [name, first, last] of [
+  ["explicit commands", "/fast on\r", "/fast off\r"],
+  ["bare commands", "/fast\r", "/fast\r"],
+  ["keyboard", "\x07", "\x07"],
+  ["mixed keyboard and command", "\x07", "/fast\r"],
+] as const) {
+  test(`ChatApp preserves the latest Fast choice while connecting via ${name}`, async () => {
+    const sink: Sink = { approved: [], rejected: [] };
+    let finish: (() => void) | undefined;
+    const connected = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let enabled = false;
+    let preparing = false;
+    const applied: boolean[] = [];
+    const fastMode = createChatFastModeControl({
+      getEnabled: () => enabled,
+      prepareEnable: async () => {
+        preparing = true;
+        await connected;
+      },
+      apply: (next) => {
+        enabled = next;
+        applied.push(next);
+      },
+    });
+    async function* send(): AsyncIterable<SessionEvent> {
+      yield { type: "message-finish", text: "" };
+    }
+    const { stdin, lastFrame, unmount } = render(
+      h(ChatApp, {
+        session: makeSession(send, sink),
+        model: "subscription-model",
+        fastMode,
+        onUserSubmit: () => {},
+        onExit: () => {},
+      }),
+    );
+    await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+    stdin.write(first);
+    await waitFor(() => assert.equal(preparing, true));
+    stdin.write(last);
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Fast 已关闭/));
+    assert.ok(finish);
+    finish();
+    await connected;
+    await delay(20);
+    assert.equal(fastMode.getEnabled(), false);
+    assert.deepEqual(applied, [false]);
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /Fast 已开启/);
+    assert.ok(!plain(lastFrame() ?? "").includes(GLYPHS.fast));
+    assert.deepEqual(sink.sentInputs ?? [], []);
+    unmount();
+  });
+}
+
+for (const [protocol, shortcut] of [
+  ["legacy", "\x07"],
+  ["Kitty", "\x1b[103;5u"],
+  ["Kitty control codepoint", "\x1b[7;5u"],
+] as const) {
+  test(`Ctrl+G toggles Fast without changing the draft via ${protocol}`, async () => {
+    const sink: Sink = { approved: [], rejected: [] };
+    const submitted: string[] = [];
+    const initialDraft = "检查中文🙂代码";
+    const draft = `${initialDraft}，还有这一处`;
+    let enabled = false;
+    let supported = true;
+    let finishFirst: (() => void) | undefined;
+    const firstPreparation = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    let prepares = 0;
+    const fastMode = createChatFastModeControl({
+      getEnabled: () => enabled,
+      prepareEnable: async () => {
+        if (++prepares === 1) await firstPreparation;
+      },
+      apply: (next) => {
+        if (next && !supported) throw new Error("当前模型不支持 Fast");
+        enabled = next;
+      },
+    });
+    async function* send(): AsyncIterable<SessionEvent> {
+      yield { type: "message-finish", text: "" };
+    }
+    const { stdin, lastFrame, unmount } = render(
+      h(ChatApp, {
+        session: makeSession(send, sink),
+        model: "subscription-model",
+        fastMode,
+        onUserSubmit: (text: string) => submitted.push(text),
+        onExit: () => {},
+      }),
+    );
+    await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Ctrl\+G 加速/));
+    stdin.write(initialDraft);
+    await waitFor(() => assert.ok(plain(lastFrame() ?? "").includes(initialDraft)));
+    stdin.write(shortcut);
+    await waitFor(() => assert.equal(prepares, 1));
+    stdin.write("，还有这一处");
+    await waitFor(() => assert.ok(plain(lastFrame() ?? "").includes(draft)));
+    assert.ok(finishFirst);
+    finishFirst();
+    await waitFor(() => assert.ok(plain(lastFrame() ?? "").includes(`${GLYPHS.fast} ${draft}`)));
+    assert.equal(enabled, true);
+    assert.deepEqual(submitted, []);
+    stdin.write("\x1b[103;5:2u"); // Held-key repeat must not toggle a mode.
+    stdin.write("\x1b[103;5:3u"); // Key release must not undo the key press.
+    await delay(20);
+    assert.equal(enabled, true);
+    stdin.write(shortcut);
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Fast 已关闭/));
+    assert.equal(enabled, false);
+    supported = false;
+    stdin.write(shortcut);
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前模型不支持 Fast/));
+    assert.equal(enabled, false);
+    assert.ok(plain(lastFrame() ?? "").includes(draft));
+    stdin.write("\r");
+    await waitFor(() => assert.deepEqual(submitted, [draft]));
+    unmount();
+  });
+}
+
+for (const withControl of [false, true]) {
+  test(`unavailable Fast hides Ctrl+G in hints/help and ignores the key (control=${withControl})`, async () => {
+    const sink: Sink = { approved: [], rejected: [] };
+    let changes = 0;
+    const fastMode = createChatFastModeControl({
+      isAvailable: () => false,
+      getEnabled: () => false,
+      prepareEnable: async () => {},
+      apply: () => {
+        changes++;
+      },
+    });
+    async function* send(): AsyncIterable<SessionEvent> {
+      yield { type: "message-finish", text: "" };
+    }
+    const { stdin, lastFrame, unmount } = render(
+      h(ChatApp, {
+        session: makeSession(send, sink),
+        model: "same-slug-as-a-subscription-model",
+        ...(withControl ? { fastMode } : {}),
+        onUserSubmit: () => {},
+        onExit: () => {},
+      }),
+    );
+    await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /Ctrl\+G/);
+    stdin.write("草稿");
+    for (const key of ["\x07", "\x1b[103;5u", "\x1b[7;5u"]) stdin.write(key);
+    await delay(30);
+    assert.equal(changes, 0);
+    assert.match(plain(lastFrame() ?? ""), /草稿/);
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /Fast 切换|不支持切换 Fast/);
+    stdin.write("\x15"); // Clear the draft before opening the shortcut panel.
+    stdin.write("?");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /释放\/恢复鼠标/));
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /Ctrl\+G/);
+    stdin.write("?");
+    await delay(20);
+    stdin.write("/help\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /快捷键:/));
+    assert.doesNotMatch(plain(lastFrame() ?? ""), /Ctrl\+G/);
+    unmount();
+  });
+}
+
+test("Fast shortcut availability follows provider switches even when model slugs match", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let available = false;
+  let enabled = false;
+  const fastMode = createChatFastModeControl({
+    isAvailable: () => available,
+    getEnabled: () => available && enabled,
+    prepareEnable: async () => {},
+    apply: (next) => {
+      enabled = next;
+    },
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "same-slug",
+      fastMode,
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [],
+        switchTo: async (id: string) => {
+          available = id.startsWith("chatgpt/");
+          return { id, model: "same-slug", contextWindow: undefined };
+        },
+        setAsDefault: async () => "saved",
+      },
+    }),
+  );
+  await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /Ctrl\+G/);
+  for (const provider of ["chatgpt", "openai"]) {
+    stdin.write(`/model ${provider}/same-slug\r`);
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /是否设为默认/));
+    stdin.write("\x1b");
+    await waitFor(() => assert.doesNotMatch(plain(lastFrame() ?? ""), /是否设为默认/));
+    if (provider === "chatgpt") {
+      assert.match(plain(lastFrame() ?? ""), /Ctrl\+G 加速/);
+      stdin.write("?");
+      await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Ctrl\+G {2}开关 Fast/));
+      stdin.write("?");
+      await delay(20);
+      stdin.write("/fast on\r"); // Fallback when the terminal intercepts Ctrl+G.
+      await waitFor(() => assert.equal(enabled, true));
+      await waitFor(() => assert.ok(plain(lastFrame() ?? "").includes(GLYPHS.fast)));
+    } else {
+      assert.doesNotMatch(plain(lastFrame() ?? ""), /Ctrl\+G/);
+      stdin.write("\x07");
+      await delay(20);
+      assert.equal(enabled, true, "an unavailable shortcut must not change the saved preference");
+    }
+  }
+  unmount();
+});
+
+test("Ctrl+G leaves the model unchanged while a turn is running", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let finish: (() => void) | undefined;
+  const running = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let changes = 0;
+  const fastMode = createChatFastModeControl({
+    getEnabled: () => false,
+    prepareEnable: async () => {},
+    apply: () => {
+      changes++;
+    },
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "text-delta", delta: "正在执行" };
+    await running;
+    yield { type: "message-finish", text: "正在执行" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription-model",
+      fastMode,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  try {
+    await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+    stdin.write("go\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /正在执行/));
+    stdin.write("\x07");
+    await delay(20);
+    assert.equal(changes, 0);
+  } finally {
+    finish?.();
+    await delay(20);
+    unmount();
+  }
+});
+
+test("ChatApp toggles Fast locally, renders its badge, and preserves the state on rejection", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let enabled = false;
+  let supported = true;
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "subscription-model",
+      fastMode: {
+        isAvailable: () => true,
+        getEnabled: () => enabled,
+        getRequestedEnabled: () => enabled,
+        setEnabled: async (next) => {
+          if (next && !supported) throw new Error("当前模型不支持 Fast");
+          enabled = next;
+          return true;
+        },
+      },
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await waitFor(() => assert.equal(sink.userInputAvailability?.at(-1), true));
+  stdin.write("/fast on\r");
+  await waitFor(() => assert.ok(plain(lastFrame() ?? "").includes(GLYPHS.fast)));
+  assert.ok(plain(lastFrame() ?? "").includes(`${GLYPHS.info} Fast 已开启`));
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /subscription-model · Fast/);
+  assert.equal(enabled, true);
+  stdin.write("/fast off\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Fast 已关闭/));
+  assert.ok(!plain(lastFrame() ?? "").includes(GLYPHS.fast));
+  supported = false;
+  stdin.write("/fast on\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /当前模型不支持 Fast/));
+  assert.ok(plain(lastFrame() ?? "").includes(`${GLYPHS.warning} Fast 切换失败`));
+  assert.equal(enabled, false);
+  assert.deepEqual(sink.sentInputs ?? [], []);
+  unmount();
+});
+
 test("ChatApp rejects unsupported thinking without changing the displayed or active level", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   const selected: string[] = [];
@@ -2056,7 +2373,8 @@ test("ChatApp 空输入按 ? 打开快捷键面板,再按 ? 关闭", async () =>
   stdin.write("?");
   await delay(20);
   let frame = plain(lastFrame() ?? "");
-  assert.match(frame, /Ctrl\+Y {2}复制本轮对话/);
+  assert.doesNotMatch(frame, /Ctrl\+G/);
+  assert.match(frame, /Ctrl\+Y \/ Ctrl\+V {2}复制本轮对话/);
   assert.match(frame, /Ctrl\+T {2}释放\/恢复鼠标/);
   stdin.write("?");
   await delay(20);
@@ -2220,6 +2538,9 @@ test("ChatApp switches model via /model picker and offers set-as-default", async
     assert.match(plain(lastFrame() ?? ""), /已写入 roll\.config\.yaml/);
     assert.match(plain(lastFrame() ?? ""), /gemini-3\.8-flash/);
     assert.match(plain(lastFrame() ?? ""), /ctx 1M · 模型目录/);
+    assert.ok(plain(lastFrame() ?? "").includes(`${GLYPHS.info} 已切换到`));
+    assert.ok(plain(lastFrame() ?? "").includes(`${GLYPHS.info} 已写入`));
+    assert.ok(!plain(lastFrame() ?? "").includes(GLYPHS.warning));
   });
   unmount();
 });

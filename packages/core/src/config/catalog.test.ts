@@ -28,6 +28,15 @@ function findNode(root: ConfigCatalogNode, path: readonly string[]): ConfigCatal
   return current;
 }
 
+it("exposes Fast as an opt-in Runtime switch with subscription usage guidance", () => {
+  const node = findNode(buildRollConfigCatalog().root, ["runtime", "fastMode"]);
+  assert.equal(node.kind, "boolean");
+  assert.equal(node.widget, "switch");
+  assert.equal(node.defaultValue, false);
+  const guidance = findConfigGuidance("runtime.fast-mode");
+  assert.match(guidance?.purpose ?? "", /额度/);
+});
+
 function makeAgent(): RegisteredAgent {
   return {
     skill: {
@@ -90,7 +99,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 71);
+    assert.equal(leaves.length, 72);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);

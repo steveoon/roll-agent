@@ -1,4 +1,5 @@
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
+import type { ChatFastModeControl } from "../fast-mode.ts";
 import { createElement as h } from "react";
 import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
@@ -33,6 +34,7 @@ export interface InkReplStore extends Partial<TranscriptHistoryStore> {
 }
 
 export interface RunInkReplOptions {
+  readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
   readonly model: string;
@@ -164,6 +166,7 @@ export async function runInkRepl(
         ...(options.getThinkingLevels ? { getThinkingLevels: options.getThinkingLevels } : {}),
         ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
         ...(options.connection ? { connection: options.connection } : {}),
+        ...(options.fastMode ? { fastMode: options.fastMode } : {}),
         ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),
