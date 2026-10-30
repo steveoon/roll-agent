@@ -590,7 +590,9 @@ test("finite rounds: a constructor waiting behind another upgrade preserves comm
   const dir = mkdtempSync(join(tmpdir(), "roll-rounds-migration-race-"));
   createLegacyLedger(dir, 6);
   const writer = new DatabaseSync(join(dir, "schedules.db"));
-  writer.exec("BEGIN IMMEDIATE");
+  // Match ScheduleStore's lock wait: the competing opener can briefly hold a read lock
+  // while this connection commits the simulated upgrade.
+  writer.exec("PRAGMA busy_timeout = 15000; BEGIN IMMEDIATE");
   const source = [
     'import { DatabaseSync } from "node:sqlite";',
     `import { ScheduleStore } from ${JSON.stringify(new URL("./schedule-store.ts", import.meta.url).href)};`,
