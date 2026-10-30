@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 1.0.1
+
+### Patch Changes
+
+- [#297](https://github.com/steveoon/roll-agent/pull/297) [`00d01f9`](https://github.com/steveoon/roll-agent/commit/00d01f9f78c919423747587158f1e93f15423e5e) Thanks [@steveoon](https://github.com/steveoon)! - 区分上下文压缩超时、调用失败与未产生缩减。自动和手动压缩超时会显示实际等待上限、保留原上下文的说明及调整建议；普通模式也能看到失败提示，不再把摘要失败误报为保留策略或安全检查限制。
+
 ## 1.0.0
 
 ### Major Changes
