@@ -6117,6 +6117,9 @@ test("AgentSession 手动 /compact 透传独立超时且失败时不替换历史
   assert.equal(capturedTimeoutMs, 23_456);
   assert.equal(capturedMaxOutputTokens, 9_876);
   assert.equal(capturedReasoning, "high");
+  const notice = events.find((event) => event.type === "context-compacted");
+  assert.ok(notice?.type === "context-compacted");
+  assert.deepEqual(notice.failure, { reason: "error" }, "provider timeout is not our deadline");
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
   assert.equal(error.message, timeoutError.message);

@@ -164,8 +164,36 @@ for (const reason of ["auto", "manual"] as const) {
       );
     });
     assert.match(output, /未减少上下文/u);
-    assert.doesNotMatch(output, /无需压缩/u);
+    assert.match(output, /已保留原上下文/u);
+    assert.doesNotMatch(output, /无需压缩|保留策略|安全检查|超时|失败/u);
   });
+
+  for (const [failure, expected] of [
+    [{ reason: "timeout", timeoutMs: 300_000 }, /压缩超时（等待上限 300 秒）/u],
+    [{ reason: "error" }, /压缩失败/u],
+  ] as const) {
+    test(`${reason} ${failure.reason} compaction reports its cause on stderr`, async () => {
+      const renderer = new ChatRenderer(async () => false);
+      const output = await captureStderr(async () => {
+        await renderer.handle(
+          {
+            type: "context-compacted",
+            reason,
+            strategy: "summarize",
+            removed: 0,
+            kept: 44,
+            failure,
+          },
+          { approve() {}, reject() {} },
+        );
+      });
+      assert.match(output, expected);
+      assert.match(output, reason === "auto" ? /自动压缩/u : /手动压缩/u);
+      assert.match(output, /已保留原上下文/u);
+      assert.doesNotMatch(output, /保留策略|安全检查/u);
+      if (failure.reason === "error") assert.doesNotMatch(output, /超时/u);
+    });
+  }
 }
 
 test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits JSON", async () => {

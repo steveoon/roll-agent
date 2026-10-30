@@ -6,6 +6,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4CallOptions, LanguageModelV4FinishReason } from "@ai-sdk/provider";
 import { z } from "zod";
 import {
+  CompactionTimeoutError,
   compactMessages,
   estimateMessagesTokens,
   findTurnBoundaries,
@@ -273,12 +274,15 @@ test("pre-aborted caller retains history and makes no summary request", async ()
   assert.equal(model.doGenerateCalls.length, 0);
 });
 
-test("caller cancellation stops waiting even if the provider ignores its signal", async () => {
+test("caller cancellation wins over a later deadline even if the provider ignores abort", async (t) => {
   const controller = new AbortController();
+  const deadline = new AbortController();
+  t.mock.method(AbortSignal, "timeout", () => deadline.signal);
   const reason = new Error("cancelled during summary");
   const model = new MockLanguageModelV4({
     doGenerate: async () => {
       controller.abort(reason);
+      deadline.abort(new DOMException("summary deadline", "TimeoutError"));
       return new Promise<never>(() => {});
     },
   });
@@ -293,7 +297,13 @@ test("summary timeout is an actual deadline even for a provider that ignores abo
   const model = new MockLanguageModelV4({ doGenerate: async () => new Promise<never>(() => {}) });
   // Keep the event loop alive for the unref'ed native AbortSignal timeout.
   const keepAlive = delay(100);
-  await assert.rejects(compactMessages(input({ model, timeoutMs: 10 })), { name: "TimeoutError" });
+  await assert.rejects(compactMessages(input({ model, timeoutMs: 10 })), (error: unknown) => {
+    assert.ok(error instanceof CompactionTimeoutError);
+    assert.equal(error.name, "TimeoutError");
+    assert.equal(error.timeoutMs, 10);
+    assert.ok(error.cause instanceof DOMException && error.cause.name === "TimeoutError");
+    return true;
+  });
   assert.ok(model.doGenerateCalls[0]?.abortSignal?.aborted);
   await keepAlive;
 });
@@ -312,6 +322,7 @@ test("default summary deadline is 120 seconds and supplied deadlines are honored
 test("provider errors retain identity and SDK retryable errors are attempted only once", async () => {
   for (const error of [
     new Error("ECONNRESET"),
+    new DOMException("provider request timed out", "TimeoutError"),
     new APICallError({
       message: "unavailable",
       url: "https://provider.invalid",

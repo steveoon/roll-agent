@@ -315,6 +315,7 @@ export type {
   SessionTokenUsage,
   ContextCompactionReason,
   ContextCompactionStrategy,
+  ContextCompactionFailure,
 } from "./types/events.ts";
 export {
   createTurnCancellationMessage,
