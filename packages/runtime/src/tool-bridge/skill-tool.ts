@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from "ai";
+import { asSchema, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { SKILL_TOOL_ID, type SkillLibrary } from "../skills/contracts.ts";
 import type { ToolRegistry } from "./naming.ts";
@@ -45,6 +45,16 @@ const skillToolInputSchema = z.object({
     ),
 });
 
+function skillModelInputSchema(names: readonly string[]) {
+  return skillToolInputSchema.extend({
+    name: z.enum(names).describe("从当前 Skills 目录选择名称并原样传入，不要附加说明文字"),
+    reference: z
+      .string()
+      .nullable()
+      .describe("读取主 SKILL.md 传 null；读取附加文档传 references/ 下的相对路径"),
+  });
+}
+
 export type SkillToolInput = z.infer<typeof skillToolInputSchema>;
 
 function clip(content: string): string {
@@ -74,15 +84,83 @@ function withSkillLocation(skillRoot: string | undefined, content: string): stri
   ].join("\n");
 }
 
-function skillNotFoundResult(library: SkillLibrary, name: string): NormalizedToolResult {
-  const available = library
+function skillNameEditDistance(input: readonly string[], candidate: readonly string[]): number {
+  let previous = Array.from({ length: candidate.length + 1 }, (_, index) => index);
+  let current = new Array<number>(candidate.length + 1).fill(0);
+  for (const [inputIndex, inputChar] of input.entries()) {
+    current[0] = inputIndex + 1;
+    for (const [candidateIndex, candidateChar] of candidate.entries()) {
+      const deletion = (previous[candidateIndex + 1] ?? Number.POSITIVE_INFINITY) + 1;
+      const insertion = (current[candidateIndex] ?? Number.POSITIVE_INFINITY) + 1;
+      const substitution =
+        (previous[candidateIndex] ?? Number.POSITIVE_INFINITY) +
+        (inputChar === candidateChar ? 0 : 1);
+      current[candidateIndex + 1] = Math.min(deletion, insertion, substitution);
+    }
+    [previous, current] = [current, previous];
+  }
+  return previous[candidate.length] ?? input.length;
+}
+
+function rankSkillNames(library: SkillLibrary, name: string): string[] {
+  // Compare Unicode code points without removing meaningful suffixes or punctuation.
+  const input = Array.from(name.trim());
+  return library
     .list()
-    .map((skill) => skill.name)
-    .join(", ");
+    .map((skill, index) => {
+      const candidate = Array.from(skill.name);
+      return {
+        name: skill.name,
+        index,
+        distance: skillNameEditDistance(input, candidate),
+        length: Math.max(input.length, candidate.length, 1),
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.distance * right.length - right.distance * left.length || left.index - right.index,
+    )
+    .map((skill) => skill.name);
+}
+
+function skillNotFoundResult(library: SkillLibrary, name: string): NormalizedToolResult {
+  const availableNames = rankSkillNames(library, name);
+  const error = {
+    code: TOOL_OUTCOME_KINDS.invalidInput,
+    field: "name",
+    receivedName: name,
+    message:
+      "没有找到完全匹配的 skill。请结合当前任务，从 availableNames 中选择一个名称并原样传入。不要翻译、改写名称或附加说明文字，也不要原样重试此次失败的 name。",
+    availableNamesOrder:
+      "完整名称的标准化编辑距离由小到大排列，同分保持目录顺序；排序仅帮助查找，不代表该 skill 一定适合当前任务。",
+    availableNames,
+  };
   return failedToolResult(
     TOOL_OUTCOME_KINDS.invalidInput,
-    `skill "${name}" 不存在。可用 skill: ${available}`,
+    `skill "${name}" 不存在。可用 skill: ${availableNames.join(", ")}`,
+    // Keep the full catalog in the model projection, independently of display limits.
+    { model: { type: "error-json", value: error } },
   );
+}
+
+/** Preserve actionable feedback when the SDK rejects a name before tool execution. */
+export function skillInputErrorResult(
+  library: SkillLibrary,
+  input: unknown,
+): NormalizedToolResult | undefined {
+  let parsed: unknown = input;
+  if (typeof input === "string") {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || !("name" in parsed)) return undefined;
+  if (typeof parsed.name !== "string") return undefined;
+  return library.list().some((skill) => skill.name === parsed.name)
+    ? undefined
+    : skillNotFoundResult(library, parsed.name);
 }
 
 function loadSkill(library: SkillLibrary, name: string): NormalizedToolResult {
@@ -143,9 +221,16 @@ export function buildSkillToolset(
   library: SkillLibrary | (() => SkillLibrary),
   registry: ToolRegistry,
   coordinator?: ToolExecutionCoordinator,
+  options: { readonly toolId?: string; readonly names?: readonly string[] } = {},
 ): ToolSet {
   const resolveLibrary = typeof library === "function" ? library : (): SkillLibrary => library;
-  const id = registry.register(SKILL_TOOL_AGENT_NAME, SKILL_TOOL_NAME);
+  const names =
+    options.names ??
+    resolveLibrary()
+      .list()
+      .map((skill) => skill.name);
+  if (names.length === 0) return {};
+  const id = options.toolId ?? registry.register(SKILL_TOOL_AGENT_NAME, SKILL_TOOL_NAME);
   const plan: ToolExecutionPlan = {
     resources: () => [{ key: "skill-library", mode: TOOL_RESOURCE_ACCESS_MODES.read }],
   };
@@ -153,8 +238,9 @@ export function buildSkillToolset(
   return {
     [id]: tool({
       description:
-        "加载 skill 主说明书时只传 name，不要传 reference；仅加载其 references/ 下的文件时才传 reference。执行涉及某个 skill 领域的任务前，先用它读取流程与约束。",
-      inputSchema: skillToolInputSchema,
+        "按目录中的完整名称加载 skill。读取主说明书时 reference 传 null；读取 references/ 下的文件时传相对路径。执行涉及某个 skill 领域的任务前，先用它读取流程与约束。",
+      inputSchema: asSchema(skillModelInputSchema(names)),
+      strict: true,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: (input, options): Promise<NormalizedToolResult> =>
         executeCoordinatedTool(
@@ -164,7 +250,13 @@ export function buildSkillToolset(
           options.toolCallId,
           input,
           options.abortSignal,
-          () => Promise.resolve(executeSkillTool(resolveLibrary(), input)),
+          () =>
+            Promise.resolve(
+              executeSkillTool(resolveLibrary(), {
+                name: input.name,
+                ...(input.reference === null ? {} : { reference: input.reference }),
+              }),
+            ),
         ),
     }),
   };

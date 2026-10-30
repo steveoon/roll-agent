@@ -60,6 +60,7 @@ async function run(model: LanguageModelV4) {
 
 - `prepare({ model, providerOptions?, signal })` 提供工具、Skills 和可安装目录快照。
 - `refresh(agentName, operation)` 返回该 Agent 的新工具来源及 Skills；Runtime 串行应用结果。
+- 可选 `refreshSkills(operation)` 只重新发现 Skills，不重新连接 Agent。Runtime 在每次模型请求前调用，工具批次复用该请求的目录快照；返回 `undefined` 或空目录会移除 skill 工具。显式注入 `skillLibrary`（包括 `null`）时不启用宿主自动刷新。
 - 可选 `install(shortName, report, signal)` 返回安装结果。安装成功后接入失败仍保留成功事实，不重试安装。
 - `updateSampling(model, providerOptions)` 只同步更新内存，不能建立连接或执行外部 I/O；校验必须在写入前完成，抛错时保留原 Sampling 状态。
 - `dispose()` 幂等释放本宿主取得的资源；失败必须拒绝并保留错误。

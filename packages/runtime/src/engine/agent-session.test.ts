@@ -6117,6 +6117,9 @@ test("AgentSession 手动 /compact 透传独立超时且失败时不替换历史
   assert.equal(capturedTimeoutMs, 23_456);
   assert.equal(capturedMaxOutputTokens, 9_876);
   assert.equal(capturedReasoning, "high");
+  const notice = events.find((event) => event.type === "context-compacted");
+  assert.ok(notice?.type === "context-compacted");
+  assert.deepEqual(notice.failure, { reason: "error" }, "provider timeout is not our deadline");
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
   assert.equal(error.message, timeoutError.message);
@@ -6462,7 +6465,7 @@ test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生�
 
 test("applyAgentRefresh 注入 skill library 后 roll__skill 可用", async () => {
   const model = sequencedModel([
-    toolCallStep("roll__skill", { name: "new-skill" }),
+    toolCallStep("roll__skill", { name: "new-skill", reference: null }),
     textStep("ok"),
   ]);
   const session = new AgentSession({ id: "refresh-2", model, sources: [], maxSteps: 8 });

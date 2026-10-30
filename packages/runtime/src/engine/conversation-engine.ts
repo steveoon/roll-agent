@@ -410,6 +410,10 @@ export class ConversationEngine {
     );
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
+    const refreshSkills =
+      this.explicitSkillLibrary === undefined
+        ? this.agentHost?.refreshSkills?.bind(this.agentHost)
+        : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
     const bash = shellProfile ? this.resolveShellSettings(shellProfile) : undefined;
     const fileTools = this.fileToolsEnabled
@@ -452,6 +456,12 @@ export class ConversationEngine {
         };
       },
       ...(skillLibrary ? { skillLibrary } : {}),
+      ...(refreshSkills
+        ? {
+            refreshSkillLibrary: (signal: AbortSignal) =>
+              refreshSkills({ ...this.hostOperation(), signal }),
+          }
+        : {}),
       ...(this.workspaceInstructions ? { workspaceInstructions: this.workspaceInstructions } : {}),
       ...(fileTools ? { fileTools } : {}),
       ...(bash ? { bash } : {}),

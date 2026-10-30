@@ -1,5 +1,19 @@
 # @roll-agent/runtime
 
+## 1.0.2
+
+### Patch Changes
+
+- [#300](https://github.com/steveoon/roll-agent/pull/300) [`99200c9`](https://github.com/steveoon/roll-agent/commit/99200c989b584e7bd21a3ec63636140d2c66009f) Thanks [@steveoon](https://github.com/steveoon)! - 将 roll chat 的 skill 名称约束为当前完整目录的枚举，并启用严格工具调用。模型请求前刷新目录，目录变化时同步更新工具 schema 与 Skills 描述，工具调用复用本次请求的目录快照。
+  
+  改进未知 skill 名称的错误反馈，包括模型未遵循枚举时的前置校验错误：明确指出错误字段和精确匹配要求，并返回按标准化名称编辑距离排序的完整可用名称列表，同分保持目录顺序。错误名称仍需由模型修正后重新调用，不自动选择或加载相似 skill。
+
+## 1.0.1
+
+### Patch Changes
+
+- [#297](https://github.com/steveoon/roll-agent/pull/297) [`00d01f9`](https://github.com/steveoon/roll-agent/commit/00d01f9f78c919423747587158f1e93f15423e5e) Thanks [@steveoon](https://github.com/steveoon)! - 区分上下文压缩超时、调用失败与未产生缩减。自动和手动压缩超时会显示实际等待上限、保留原上下文的说明及调整建议；普通模式也能看到失败提示，不再把摘要失败误报为保留策略或安全检查限制。
+
 ## 1.0.0
 
 ### Major Changes

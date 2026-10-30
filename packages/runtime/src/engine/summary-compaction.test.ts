@@ -406,8 +406,13 @@ async function rawRequestEstimate(
   }
 }
 
-for (const failure of ["provider-error", "empty-summary", "larger-summary"] as const) {
-  test(`soft target with ${failure} retains originals and continues once without a recovery gate`, async () => {
+for (const failure of [
+  "provider-error",
+  "summary-timeout",
+  "empty-summary",
+  "larger-summary",
+] as const) {
+  test(`soft target with ${failure} retains originals and continues once without a recovery gate`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), "roll-summary-soft-"));
     const store = new ThreadStore(directory);
     const id = store.createThread();
@@ -415,12 +420,23 @@ for (const failure of ["provider-error", "empty-summary", "larger-summary"] as c
     store.appendMessages(id, original);
     const input = "accepted-soft-input";
     const raw = await rawRequestEstimate(original, input);
+    const deadline = new AbortController();
+    if (failure === "summary-timeout") {
+      t.mock.method(AbortSignal, "timeout", (timeoutMs: number) => {
+        assert.equal(timeoutMs, 120_000);
+        return deadline.signal;
+      });
+    }
     let drafts = 0;
     let calls = 0;
     const model = new MockLanguageModelV4({
       doGenerate: async () => {
         drafts++;
         if (failure === "provider-error") throw new Error("summary provider unavailable");
+        if (failure === "summary-timeout") {
+          deadline.abort(new DOMException("summary deadline", "TimeoutError"));
+          return new Promise<never>(() => {});
+        }
         return summaryResult(failure === "empty-summary" ? "" : "L".repeat(24_000));
       },
       doStream: async (params) => {
@@ -445,6 +461,16 @@ for (const failure of ["provider-error", "empty-summary", "larger-summary"] as c
       const started = events.findIndex((event) => event.type === "compaction-start");
       const settled = events.findIndex((event) => event.type === "context-compacted");
       assert.ok(started >= 0 && settled > started);
+      const notice = events.find((event) => event.type === "context-compacted");
+      assert.ok(notice?.type === "context-compacted");
+      assert.deepEqual(
+        notice.failure,
+        failure === "summary-timeout"
+          ? { reason: "timeout", timeoutMs: 120_000 }
+          : failure === "larger-summary"
+            ? undefined
+            : { reason: "error" },
+      );
       assert.ok(
         events.slice(settled + 1).some((event) => event.type === "message-start"),
         "failed maintenance must clear the compacting indicator before normal inference resumes",
@@ -466,6 +492,41 @@ for (const failure of ["provider-error", "empty-summary", "larger-summary"] as c
     }
   });
 }
+
+test("manual summary deadline reports its configured limit and preserves history", async (t) => {
+  const deadline = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (timeoutMs: number) => {
+    assert.equal(timeoutMs, 23_456);
+    return deadline.signal;
+  });
+  const original = oldMessages();
+  const model = new MockLanguageModelV4({
+    doGenerate: async () => {
+      deadline.abort(new DOMException("summary deadline", "TimeoutError"));
+      return new Promise<never>(() => {});
+    },
+  });
+  const session = new AgentSession({
+    id: "manual-summary-deadline",
+    model,
+    sources: [],
+    maxSteps: 1,
+    initialMessages: original,
+    compaction: { ...settings, timeoutMs: 23_456 },
+  });
+  try {
+    const events = await collect(session.compact("manual"));
+    const notice = events.find((event) => event.type === "context-compacted");
+    assert.ok(notice?.type === "context-compacted");
+    assert.equal(notice.removed, 0);
+    assert.equal(notice.checkpointId, undefined);
+    assert.deepEqual(notice.failure, { reason: "timeout", timeoutMs: 23_456 });
+    assert.deepEqual(session.getMessages(), original);
+    assert.equal(model.doGenerateCalls.length, 1);
+  } finally {
+    await session.close();
+  }
+});
 
 test("hard budget after failed summary ends explicitly and preserves accepted input across SQLite restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "roll-summary-hard-"));

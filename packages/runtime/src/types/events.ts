@@ -21,6 +21,18 @@ export type SessionEventStage = "bootstrap" | "plan" | "execute";
 export type SessionDebugStage = "turn" | "compaction" | "model" | "persist";
 export type SessionDebugData = Readonly<Record<string, string | number | boolean>>;
 
+export const COMPACTION_FAILURE_REASONS = {
+  timeout: "timeout",
+  error: "error",
+} as const;
+
+export type ContextCompactionFailure =
+  | {
+      readonly reason: typeof COMPACTION_FAILURE_REASONS.timeout;
+      readonly timeoutMs: number;
+    }
+  | { readonly reason: typeof COMPACTION_FAILURE_REASONS.error };
+
 export type SessionEvent =
   | { readonly type: "context-recovery"; readonly state: ContextRecoveryView | null }
   | {
@@ -133,6 +145,8 @@ export type SessionEvent =
       readonly truncatedTools?: number;
       readonly beforeInputTokens?: number;
       readonly recoveryNotice?: string;
+      /** Diagnostic only: a failed attempt leaves the original context intact. */
+      readonly failure?: ContextCompactionFailure;
       readonly checkpointId?: string;
       readonly checkpointGeneration?: number;
       readonly checkpointSummaryStatus?: "valid" | "fallback" | "skipped";

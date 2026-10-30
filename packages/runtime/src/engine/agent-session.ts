@@ -38,7 +38,9 @@ import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
 import type { JsonSchemaRefIssue } from "../tool-contracts/json-schema-refs.ts";
+import { COMPACTION_FAILURE_REASONS } from "../types/events.ts";
 import type {
+  ContextCompactionFailure,
   ContextCompactionReason,
   ContextCompactionStrategy,
   SessionDebugData,
@@ -57,7 +59,7 @@ import {
   type AgentInstallToolCatalogEntry,
   type AgentInstallToolOutcome,
 } from "../tool-bridge/agent-install-tool.ts";
-import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
+import { buildSkillToolset, skillInputErrorResult } from "../tool-bridge/skill-tool.ts";
 import { buildScheduleToolset, type ScheduleToolDeps } from "../tool-bridge/schedule-tool.ts";
 import { createInvalidScheduleRetryGuard } from "../tool-bridge/invalid-schedule-retry.ts";
 import {
@@ -125,6 +127,7 @@ import {
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
 import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import {
+  CompactionTimeoutError,
   compactMessages,
   estimateMessagesTokens,
   estimateTextTokens,
@@ -288,6 +291,7 @@ export interface AgentSessionOptions {
     abortSignal: AbortSignal,
   ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
+  readonly refreshSkillLibrary?: (signal: AbortSignal) => Promise<SkillLibrary | undefined>;
   readonly workspaceInstructions?: WorkspaceInstructionsSource;
   readonly fileTools?: SessionFileToolsSettings;
   readonly bash?: SessionBashSettings;
@@ -348,7 +352,7 @@ interface ActiveTurn {
   readonly execSessionIds: Set<number>;
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
-  readonly canonicalObservationOutputs: Map<string, ToolModelOutput>;
+  readonly canonicalToolOutputs: Map<string, ToolModelOutput>;
   readonly persistedStepKeys: Set<string>;
   readonly toolExecutions: ToolExecutionRecord[];
   expiresAt?: string;
@@ -407,7 +411,7 @@ function createActiveTurn(): ActiveTurn {
     execSessionIds: new Set<number>(),
     pendingToolCalls: new Map<string, PendingToolCall>(),
     completedStepResponses: new Map<string, readonly ModelMessage[]>(),
-    canonicalObservationOutputs: new Map<string, ToolModelOutput>(),
+    canonicalToolOutputs: new Map<string, ToolModelOutput>(),
     persistedStepKeys: new Set<string>(),
     toolExecutions: [],
     userMessagePersisted: false,
@@ -435,7 +439,7 @@ function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep)
   if (remembered) return [...remembered];
   const canonical = restoreCanonicalObservationOutputs(
     step.response.messages,
-    activeTurn.canonicalObservationOutputs,
+    activeTurn.canonicalToolOutputs,
   );
   activeTurn.completedStepResponses.set(key, canonical);
   return canonical;
@@ -448,10 +452,7 @@ function canonicalMessagesForSteps(
   return steps.flatMap(
     (step) =>
       activeTurn.completedStepResponses.get(`${step.callId}:${String(step.stepNumber)}`) ??
-      restoreCanonicalObservationOutputs(
-        step.response.messages,
-        activeTurn.canonicalObservationOutputs,
-      ),
+      restoreCanonicalObservationOutputs(step.response.messages, activeTurn.canonicalToolOutputs),
   );
 }
 
@@ -729,7 +730,9 @@ export class AgentSession {
   private readonly toolRoles: Record<string, CapabilityToolRole>;
   private skillSummaries: readonly SessionSkillSummary[];
   private skillLibrary: SkillLibrary | undefined;
-  private skillToolBuilt = false;
+  private skillExecutionLibrary: SkillLibrary | undefined;
+  private skillToolId: string | undefined;
+  private readonly refreshSkillLibrary: AgentSessionOptions["refreshSkillLibrary"];
   private readonly toolSourceAgentNames: Set<string>;
   private toolSchemaPolicy: ToolSchemaPolicy | undefined;
   private readonly onToolExcluded: ((exclusion: SessionToolExclusion) => void) | undefined;
@@ -823,6 +826,8 @@ export class AgentSession {
     this.workspaceInstructions = options.workspaceInstructions;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.skillLibrary = options.skillLibrary;
+    this.skillExecutionLibrary = options.skillLibrary;
+    this.refreshSkillLibrary = options.refreshSkillLibrary;
     this.skillSummaries = options.skillLibrary?.list() ?? [];
     this.toolSourceAgentNames = new Set(options.sources.map((source) => source.agentName));
     this.toolSchemaPolicy = options.toolSchemaPolicy;
@@ -1141,17 +1146,60 @@ export class AgentSession {
   }
 
   private buildSkillTools(registry: ToolRegistry): ToolSet {
-    this.skillToolBuilt = true;
-    return buildSkillToolset(
+    const tools = buildSkillToolset(
       () => {
-        if (!this.skillLibrary) {
+        if (!this.skillExecutionLibrary) {
           throw new Error("skill library 不可用");
         }
-        return this.skillLibrary;
+        return this.skillExecutionLibrary;
       },
       registry,
       this.toolCoordinator,
+      {
+        ...(this.skillToolId === undefined ? {} : { toolId: this.skillToolId }),
+        names: this.skillSummaries.map((skill) => skill.name),
+      },
     );
+    this.skillToolId ??= Object.keys(tools)[0];
+    return tools;
+  }
+
+  private applySkillLibrary(library: SkillLibrary | undefined): void {
+    const summaries = library?.list() ?? [];
+    const namesChanged =
+      summaries.length !== this.skillSummaries.length ||
+      summaries.some((skill, index) => skill.name !== this.skillSummaries[index]?.name);
+    const summariesChanged = JSON.stringify(summaries) !== JSON.stringify(this.skillSummaries);
+    this.skillLibrary = library;
+    this.skillSummaries = summaries;
+    if (namesChanged) {
+      if (this.skillToolId !== undefined) {
+        const tools = { ...this.tools };
+        delete tools[this.skillToolId];
+        delete this.toolRoles[this.skillToolId];
+        this.tools = tools;
+      }
+      const tools = this.buildSkillTools(this.registry);
+      markToolRole(this.toolRoles, tools, CAPABILITY_TOOL_ROLES.skill);
+      this.tools = { ...this.tools, ...tools };
+    }
+    if (summariesChanged) this.refreshCapabilityManifest();
+  }
+
+  private async refreshSkills(signal: AbortSignal): Promise<void> {
+    if (this.refreshSkillLibrary !== undefined) {
+      const library = await awaitAbortable(this.refreshSkillLibrary(signal), signal);
+      signal.throwIfAborted();
+      this.applySkillLibrary(library);
+    }
+    // Only request boundaries update execution lookup; an in-flight tool batch keeps its snapshot.
+    this.skillExecutionLibrary = this.skillLibrary;
+  }
+
+  private skillToolInputError(toolName: string, input: unknown) {
+    return toolName === this.skillToolId && this.skillExecutionLibrary !== undefined
+      ? skillInputErrorResult(this.skillExecutionLibrary, input)
+      : undefined;
   }
 
   applyAgentRefresh(refresh: SessionAgentRefresh): void {
@@ -1189,13 +1237,7 @@ export class AgentSession {
       this.toolSourceAgentNames.add(refresh.source.agentName);
     }
     if (refresh.skillLibrary) {
-      this.skillLibrary = refresh.skillLibrary;
-      this.skillSummaries = refresh.skillLibrary.list();
-      if (!this.skillToolBuilt) {
-        const skillTools = this.buildSkillTools(this.registry);
-        markToolRole(this.toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
-        this.tools = { ...this.tools, ...skillTools };
-      }
+      this.applySkillLibrary(refresh.skillLibrary);
     }
     if (refresh.capabilityContext) {
       this.capabilityContext = refresh.capabilityContext;
@@ -1347,6 +1389,8 @@ export class AgentSession {
         return;
       }
       this.syncWorkspaceInstructions();
+      await this.refreshSkills(activeTurn.abortController.signal);
+      let skillCatalogPrepared = true;
       let contextRecoveryAttempts = 0;
       let compactionAttempted = false;
       let advisoryMiss: RequestBudgetSnapshot | undefined;
@@ -1508,6 +1552,7 @@ export class AgentSession {
                 (rejectedBudget !== undefined &&
                   budget.rawInputEstimate >= rejectedBudget.rawInputEstimate);
               if (shapeChanged || unsafe || soft || rejected) {
+                if (shapeChanged) skillCatalogPrepared = true;
                 ownedPause = new ContextMaintenanceRequired(
                   budget,
                   shapeChanged
@@ -1587,7 +1632,11 @@ export class AgentSession {
             system: initialRequest.system,
             messages: initialRequest.messages,
             tools: streamTools,
-            prepareStep: () => {
+            prepareStep: async () => {
+              if (!skillCatalogPrepared) {
+                await this.refreshSkills(activeTurn.abortController.signal);
+              }
+              skillCatalogPrepared = false;
               lastPreparedComparableTokens = estimateMessagesTokens(
                 this.projectModelMessages([...this.messages, ...currentStreamCanonicalMessages]),
               );
@@ -1633,6 +1682,15 @@ export class AgentSession {
               // Seal the actual finish chunk, not the reader's look-ahead state. A later
               // stream failure must not leave already admitted SDK executions waiting forever.
               if (recoveryPolicy !== undefined && finishReason === "error") return;
+              for (const part of content) {
+                if (part.type !== "tool-call" || !("invalid" in part) || part.invalid !== true) {
+                  continue;
+                }
+                const error = this.skillToolInputError(part.toolName, part.input);
+                if (error !== undefined) {
+                  activeTurn.canonicalToolOutputs.set(part.toolCallId, error.model);
+                }
+              }
               streamMeasuredUsage = addUsage(streamMeasuredUsage ?? {}, toSessionUsage(usage));
               if (dispatchedBudget !== undefined) {
                 this.requestBudgets.measured(dispatchedBudget, usage.inputTokens);
@@ -1831,7 +1889,7 @@ export class AgentSession {
                       )
                     : undefined;
                 if (canonicalObservation) {
-                  activeTurn.canonicalObservationOutputs.set(part.toolCallId, canonicalObservation);
+                  activeTurn.canonicalToolOutputs.set(part.toolCallId, canonicalObservation);
                   const previousId = this.observationResultIds.get(part.toolCallId);
                   if (previousId !== undefined && previousId !== record.id) {
                     this.ambiguousObservationCallIds.add(part.toolCallId);
@@ -1881,15 +1939,24 @@ export class AgentSession {
                   outcomeKind === TOOL_OUTCOME_KINDS.invalidInput
                     ? friendlyInvalidToolInputMessage(part.error)
                     : undefined;
-                const output = friendly ?? toolOutputMessage(part.error);
-                const result = failedToolResult(outcomeKind, output, {
-                  raw: part.error,
-                });
+                const fallbackOutput = friendly ?? toolOutputMessage(part.error);
+                const toolInput =
+                  activeTurn.pendingToolCalls.get(part.toolCallId)?.input ??
+                  (InvalidToolInputError.isInstance(part.error) ? part.error.toolInput : undefined);
+                const result =
+                  this.skillToolInputError(part.toolName, toolInput) ??
+                  failedToolResult(outcomeKind, fallbackOutput, {
+                    raw: part.error,
+                  });
+                const output = toolOutputMessage(result);
+                if (part.toolName === this.skillToolId) {
+                  activeTurn.canonicalToolOutputs.set(part.toolCallId, result.model);
+                }
                 const record = createToolExecutionRecord({
                   toolCallId: part.toolCallId,
                   agentName: route?.agentName ?? part.toolName,
                   toolName: route?.toolName ?? part.toolName,
-                  input: activeTurn.pendingToolCalls.get(part.toolCallId)?.input,
+                  input: toolInput,
                   result,
                 });
                 this.persistToolExecution(record, activeTurn);
@@ -3127,7 +3194,7 @@ export class AgentSession {
     const settings = this.compaction;
     const strategy = settings?.strategy ?? "summarize";
     queue.push({ type: "compaction-start", reason });
-    const noChange = (): false => {
+    const noChange = (failure?: ContextCompactionFailure): false => {
       queue.push({
         type: "context-compacted",
         ...(beforeInputTokens === undefined ? {} : { beforeInputTokens }),
@@ -3135,9 +3202,11 @@ export class AgentSession {
         strategy,
         removed: 0,
         kept: this.messages.length,
-        ...(reason === "manual"
-          ? { recoveryNotice: "当前内容未产生可用的压缩，已保留原上下文。" }
-          : {}),
+        ...(failure
+          ? { failure }
+          : reason === "manual"
+            ? { recoveryNotice: "当前内容未产生可用的压缩，已保留原上下文。" }
+            : {}),
       });
       return false;
     };
@@ -3300,7 +3369,13 @@ export class AgentSession {
       });
       return true;
     } catch (error) {
-      noChange();
+      noChange(
+        this.isTurnAborted(activeTurn)
+          ? undefined
+          : error instanceof CompactionTimeoutError
+            ? { reason: COMPACTION_FAILURE_REASONS.timeout, timeoutMs: error.timeoutMs }
+            : { reason: COMPACTION_FAILURE_REASONS.error },
+      );
       throw error;
     }
   }
