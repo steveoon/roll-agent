@@ -53,6 +53,8 @@ jobs:
             shard: 1/2
           - name: core-2
             shard: 2/2
+          - name: runtime
+            shard: ""
           - name: workspace
             shard: ""
 
@@ -65,14 +67,18 @@ jobs:
       - name: Setup workspace
         uses: ./.github/actions/setup-workspace
 
-      # Tests consume workspace source exports, so Core need not wait for dependency tests.
+      # Tests consume workspace source exports, so packages need not wait for dependency tests.
       # Keep every other package on the recursive path so new workspace packages are included.
       - name: Workspace unit tests
         if: matrix.name == 'workspace'
-        run: pnpm --filter '!@roll-agent/core' -r run test
+        run: pnpm --filter '!@roll-agent/core' --filter '!@roll-agent/runtime' -r run test
+
+      - name: Runtime unit tests
+        if: matrix.name == 'runtime'
+        run: pnpm --filter @roll-agent/runtime test
 
       - name: Core unit tests
-        if: matrix.name != 'workspace'
+        if: startsWith(matrix.name, 'core-')
         # Node options must precede the file globs; appending --test-shard to pnpm test is ignored.
         run: >
           pnpm --filter @roll-agent/core exec node
