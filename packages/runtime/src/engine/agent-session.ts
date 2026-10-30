@@ -38,7 +38,9 @@ import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
 import type { JsonSchemaRefIssue } from "../tool-contracts/json-schema-refs.ts";
+import { COMPACTION_FAILURE_REASONS } from "../types/events.ts";
 import type {
+  ContextCompactionFailure,
   ContextCompactionReason,
   ContextCompactionStrategy,
   SessionDebugData,
@@ -125,6 +127,7 @@ import {
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
 import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import {
+  CompactionTimeoutError,
   compactMessages,
   estimateMessagesTokens,
   estimateTextTokens,
@@ -3127,7 +3130,7 @@ export class AgentSession {
     const settings = this.compaction;
     const strategy = settings?.strategy ?? "summarize";
     queue.push({ type: "compaction-start", reason });
-    const noChange = (): false => {
+    const noChange = (failure?: ContextCompactionFailure): false => {
       queue.push({
         type: "context-compacted",
         ...(beforeInputTokens === undefined ? {} : { beforeInputTokens }),
@@ -3135,9 +3138,11 @@ export class AgentSession {
         strategy,
         removed: 0,
         kept: this.messages.length,
-        ...(reason === "manual"
-          ? { recoveryNotice: "当前内容未产生可用的压缩，已保留原上下文。" }
-          : {}),
+        ...(failure
+          ? { failure }
+          : reason === "manual"
+            ? { recoveryNotice: "当前内容未产生可用的压缩，已保留原上下文。" }
+            : {}),
       });
       return false;
     };
@@ -3300,7 +3305,13 @@ export class AgentSession {
       });
       return true;
     } catch (error) {
-      noChange();
+      noChange(
+        this.isTurnAborted(activeTurn)
+          ? undefined
+          : error instanceof CompactionTimeoutError
+            ? { reason: COMPACTION_FAILURE_REASONS.timeout, timeoutMs: error.timeoutMs }
+            : { reason: COMPACTION_FAILURE_REASONS.error },
+      );
       throw error;
     }
   }

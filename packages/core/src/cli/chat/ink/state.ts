@@ -13,6 +13,7 @@ import {
   formatToolInput,
 } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
+import { formatCompactionNoChange } from "../../utils/compaction-format.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
@@ -245,15 +246,13 @@ export function buildConfirmPrompt(
 function buildCompactionNotice(
   event: Extract<SessionEvent, { type: "context-compacted" }>,
 ): string {
-  if (event.recoveryNotice) return `${GLYPHS.compact} ${event.recoveryNotice}`;
+  const noChange = formatCompactionNoChange(event);
+  if (noChange !== undefined) return `${GLYPHS.compact} ${noChange}`;
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
   const checkpoint = event.checkpointGeneration
     ? `，checkpoint #${String(event.checkpointGeneration)}${event.checkpointSummaryStatus && event.checkpointSummaryStatus !== "valid" ? `(${event.checkpointSummaryStatus})` : ""}`
     : "";
-  if (event.removed === 0 && !event.truncatedTools) {
-    return `${GLYPHS.compact} ${label}：未减少上下文（保留策略或安全检查限制了裁剪）`;
-  }
   return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}${checkpoint}`;
 }
 

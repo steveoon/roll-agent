@@ -485,8 +485,42 @@ for (const reason of ["auto", "manual"] as const) {
     const item = state.history.at(-1);
     assert.ok(item?.kind === "compaction");
     assert.match(item.notice, /未减少上下文/u);
-    assert.doesNotMatch(item.notice, /无需压缩/u);
+    assert.match(item.notice, /已保留原上下文/u);
+    assert.doesNotMatch(item.notice, /无需压缩|保留策略|安全检查|超时|失败/u);
   });
+
+  for (const [failure, expected] of [
+    [{ reason: "timeout", timeoutMs: 120_000 }, /压缩超时（等待上限 120 秒）/u],
+    [{ reason: "error" }, /压缩失败/u],
+  ] as const) {
+    test(`${reason} ${failure.reason} compaction shows the failure and clears the spinner`, () => {
+      let state = event(createInitialState("fixture", 272_000), "start", {
+        type: "compaction-start",
+        reason,
+      });
+      state = event(state, "failed-compaction", {
+        type: "context-compacted",
+        reason,
+        strategy: "summarize",
+        removed: 0,
+        kept: 44,
+        failure,
+        recoveryNotice: "legacy generic notice",
+      });
+      assert.equal(state.live.compacting, false);
+      const item = state.history.at(-1);
+      assert.ok(item?.kind === "compaction");
+      assert.match(item.notice, expected);
+      assert.match(item.notice, reason === "auto" ? /自动压缩/u : /手动压缩/u);
+      assert.match(item.notice, /已保留原上下文/u);
+      assert.doesNotMatch(item.notice, /保留策略|安全检查|legacy generic notice/u);
+      if (failure.reason === "timeout") {
+        assert.match(item.notice, /调高压缩模型超时.*降低压缩推理强度/u);
+      } else {
+        assert.doesNotMatch(item.notice, /超时/u);
+      }
+    });
+  }
 }
 
 test("message-finish commits streamed assistant text and updates status", () => {
