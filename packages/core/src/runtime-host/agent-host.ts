@@ -270,6 +270,7 @@ export class CoreAgentHost implements AgentHost {
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
   private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
   private readonly onSkillLibraryIssue: CoreAgentHostOptions["onSkillLibraryIssue"];
+  private skillLibraryIssues = new Set<string>();
   private readonly onAgentBootstrapIssue: CoreAgentHostOptions["onAgentBootstrapIssue"];
   private readonly acquireAgentUsage: AcquireAgentUsage;
   private readonly installAgentFn: typeof installAgent;
@@ -333,11 +334,17 @@ export class CoreAgentHost implements AgentHost {
   private resolveSkillLibrary(agents = this.currentAgents()): SkillLibrary | undefined {
     if (this.explicitSkillLibrary === null) return undefined;
     if (this.explicitSkillLibrary !== undefined) return this.explicitSkillLibrary;
-    return createSkillLibrary({
+    const issues = new Set<string>();
+    const library = createSkillLibrary({
       agents,
       extraDirs: this.config.skills.dirs,
-      ...(this.onSkillLibraryIssue ? { onIssue: this.onSkillLibraryIssue } : {}),
+      onIssue: (message) => {
+        issues.add(message);
+        if (!this.skillLibraryIssues.has(message)) this.onSkillLibraryIssue?.(message);
+      },
     });
+    this.skillLibraryIssues = issues;
+    return library;
   }
 
   private async acquireDefaultAgentUsage(
@@ -597,6 +604,11 @@ export class CoreAgentHost implements AgentHost {
       }
       throw error;
     }
+  }
+
+  async refreshSkills(input: AgentHostOperation): Promise<SkillLibrary | undefined> {
+    this.assertOpen(input.signal);
+    return this.resolveSkillLibrary();
   }
 
   refresh(agentName: string, input: AgentHostOperation): Promise<AgentHostRefresh> {

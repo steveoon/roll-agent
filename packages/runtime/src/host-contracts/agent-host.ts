@@ -35,6 +35,8 @@ export interface AgentHostInstallResult {
 export interface AgentHost {
   prepare(input: AgentHostOperation): Promise<AgentHostSnapshot>;
   refresh(agentName: string, input: AgentHostOperation): Promise<AgentHostRefresh>;
+  /** Discover skills without reconnecting agents. Undefined means no available library. */
+  refreshSkills?(input: AgentHostOperation): Promise<SkillLibrary | undefined>;
   install?(
     shortName: string,
     report: (line: string) => void,

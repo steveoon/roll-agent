@@ -6465,7 +6465,7 @@ test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生�
 
 test("applyAgentRefresh 注入 skill library 后 roll__skill 可用", async () => {
   const model = sequencedModel([
-    toolCallStep("roll__skill", { name: "new-skill" }),
+    toolCallStep("roll__skill", { name: "new-skill", reference: null }),
     textStep("ok"),
   ]);
   const session = new AgentSession({ id: "refresh-2", model, sources: [], maxSteps: 8 });
