@@ -65,6 +65,27 @@ function options(overrides: Partial<CoreAgentHostOptions> = {}): CoreAgentHostOp
   };
 }
 
+test("skill refresh preserves explicit libraries and checks cancellation without connecting agents", async () => {
+  const library = { list: () => [], load: () => undefined, loadReference: () => undefined };
+  const host = new CoreAgentHost(
+    options({
+      skillLibrary: library,
+      clientManager: {
+        connectScoped: async () => {
+          throw new Error("unexpected connection");
+        },
+      },
+    }),
+  );
+  try {
+    assert.strictEqual(await host.refreshSkills(operation()), library);
+    await assert.rejects(host.refreshSkills({ ...operation(), signal: AbortSignal.abort() }));
+  } finally {
+    await host.dispose();
+  }
+  await assert.rejects(host.refreshSkills(operation()), /closing/);
+});
+
 const catalog = [
   {
     shortName: "probe",
