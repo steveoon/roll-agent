@@ -40,10 +40,21 @@ jobs:
         run: pnpm test:scripts
 
   unit-tests:
+    name: unit-tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core-1
+            shard: 1/2
+          - name: core-2
+            shard: 2/2
+          - name: workspace
+            shard: ""
 
     steps:
       - name: Checkout
@@ -54,8 +65,20 @@ jobs:
       - name: Setup workspace
         uses: ./.github/actions/setup-workspace
 
-      - name: Unit tests
-        run: pnpm test
+      # Tests consume workspace source exports, so Core need not wait for dependency tests.
+      # Keep every other package on the recursive path so new workspace packages are included.
+      - name: Workspace unit tests
+        if: matrix.name == 'workspace'
+        run: pnpm --filter '!@roll-agent/core' -r run test
+
+      - name: Core unit tests
+        if: matrix.name != 'workspace'
+        # Node options must precede the file globs; appending --test-shard to pnpm test is ignored.
+        run: >
+          pnpm --filter @roll-agent/core exec node
+          --experimental-strip-types --experimental-sqlite
+          --test-shard=${{ matrix.shard }} --test
+          "src/**/*.test.ts" "ui/**/*.test.ts"
 
   e2e:
     runs-on: ubuntu-latest

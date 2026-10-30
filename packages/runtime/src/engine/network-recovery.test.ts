@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { syncBuiltinESMExports } from "node:module";
+import test, { type TestContext } from "node:test";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
@@ -87,9 +88,25 @@ function setup(steps: LanguageModelV4StreamPart[][], options: Partial<AgentSessi
   });
   return { session, model, persisted, effects: () => effects };
 }
-async function collect(session: AgentSession) {
+async function collect(session: AgentSession, clock?: TestContext) {
+  if (clock) {
+    clock.mock.timers.enable({ apis: ["setTimeout"] });
+    // Keep the budget's named node:timers/promises import in sync with the mock.
+    syncBuiltinESMExports();
+    clock.after(() => {
+      clock.mock.timers.reset();
+      syncBuiltinESMExports();
+    });
+  }
   const events: SessionEvent[] = [];
-  for await (const event of session.send("complete this task")) events.push(event);
+  for await (const event of session.send("complete this task")) {
+    events.push(event);
+    if (clock && event.type === "model-recovery") {
+      // Exercise the real five-attempt schedule without sleeping for 31 seconds.
+      // model-recovery.test.ts checks both sides of every individual deadline.
+      clock.mock.timers.tick(1_000 * 2 ** (event.attempt - 1));
+    }
+  }
   return events;
 }
 
@@ -227,10 +244,10 @@ test("network recovery respects cancellation in backoff without another request"
   await fixture.session.close();
 });
 
-test("network recovery exhausts exactly five retries without SDK retry multiplication", async () => {
+test("network recovery exhausts exactly five retries without SDK retry multiplication", async (t) => {
   const fixture = setup([failure()]);
   try {
-    const events = await collect(fixture.session);
+    const events = await collect(fixture.session, t);
     assert.equal(fixture.model.doStreamCalls.length, 6);
     assert.deepEqual(
       events.filter((event) => event.type === "model-recovery").map((event) => event.attempt),
@@ -243,14 +260,14 @@ test("network recovery exhausts exactly five retries without SDK retry multiplic
   }
 });
 
-test("the fifth recovery can finish the original turn without replaying completed tools", async () => {
+test("the fifth recovery can finish the original turn without replaying completed tools", async (t) => {
   const fixture = setup([
     tool(),
     ...Array.from({ length: 5 }, () => failure()),
     text("done on the fifth recovery"),
   ]);
   try {
-    const events = await collect(fixture.session);
+    const events = await collect(fixture.session, t);
     assert.equal(fixture.model.doStreamCalls.length, 7);
     assert.equal(fixture.effects(), 1);
     assert.equal(fixture.session.getToolExecutions().length, 1);
