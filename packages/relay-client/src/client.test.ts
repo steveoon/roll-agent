@@ -824,18 +824,26 @@ test("an in-flight mutation reconnects with the same Relay and Runtime request I
 });
 
 test("a sent mutation timeout surfaces OUTCOME_UNKNOWN", async () => {
-  const harness = createHarness(10);
-  const socket = await connectHarness(harness);
-  const thread = await openThread(harness, socket);
+  const scheduler = new ManualRelayScheduler();
+  const harness = createHarness(5_000, scheduler);
+  try {
+    const socket = await connectHarness(harness);
+    const thread = await openThread(harness, socket);
 
-  const sending = thread.send("may have executed");
-  await assert.rejects(sending, (error: unknown) => {
-    assert.ok(error instanceof RelayClientError);
-    assert.equal(error.details.kind, "transport");
-    assert.equal(error.details.code, RELAY_CLIENT_TRANSPORT_ERROR_CODES.outcomeUnknown);
-    return true;
-  });
-  harness.client.close();
+    const sending = thread.send("may have executed", { timeoutMs: 10 });
+    lastRequest(socket, "turn.start");
+    const rejected = assert.rejects(sending, (error: unknown) => {
+      assert.ok(error instanceof RelayClientError);
+      assert.equal(error.details.kind, "transport");
+      assert.equal(error.details.code, RELAY_CLIENT_TRANSPORT_ERROR_CODES.outcomeUnknown);
+      return true;
+    });
+    scheduler.runDelay(10);
+    await rejected;
+    assert.equal(scheduler.pendingTimerCount, 0);
+  } finally {
+    harness.client.close();
+  }
 });
 
 test("REMOTE_REQUEST_DENIED stays typed and does not expose the Host reason", async () => {
