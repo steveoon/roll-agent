@@ -211,6 +211,7 @@ export function isRuntimeServerRequestMethodRequired(
 }
 
 export const RUNTIME_METHODS = {
+  reasoningTextSubscribe: "reasoning.text.subscribe",
   operationResultGet: "operation.result.get",
   initialize: "initialize",
   clientCapabilitiesSet: "client.capabilities.set",
@@ -1703,13 +1704,12 @@ const messageCompletedEventSchema = z
   .object({ type: z.literal("message.completed"), streamId: streamIdSchema, text: z.string() })
   .strict()
   .readonly();
+const reasoningDeltaFields = { reasoningId: z.string().min(1), delta: z.string() };
 const reasoningSummaryDeltaEventSchema = z
-  .object({
-    type: z.literal("reasoning.summary.delta"),
-    reasoningId: z.string().min(1),
-    delta: z.string(),
-  })
-  .strict()
+  .strictObject({ type: z.literal("reasoning.summary.delta"), ...reasoningDeltaFields })
+  .readonly();
+const reasoningTextDeltaEventSchema = z
+  .strictObject({ type: z.literal("reasoning.text.delta"), ...reasoningDeltaFields })
   .readonly();
 const toolStartedEventSchema = z
   .object({
@@ -1850,9 +1850,13 @@ export const runtimeDurableEventV16Schema = z.discriminatedUnion("type", [
   ...runtimeDurableEventV15Schema.options,
   contextRecoveryChangedEventSchema,
 ]);
+export const runtimeEphemeralEventV16Schema = z.discriminatedUnion("type", [
+  ...runtimeEphemeralEventV13Schema.options,
+  reasoningTextDeltaEventSchema,
+]);
 export const runtimeEventV16Schema = z.union([
   runtimeDurableEventV16Schema,
-  runtimeEphemeralEventV13Schema,
+  runtimeEphemeralEventV16Schema,
 ]);
 /** Latest Runtime Protocol event payloads. */
 export const runtimeEventSchema = runtimeEventV16Schema;
@@ -2011,7 +2015,7 @@ export const runtimeEphemeralEventEnvelopeV16Schema = z
     protocolVersion: z.literal("1.6"),
     ...runtimeEventEnvelopeFields,
     durability: z.literal("ephemeral"),
-    event: runtimeEphemeralEventV13Schema,
+    event: runtimeEphemeralEventV16Schema,
   })
   .strict()
   .superRefine(validateRuntimeEventCapabilities)
@@ -2225,6 +2229,10 @@ export const runtimeMethodSchemasV15 = {
 } as const;
 export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
+  [RUNTIME_METHODS.reasoningTextSubscribe]: {
+    params: z.object({}).strict().readonly(),
+    result: z.object({ subscribed: z.boolean() }).strict().readonly(),
+  },
   [RUNTIME_METHODS.approvalPreview]: {
     params: approvalPreviewParamsSchema,
     result: approvalPreviewResultSchema,

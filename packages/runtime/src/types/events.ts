@@ -33,6 +33,11 @@ export type ContextCompactionFailure =
     }
   | { readonly reason: typeof COMPACTION_FAILURE_REASONS.error };
 
+export interface ReasoningPresentation {
+  readonly kind: "summary" | "text";
+  readonly readDeltas: (nativeChunk: unknown) => readonly string[];
+}
+
 export type SessionEvent =
   | { readonly type: "context-recovery"; readonly state: ContextRecoveryView | null }
   | {
@@ -50,6 +55,7 @@ export type SessionEvent =
   | { readonly type: "reasoning-start"; readonly reasoningId: string }
   | {
       readonly type: "reasoning-delta";
+      readonly presentation?: ReasoningPresentation["kind"];
       readonly reasoningId: string;
       readonly delta: string;
     }

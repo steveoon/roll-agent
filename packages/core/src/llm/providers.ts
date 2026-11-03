@@ -23,18 +23,13 @@ import {
 } from "../tool-runtime/json-schema-refs.ts";
 
 export type { ThinkingLevel } from "./thinking-levels.ts";
+export class UnsupportedThinkingLevelError extends Error {}
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
 type GoogleThinkingConfig = NonNullable<GoogleGenerativeAIProviderOptions["thinkingConfig"]>;
 
 const THINKING_BUDGETS = { low: 2048, medium: 8192, high: 16384 } as const;
-const OPENAI_NONE_REASONING_PREFIXES = [
-  "gpt-5.1",
-  "gpt-5.2",
-  "gpt-5.3",
-  "gpt-5.4",
-  "gpt-5.5",
-] as const;
-const OPENAI_REASONING_MODEL_PREFIXES = ["o1", "o3", "o4-mini"] as const;
+// Same model family boundaries as the installed OpenAI Responses adapter.
+const GPT_MODEL_ID = /^gpt-(\d+)(?:\.(\d+))?(?:-(.+))?$/u;
 const XAI_GROK_420_PREFIX = "grok-4.20";
 const XAI_MULTI_AGENT_MARKER = "-multi-agent";
 const GEMINI_25_PRO_MIN_THINKING_BUDGET = 128;
@@ -42,13 +37,15 @@ const GEMINI_PRE_3_MODEL_PATTERN = /^gemini-(?:[12](?:[.-]|$)|pro(?:-vision)?$)/
 const GEMINI_FLASH_VERSION_PATTERN = /^gemini-(\d+)\.(\d+)-flash(?:$|-(?!lite(?:-|$)))/;
 
 function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
-  return OPENAI_NONE_REASONING_PREFIXES.some((prefix) => modelName.startsWith(prefix));
+  const gpt = GPT_MODEL_ID.exec(modelName);
+  return gpt !== null && (Number(gpt[1]) > 5 || (Number(gpt[1]) === 5 && Number(gpt[2]) >= 1));
 }
 
-function isOpenAIReasoningModel(modelName: string): boolean {
+export function isOpenAIReasoningModel(modelName: string): boolean {
+  if (/^o\d+(?:-|$)/u.test(modelName)) return true;
+  const gpt = GPT_MODEL_ID.exec(modelName);
   return (
-    OPENAI_REASONING_MODEL_PREFIXES.some((prefix) => modelName.startsWith(prefix)) ||
-    (modelName.startsWith("gpt-5") && !modelName.startsWith("gpt-5-chat"))
+    gpt !== null && Number(gpt[1]) >= 5 && !(gpt[2] === undefined && gpt[3]?.startsWith("chat"))
   );
 }
 
@@ -69,17 +66,19 @@ function isXaiNonReasoningModel(modelName: string): boolean {
   return modelName === "grok-3" || modelName === "grok-4-1" || modelName.includes("-non-reasoning");
 }
 
-function supportsXaiReasoningEffort(modelName: string): boolean {
-  return !isXaiFixedGrok420Model(modelName);
-}
-
 function isXaiFixedGrok420Model(modelName: string): boolean {
   return modelName.startsWith(XAI_GROK_420_PREFIX) && !modelName.includes(XAI_MULTI_AGENT_MARKER);
 }
 
+const XAI_ALWAYS_REASONING_MODELS: ReadonlySet<string> = new Set([
+  "grok-4.5",
+  "grok-4.6",
+  "grok-4.7",
+]);
+
 function isXaiRequiredReasoningModel(modelName: string): boolean {
   return (
-    modelName === "grok-4.5" ||
+    XAI_ALWAYS_REASONING_MODELS.has(modelName) ||
     modelName.includes(XAI_MULTI_AGENT_MARKER) ||
     (isXaiFixedGrok420Model(modelName) && !isXaiNonReasoningModel(modelName))
   );
@@ -156,12 +155,13 @@ export function thinkingProviderOptions(
     if (isXaiNonReasoningModel(modelName)) {
       return undefined;
     }
-    if (!supportsXaiReasoningEffort(modelName)) {
-      return level === "off" ? undefined : { xai: { reasoningSummary: "auto" } };
+    if (isXaiFixedGrok420Model(modelName)) return undefined;
+    if (level === "off" && XAI_ALWAYS_REASONING_MODELS.has(modelName)) {
+      throw new UnsupportedThinkingLevelError(
+        `模型 ${modelName} 不支持关闭思考。请将 runtime.thinking-level 设为 low 或更高。`,
+      );
     }
-    return level === "off"
-      ? { xai: { reasoningEffort: "none" } }
-      : { xai: { reasoningEffort: level, reasoningSummary: "auto" } };
+    return { xai: { reasoningEffort: level === "off" ? "none" : level } };
   }
   if (providerName === "deepseek") {
     return { deepseek: { thinking: { type: level === "off" ? "disabled" : "enabled" } } };
@@ -311,19 +311,12 @@ function resolveStructuredOutputReasoning(
     if (isXaiNonReasoningModel(modelName)) {
       return undefined;
     }
-    if (isXaiFixedGrok420Model(modelName)) {
-      if (level === "off") {
-        throw new Error(
-          `xAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
-        );
-      }
-      return undefined;
-    }
     if (level === "off" && isXaiRequiredReasoningModel(modelName)) {
-      throw new Error(
-        `xAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
+      throw new UnsupportedThinkingLevelError(
+        `模型 ${modelName} 不支持关闭思考。请将 runtime.compaction.thinking-level 设为 low 或更高。`,
       );
     }
+    if (isXaiFixedGrok420Model(modelName)) return undefined;
   }
   if (providerName === "google" && level === "off" && isGemini25Pro(modelName)) {
     throw new Error(

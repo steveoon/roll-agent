@@ -80,6 +80,7 @@ export interface ConversationEngineOptions {
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
   readonly modelRecovery?: AgentSessionOptions["modelRecovery"];
+  readonly resolveReasoningPresentation?: AgentSessionOptions["resolveReasoningPresentation"];
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   readonly debugEvents?: boolean;
@@ -200,6 +201,7 @@ export class ConversationEngine {
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private modelRecovery: AgentSessionOptions["modelRecovery"];
+  private readonly resolveReasoningPresentation: AgentSessionOptions["resolveReasoningPresentation"];
   private modelOverride: LanguageModelV4 | undefined;
   private modelName: string;
   private provider: string;
@@ -255,6 +257,7 @@ export class ConversationEngine {
     this.maxSteps = options.maxSteps ?? options.settings.maxSteps;
     this.providerOptions = options.providerOptions;
     this.modelRecovery = options.modelRecovery;
+    this.resolveReasoningPresentation = options.resolveReasoningPresentation;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
     this.debugEvents = options.debugEvents ?? false;
@@ -433,6 +436,9 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
+      ...(this.resolveReasoningPresentation
+        ? { resolveReasoningPresentation: this.resolveReasoningPresentation }
+        : {}),
       onBeforeTurn: this.assertModelUpdateIdle,
       ...(this.modelRecovery === undefined ? {} : { modelRecovery: this.modelRecovery }),
       sources: context.sources,

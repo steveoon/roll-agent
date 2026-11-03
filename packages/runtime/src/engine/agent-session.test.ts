@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { APICallError, simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
+import { JSONParseError } from "@ai-sdk/provider";
 import type {
   LanguageModelV4CallOptions,
   LanguageModelV4FinishReason,
@@ -1356,6 +1357,87 @@ test("AgentSession 保持 thinking 但不持久化 reasoning-only 输出", async
   assert.equal(finish.text, "");
   assert.equal(finish.totalUsage?.outputTokens, 3);
   assert.deepEqual(session.getMessages(), [{ role: "user", content: "hi" }]);
+});
+
+test("a storage failure wrapping an SDK parse error preserves the storage diagnosis", async () => {
+  const cause = new JSONParseError({ text: "private-input-fixture", cause: new Error("invalid") });
+  for (const message of ["会话索引写入失败", `会话索引写入失败：${cause.message}`]) {
+    const model = new MockLanguageModelV4({});
+    const session = new AgentSession({
+      id: "storage-error",
+      model,
+      sources: [],
+      maxSteps: 1,
+      onPersist() {
+        throw new Error(message, { cause });
+      },
+    });
+    try {
+      const events = await collect(session.send("test"));
+      const failure = events.find((event) => event.type === "error");
+      assert.ok(failure);
+      assert.match(failure.message, /会话索引写入失败/u);
+      assert.doesNotMatch(failure.message, /private-input-fixture|模型调用/u);
+      assert.equal(model.doStreamCalls.length, 0);
+    } finally {
+      await session.close();
+    }
+  }
+});
+
+test("unmatched or stale native reasoning proofs do not mark SDK deltas for display", async () => {
+  const delta = (value: string): LanguageModelV4StreamPart => ({
+    type: "reasoning-delta",
+    id: "r",
+    delta: value,
+  });
+  const session = new AgentSession({
+    id: "reasoning-source-match",
+    sources: [],
+    maxSteps: 1,
+    model: sequencedModel([
+      [
+        { type: "stream-start", warnings: [] },
+        { type: "reasoning-start", id: "r" },
+        { type: "raw", rawValue: "known" },
+        delta("first"),
+        delta("unexpected"),
+        delta("second"),
+        { type: "raw", rawValue: "known" },
+        { type: "raw", rawValue: "unknown" },
+        delta("first"),
+        { type: "reasoning-end", id: "r" },
+        { type: "finish", usage: usage(), finishReason: STOP },
+      ],
+    ]),
+    providerOptions: { fixture: { display: true } },
+    resolveReasoningPresentation: (_, options) =>
+      options?.fixture?.display === true
+        ? { kind: "summary", readDeltas: (raw) => (raw === "known" ? ["first", "second"] : []) }
+        : undefined,
+  });
+  try {
+    const events = await collect(session.send("hi"));
+    assert.deepEqual(
+      events.flatMap((event) =>
+        event.type === "reasoning-delta" ? [[event.delta, event.presentation]] : [],
+      ),
+      [
+        ["first", "summary"],
+        ["unexpected", undefined],
+        ["second", undefined],
+        ["first", undefined],
+      ],
+    );
+    session.setProviderOptions({ fixture: { display: false } });
+    const next = await collect(session.send("again"));
+    assert.ok(next.some((event) => event.type === "reasoning-delta"));
+    assert.ok(
+      next.every((event) => event.type !== "reasoning-delta" || event.presentation === undefined),
+    );
+  } finally {
+    await session.close();
+  }
 });
 
 test("AgentSession chat 调用注入最终回复必须走 text 通道的系统提示", async () => {
