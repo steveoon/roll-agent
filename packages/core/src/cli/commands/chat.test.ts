@@ -181,11 +181,12 @@ test("resolveChatLlmCalls skips structured reasoning for truncate compaction", (
     "grok-4.5",
     "test-key",
     undefined,
-    "off",
+    "low",
     "off",
     false,
   );
 
+  assert.deepEqual(resolved.providerOptions, { xai: { reasoningEffort: "low" } });
   assert.equal(resolved.structuredOutputReasoning, undefined);
   assert.equal(resolved.structuredOutputProviderOptions, undefined);
 });

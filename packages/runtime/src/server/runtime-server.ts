@@ -1,4 +1,5 @@
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
+import type { ModelMessage } from "ai";
 import {
   RUNTIME_ERROR_CODES,
   jsonValueSchema,
@@ -35,6 +36,26 @@ import {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function legacyMessageViews(messages: readonly ModelMessage[]) {
+  return messages
+    .map((message) => {
+      const { providerOptions: _options, ...view } = message;
+      if (typeof view.content === "string") return view;
+      const content = view.content
+        .filter((part) => part.type !== "reasoning")
+        .map((part) => {
+          if (!("providerOptions" in part)) return part;
+          const { providerOptions: _partOptions, ...visible } = part;
+          return visible;
+        });
+      return { ...view, content };
+    })
+    .filter(
+      (view) =>
+        !(view.role === "assistant" && Array.isArray(view.content) && view.content.length === 0),
+    );
 }
 
 class MethodNotFoundError extends Error {}
@@ -316,6 +337,8 @@ export class RuntimeServer {
         const params = sendParamsSchema.parse(request.params);
         const session = this.requireSession(params.sessionId);
         for await (const event of session.send(params.input)) {
+          // Legacy session.* has no private-text subscription.
+          if (event.type === "reasoning-delta") continue;
           this.sendNotificationOrThrow({
             jsonrpc: "2.0",
             method: EVENT_NOTIFICATION,
@@ -352,7 +375,9 @@ export class RuntimeServer {
       }
       case RpcMethod.Messages: {
         const params = messagesParamsSchema.parse(request.params);
-        return { messages: this.requireSession(params.sessionId).getMessages() };
+        return {
+          messages: legacyMessageViews(this.requireSession(params.sessionId).getMessages()),
+        };
       }
       case RpcMethod.ToolExecutions: {
         const params = toolExecutionsParamsSchema.parse(request.params);

@@ -1321,6 +1321,9 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
   const model = sequencedModel([
     [
       { type: "stream-start", warnings: [] },
+      { type: "reasoning-start", id: "r" },
+      { type: "reasoning-delta", id: "r", delta: "private-legacy-fixture" },
+      { type: "reasoning-end", id: "r" },
       {
         type: "tool-call",
         toolCallId: "c1",
@@ -1332,7 +1335,12 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
     [
       { type: "stream-start", warnings: [] },
       { type: "text-start", id: "t" },
-      { type: "text-delta", id: "t", delta: "已发送" },
+      {
+        type: "text-delta",
+        id: "t",
+        delta: "已发送",
+        providerMetadata: { google: { thoughtSignature: "opaque-legacy-signature" } },
+      },
       { type: "text-end", id: "t" },
       { type: "finish", usage: usage(), finishReason: STOP },
     ],
@@ -1393,6 +1401,10 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
     input: "send hi",
   })) as { status: string };
   assert.equal(sendResult.status, "completed");
+  assert.doesNotMatch(JSON.stringify(events), /private-legacy-fixture|opaque-legacy-signature/u);
+  const messages = JSON.stringify(await request(3, RpcMethod.Messages, { sessionId }));
+  assert.match(messages, /已发送/u);
+  assert.doesNotMatch(messages, /private-legacy-fixture|opaque-legacy-signature/u);
 
   assert.ok(events.some((event) => event.type === "confirmation-required"));
   const toolResult = events.find((event) => event.type === "tool-result");

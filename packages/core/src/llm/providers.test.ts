@@ -319,7 +319,7 @@ describe("resolveLLMCall", () => {
 
     assert.equal(resolved.model.modelId, "grok-4.5");
     assert.deepEqual(resolved.providerOptions, {
-      xai: { reasoningEffort: "medium", reasoningSummary: "auto" },
+      xai: { reasoningEffort: "medium" },
     });
   });
 
@@ -412,6 +412,8 @@ describe("resolveLLMCall", () => {
 
     for (const model of [
       "grok-4.5",
+      "grok-4.6",
+      "grok-4.7",
       "grok-4.20-reasoning",
       "grok-4.20-beta-0309-reasoning",
       "grok-4.20-beta-latest",
@@ -420,7 +422,9 @@ describe("resolveLLMCall", () => {
     ] as const) {
       assert.throws(
         () => resolveLLMCall("xai", model, "test-key", "structured-output", undefined, "off"),
-        (error: Error) => error.message.includes(`xAI model "${model}" cannot disable reasoning`),
+        (error: Error) =>
+          error.message.includes(`模型 ${model} 不支持关闭思考`) &&
+          error.message.includes("runtime.compaction.thinking-level"),
       );
     }
   });
@@ -509,7 +513,7 @@ describe("resolveLLMCall", () => {
       {
         provider: "xai",
         model: "grok-4.5",
-        expected: { xai: { reasoningEffort: "high", reasoningSummary: "auto" } },
+        expected: { xai: { reasoningEffort: "high" } },
       },
       {
         provider: "google",
@@ -674,7 +678,7 @@ describe("resolveLLMCall", () => {
 
     assert.equal(capturedUrl, "https://api.x.ai/v1/responses");
     assert.ok(isRecord(capturedBody));
-    // xAI always returns detailed summaries; the provider no longer sends the deprecated hint.
+    // The pinned xAI adapter serializes only the supported effort setting.
     assert.deepEqual(capturedBody.reasoning, { effort: "medium" });
   });
 
@@ -804,18 +808,21 @@ describe("thinkingProviderOptions", () => {
     });
   });
 
-  it("maps xAI reasoning effort and requests visible summaries", () => {
-    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "off"), {
-      xai: { reasoningEffort: "none" },
-    });
+  it("maps xAI reasoning effort and rejects off on models that require reasoning", () => {
+    for (const model of ["grok-4.5", "grok-4.6", "grok-4.7"]) {
+      assert.throws(
+        () => thinkingProviderOptions("xai", model, "off"),
+        /不支持关闭思考。请将 runtime\.thinking-level 设为 low/u,
+      );
+    }
     assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "low"), {
-      xai: { reasoningEffort: "low", reasoningSummary: "auto" },
+      xai: { reasoningEffort: "low" },
     });
     assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "medium"), {
-      xai: { reasoningEffort: "medium", reasoningSummary: "auto" },
+      xai: { reasoningEffort: "medium" },
     });
     assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "high"), {
-      xai: { reasoningEffort: "high", reasoningSummary: "auto" },
+      xai: { reasoningEffort: "high" },
     });
   });
 
@@ -826,12 +833,11 @@ describe("thinkingProviderOptions", () => {
       undefined,
     );
     assert.equal(thinkingProviderOptions("xai", "grok-4.20-reasoning", "off"), undefined);
-    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.20-reasoning", "medium"), {
-      xai: { reasoningSummary: "auto" },
-    });
-    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.20-beta-latest-reasoning", "medium"), {
-      xai: { reasoningSummary: "auto" },
-    });
+    assert.equal(thinkingProviderOptions("xai", "grok-4.20-reasoning", "medium"), undefined);
+    assert.equal(
+      thinkingProviderOptions("xai", "grok-4.20-beta-latest-reasoning", "medium"),
+      undefined,
+    );
     assert.equal(thinkingProviderOptions("xai", "grok-3", "medium"), undefined);
   });
 

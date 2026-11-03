@@ -347,6 +347,31 @@ ephemeral；两者仍保留进程内 `sequence`，但只有 durable event 具有
 | `ephemeral` | `message.started`、`message.delta`、`reasoning.summary.delta`、`tool.started`、`tool.output` | 只有进程内 `sequence`；没有 `eventId`/`cursor`，不承诺重放 |
 
 `approval.required` 在 `"1.0"` 是控制事件；在 1.6/1.5/1.4/1.3/1.2/1.1 仅为只读 View Event。
+握手声明 `reasoning-summary` 时，客户端按 `runtimeInstanceId/threadId/turnId/reasoningId`
+合并 `reasoning.summary.delta` 片段。能力声明不保证每轮都有摘要。公开摘要来源如下：
+
+| 适配器 | 作为摘要展示的内容 |
+|---|---|
+| OpenAI Responses | 原生 `response.reasoning_summary_text.delta` |
+| Claude Messages | 明确请求 `thinking.display: "summarized"` 后返回的 `thinking_delta` |
+| Gemini Generate Content | 请求 `includeThoughts: true` 后，首个候选中标有 `thought: true` 的非空文本，按原顺序展示。见 [Google 文档](https://ai.google.dev/gemini-api/docs/generate-content/thinking#thought-summaries)。 |
+| xAI Responses | 仅为明确配置的 `grok-4.7`，启用思考时接受 `response.reasoning_summary_text.delta` 和 `response.reasoning_text.delta`。[xAI 将这两者列为该型号的摘要](https://docs.x.ai/developers/model-capabilities/text/reasoning)。默认 `grok-4.5` 不声明此能力。 |
+
+连接 Companion/Relay 时，公开摘要可发给远端客户端，并可从 Companion 的有界帧缓冲区重发。
+Runtime 的持久事件历史不记录摘要。单个推理块超过 16,384 个 UTF-16 码元，或脱敏结果无法安全地接在已发文本之后时，
+Runtime 只追加一次“后续内容已省略”的提示并停止展示该块。最终回答照常继续。
+
+Claude 的签名和加密块、Gemini 的 `thoughtSignature`、Grok 的 `encrypted_content` 都不作为展示文本。
+
+本地客户端可在 1.6 握手后发送 `reasoning.text.subscribe`，参数为 `{}`。若结果为
+`{ "subscribed": true }`，当前连接可以收到 `reasoning.text.delta`，载荷含 `reasoningId` 和
+`delta`。当前支持开启思考的 DeepSeek 和 Qwen（DashScope）返回的 `reasoning_content`。
+未支持该方法的旧服务返回 JSON-RPC
+`-32601`，不提供此能力的模型返回 `{ "subscribed": false }`。两种情况下客户端都可以继续对话。
+订阅按连接生效，对订阅之后开始的轮次有效，断线重连需重新订阅。这类临时事件不进入公开事件监听器、历史重放或 Relay。
+
+旧版 `session.*` 客户端可继续接收回答和工具事件。读取思考文本需使用上述 1.6 订阅；旧版消息查询不返回推理片段或 SDK 的 providerOptions。
+
 Raw model reasoning、Token/reasoning/tool-output delta、原始 Tool input/evidence、
 compaction/debug 事件和 AI SDK `ModelMessage` 都不会进入 durable 日志。Store 提交失败时，
 Runtime 不得发布一个无法恢复的 durable live event。

@@ -1,3 +1,4 @@
+import { resolveReasoningPresentation } from "../../llm/reasoning-presentation.ts";
 import { ChatGptConnection, type ChatConnection } from "../../runtime-host/chatgpt-connection.ts";
 import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-session-preparation.ts";
 import { basename, join } from "node:path";
@@ -5,7 +6,7 @@ import { defineCommand } from "citty";
 import { isCancel, select } from "@clack/prompts";
 import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
-import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { thinkingProviderOptions, UnsupportedThinkingLevelError } from "../../llm/providers.ts";
 import {
   assertChatGptFastModeSupported,
   withChatGptFastMode,
@@ -187,8 +188,9 @@ export async function runServer(config: RollConfig): Promise<void> {
     RuntimeServer,
     createStdioConnection,
   } = runtime;
-  const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
-    resolveChatLlmCalls(
+  let calls: ReturnType<typeof resolveChatLlmCalls>;
+  try {
+    calls = resolveChatLlmCalls(
       provider,
       modelName,
       providerConfig.apiKey,
@@ -197,6 +199,15 @@ export async function runServer(config: RollConfig): Promise<void> {
       config.runtime.compaction.thinkingLevel,
       config.runtime.compaction.strategy === "summarize",
     );
+  } catch (error) {
+    if (!(error instanceof UnsupportedThinkingLevelError)) throw error;
+    log.error(error.message);
+    process.exitCode = 1;
+    return;
+  }
+  const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
+    calls;
+  const display = resolveReasoningPresentation(model, providerOptions);
   const store = new ThreadStore(config.runtime.threadsDir);
   const chatCliScope = createChatCliScope();
   let engine: ConversationEngineInstance | undefined;
@@ -209,6 +220,7 @@ export async function runServer(config: RollConfig): Promise<void> {
       model,
       store,
       surface: CHAT_ENGINE_SURFACES.server,
+      ...(display ? { resolveReasoningPresentation } : {}),
       shellEnv: chatCliScope.env,
       ...(providerOptions ? { providerOptions } : {}),
       ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
@@ -219,6 +231,7 @@ export async function runServer(config: RollConfig): Promise<void> {
     const runtimeService = new RuntimeService(activeEngine, store, {
       serverVersion: "1.0",
       runtimeVersion: getCurrentVersion(),
+      ...(display ? { providerReasoning: display.kind } : {}),
       attachmentStore: new AttachmentStore({
         dir: join(config.runtime.threadsDir, "attachments"),
       }),

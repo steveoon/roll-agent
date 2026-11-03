@@ -22,7 +22,7 @@ import {
   operationIdSchema,
   parseLatestRuntimeMethodResult,
   runtimeDurableEventV16Schema,
-  runtimeEphemeralEventV13Schema,
+  runtimeEphemeralEventV16Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
   streamIdSchema,
@@ -58,7 +58,8 @@ import type { SessionAttachment } from "../engine/session-attachments.ts";
 import { AttachmentStore, type AttachmentStoreFailure } from "./attachment-store.ts";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
-import type { SessionEvent } from "../types/events.ts";
+import { TurnReasoningDisplay } from "./turn-reasoning-display.ts";
+import type { ReasoningPresentation, SessionEvent } from "../types/events.ts";
 import {
   isSensitiveFieldName,
   redactSecretText,
@@ -118,6 +119,8 @@ export interface RuntimeServiceOptions {
   readonly runtimeVersion?: string;
   readonly maxFrameBytes?: number;
   readonly idempotencyCacheEntries?: number;
+  /** Accept only source-classified deltas of this kind. Text requires a separate local subscription. */
+  readonly providerReasoning?: ReasoningPresentation["kind"];
   /**
    * Optional host-controlled projection. Raw model reasoning is never sent to public clients.
    * Supplying this enables the `reasoning-summary` capability.
@@ -147,6 +150,7 @@ interface ActiveTurnState {
 }
 
 interface TurnProjectionState {
+  readonly reasoning: TurnReasoningDisplay | undefined;
   streamId: ReturnType<typeof streamIdSchema.parse> | undefined;
   text: string;
   terminalEvent:
@@ -539,6 +543,10 @@ export class RuntimeService {
   private readonly reasoningSummaryProjector:
     | RuntimeServiceOptions["reasoningSummaryProjector"]
     | undefined;
+  private readonly providerReasoning: RuntimeServiceOptions["providerReasoning"];
+  private reasoningTextSubscription:
+    | { deliver: (event: RuntimeEventEnvelopeV16) => void }
+    | undefined;
   private readonly attachmentStore: AttachmentStore | undefined;
   private readonly sessions = new Map<string, RuntimeServiceSession>();
   private readonly activeTurns = new Map<string, ActiveTurnState>();
@@ -571,6 +579,7 @@ export class RuntimeService {
       options.idempotencyCacheEntries ?? DEFAULT_IDEMPOTENCY_CACHE_ENTRIES;
     this.mutationRequests = new MutationRequestCache(this.idempotencyCacheEntries);
     this.reasoningSummaryProjector = options.reasoningSummaryProjector;
+    this.providerReasoning = options.providerReasoning;
     this.attachmentStore = options.attachmentStore;
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
@@ -597,7 +606,10 @@ export class RuntimeService {
       );
     }
     const legacyFeatures = RUNTIME_FEATURES_V13.filter(
-      (feature) => feature !== "reasoning-summary" || this.reasoningSummaryProjector !== undefined,
+      (feature) =>
+        feature !== "reasoning-summary" ||
+        this.providerReasoning === "summary" ||
+        (this.providerReasoning === undefined && this.reasoningSummaryProjector !== undefined),
     );
     const commonResult = {
       protocolVersion,
@@ -649,6 +661,20 @@ export class RuntimeService {
           protocolVersion,
           limits: { ...commonResult.limits, eventReplay: false },
         };
+  }
+
+  subscribeReasoningText(
+    listener: (event: RuntimeEventEnvelopeV16) => void,
+  ): (() => void) | undefined {
+    this.assertOpen();
+    if (this.providerReasoning !== "text" || this.reasoningTextSubscription) return undefined;
+    const subscription = { deliver: listener };
+    this.reasoningTextSubscription = subscription;
+    return () => {
+      if (this.reasoningTextSubscription === subscription) {
+        this.reasoningTextSubscription = undefined;
+      }
+    };
   }
 
   onEvent(listener: (event: RuntimeEventEnvelopeV16) => void): () => void {
@@ -950,6 +976,7 @@ export class RuntimeService {
           status: "running",
           interactionFailure: undefined,
         };
+        const reasoning = this.createTurnReasoningDisplay(state);
         this.activeTurns.set(params.threadId, state);
         this.activeTurnOwners.set(params.turnId, params.threadId);
         try {
@@ -959,7 +986,7 @@ export class RuntimeService {
           this.activeTurnOwners.delete(params.turnId);
           throw error;
         }
-        this.driveTurn(state, params.input.text, attachments).catch(() => undefined);
+        this.driveTurn(state, params.input.text, attachments, reasoning).catch(() => undefined);
         return { accepted: true, turnId: params.turnId };
       },
     );
@@ -1356,6 +1383,7 @@ export class RuntimeService {
     this.pendingApprovals.clear();
     this.pendingUserInputs.clear();
     this.userInputListeners.clear();
+    this.reasoningTextSubscription = undefined;
     this.attachmentStore?.close();
     await Promise.allSettled(sessions.map((session) => session.close()));
     this.mutationRequests.clear();
@@ -1434,10 +1462,16 @@ export class RuntimeService {
       : {
           ...commonEnvelope,
           durability: "ephemeral",
-          event: runtimeEphemeralEventV13Schema.parse(event),
+          event: runtimeEphemeralEventV16Schema.parse(event),
         };
     this.sequence += 1;
-    for (const listener of this.listeners) {
+    const listeners =
+      event.type === "reasoning.text.delta"
+        ? this.reasoningTextSubscription
+          ? [this.reasoningTextSubscription.deliver]
+          : []
+        : this.listeners;
+    for (const listener of listeners) {
       try {
         listener(envelope);
       } catch {
@@ -1463,12 +1497,35 @@ export class RuntimeService {
     }
   }
 
+  private createTurnReasoningDisplay(state: ActiveTurnState): TurnReasoningDisplay | undefined {
+    const kind = this.providerReasoning;
+    const legacy = this.reasoningSummaryProjector;
+    if (kind === undefined && !legacy) return undefined;
+    const subscription = this.reasoningTextSubscription;
+    if (kind === "text" && !subscription) return undefined;
+    const type = kind === "text" ? "reasoning.text.delta" : "reasoning.summary.delta";
+    const canDeliver = () => kind !== "text" || subscription === this.reasoningTextSubscription;
+    return new TurnReasoningDisplay(
+      (event) => {
+        if (!canDeliver()) return undefined;
+        if (kind === undefined) return legacy?.(event.delta);
+        return event.presentation === kind ? event.delta : undefined;
+      },
+      (reasoningId, delta) => {
+        if (canDeliver()) this.emit(state.threadId, state.turnId, { type, reasoningId, delta });
+      },
+      kind === undefined,
+    );
+  }
+
   private async driveTurn(
     state: ActiveTurnState,
     input: string,
     attachments: readonly SessionAttachment[] | undefined,
+    reasoning: TurnReasoningDisplay | undefined,
   ): Promise<void> {
     const projection: TurnProjectionState = {
+      reasoning,
       streamId: undefined,
       text: "",
       terminalEvent: undefined,
@@ -1482,6 +1539,7 @@ export class RuntimeService {
       }
       terminalEvent = projection.terminalEvent ?? { type: "turn.completed" };
     } catch (error: unknown) {
+      projection.reasoning?.reset();
       terminalEvent = projection.terminalEvent ?? {
         type: "turn.failed",
         stage: "execute",
@@ -1542,6 +1600,7 @@ export class RuntimeService {
   ): void {
     switch (event.type) {
       case "message-start": {
+        projection.reasoning?.reset();
         // Internal context maintenance rebuilds the SDK stream without ending the
         // logical message. Keep its identity and already displayed text.
         if (projection.streamId !== undefined) return;
@@ -1572,6 +1631,7 @@ export class RuntimeService {
         return;
       }
       case "message-finish": {
+        projection.reasoning?.finish();
         const streamId = projection.streamId ?? streamIdSchema.parse(randomUUID());
         if (projection.streamId === undefined) {
           this.emit(state.threadId, state.turnId, { type: "message.started", streamId });
@@ -1585,17 +1645,15 @@ export class RuntimeService {
         projection.text = "";
         return;
       }
-      case "reasoning-delta": {
-        const summary = this.reasoningSummaryProjector?.(event.delta);
-        if (summary !== undefined && summary.length > 0) {
-          this.emit(state.threadId, state.turnId, {
-            type: "reasoning.summary.delta",
-            reasoningId: event.reasoningId,
-            delta: redactSecretText(summary),
-          });
-        }
+      case "reasoning-start":
+        projection.reasoning?.start(event.reasoningId);
         return;
-      }
+      case "reasoning-delta":
+        projection.reasoning?.append(event);
+        return;
+      case "reasoning-end":
+        projection.reasoning?.end(event.reasoningId);
+        return;
       case "tool-call":
         this.emit(state.threadId, state.turnId, {
           type: "tool.started",
@@ -1703,6 +1761,7 @@ export class RuntimeService {
         return;
       }
       case "turn-cancelled": {
+        projection.reasoning?.reset();
         projection.terminalEvent ??=
           state.interactionFailure === undefined
             ? {
@@ -1718,6 +1777,7 @@ export class RuntimeService {
         break;
       }
       case "error":
+        projection.reasoning?.reset();
         projection.terminalEvent ??= {
           type: "turn.failed",
           stage: event.stage,
@@ -1730,13 +1790,15 @@ export class RuntimeService {
           contextRecovery: event.state,
         });
         break;
-      case "debug":
-      case "tool-input-activity": // UI-only metadata: not durable Runtime Protocol events.
       case "model-step-start":
       case "model-recovery":
-      case "reasoning-start":
-      case "reasoning-end":
+        projection.reasoning?.reset();
+        break;
       case "step-finish":
+        projection.reasoning?.finish();
+        break;
+      case "debug":
+      case "tool-input-activity": // UI-only metadata: not durable Runtime Protocol events.
       case "compaction-start":
       case "context-compacted":
         break;
