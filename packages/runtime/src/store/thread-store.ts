@@ -3129,10 +3129,21 @@ export class ThreadStore {
       throw error;
     }
     this.sessionReservations.set(threadId, claim.token);
+    let released = false;
+    let releaseFailure: { readonly cause: unknown } | undefined;
     return {
       ...claim,
       release: () => {
-        claim.release();
+        if (releaseFailure !== undefined) throw releaseFailure.cause;
+        if (released) return;
+        try {
+          claim.release();
+        } catch (cause) {
+          // Underlying release may already be non-retryable; retain the reservation on failure.
+          releaseFailure = { cause };
+          throw cause;
+        }
+        released = true;
         if (this.sessionReservations.get(threadId) === claim.token) {
           this.sessionReservations.delete(threadId);
         }

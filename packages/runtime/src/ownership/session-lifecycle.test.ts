@@ -496,3 +496,79 @@ test("late protocol callbacks and old close barriers cannot borrow a reopened se
     await f.close();
   }
 });
+
+test("repeated old session release cannot remove a successor reservation sharing a generic hold", async () => {
+  const f = setup();
+  const extra = new ConversationEngine({
+    store: f.first,
+    model: new MockLanguageModelV4({}),
+    provider: "mock",
+    modelName: "fixture",
+    settings: runtimeSettingsSchema.parse({}),
+    sources: [],
+    skillLibrary: null,
+    workspaceInstructions: null,
+  });
+  const id = f.first.createThread();
+  const hold = f.first.retainThread(id)!;
+  try {
+    const old = f.first.retainSession(id)!;
+    assert.equal(old.token, hold.token);
+    old.release();
+    const first = await f.a.resumeSession(id);
+    old.release();
+    old.release();
+    assert.throws(() => old.assert(), SessionOccupiedError);
+    await assert.rejects(extra.resumeSession(id), SessionOccupiedError);
+    await first.close();
+    const successor = await extra.resumeSession(id);
+    old.release();
+    await assert.rejects(f.a.resumeSession(id), SessionOccupiedError);
+    await successor.close();
+  } finally {
+    await extra.dispose();
+    hold.release();
+    await f.close();
+  }
+});
+
+test("failed underlying release remains failed and cannot clear the session reservation on retry", async (t) => {
+  const f = setup();
+  const id = f.first.createThread();
+  const claims: unknown = Reflect.get(f.first, "claims");
+  assert.ok(claims instanceof SessionClaims);
+  const acquire = claims.acquire.bind(claims);
+  const failure = new Error("controlled release failure");
+  let releaseUnderlying: (() => void) | undefined;
+  let attempts = 0;
+  const mocked = t.mock.method(claims, "acquire", (threadId: string) => {
+    const claim = acquire(threadId);
+    releaseUnderlying = claim.release;
+    return {
+      ...claim,
+      release: () => {
+        // Model an underlying handle that becomes a no-op after its failed first attempt.
+        if (++attempts === 1) throw failure;
+      },
+    };
+  });
+  try {
+    const reservation = f.first.retainSession(id)!;
+    mocked.mock.restore();
+    assert.throws(
+      () => reservation.release(),
+      (error: unknown) => error === failure,
+    );
+    assert.throws(
+      () => reservation.release(),
+      (error: unknown) => error === failure,
+    );
+    assert.equal(attempts, 1);
+    assert.throws(() => f.first.retainSession(id), SessionOccupiedError);
+    await assert.rejects(f.b.resumeSession(id), SessionOccupiedError);
+  } finally {
+    mocked.mock.restore();
+    releaseUnderlying?.();
+    await f.close();
+  }
+});
