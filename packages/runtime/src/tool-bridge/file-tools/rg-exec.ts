@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { toNamespacedPath } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -34,7 +35,7 @@ export function runRg(
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   return new Promise((resolve) => {
     execFile(
-      rgPath,
+      toNamespacedPath(rgPath),
       [...args],
       {
         cwd,
