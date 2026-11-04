@@ -1153,7 +1153,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
     );
   } finally {
     database?.close();
-    await service.close();
+    await assert.rejects(service.close(), /blocked terminal runtime event insert/u);
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }

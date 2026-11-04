@@ -346,3 +346,17 @@ export type {
   ScheduleRunHistoryEntry,
   ScheduleHistoryTask,
 } from "./scheduler/types.ts";
+export {
+  SESSION_OCCUPANCY_CAPABILITY,
+  SessionOccupiedError,
+  SessionClaims,
+  canonicalSessionDatabasePath,
+  type SessionClaim,
+} from "./ownership/session-claims.ts";
+export {
+  inspectThreadLibrary,
+  migrateThreadLibrary,
+  ThreadLibraryMigrationRequiredError,
+  THREAD_STORE_SCHEMA_VERSION,
+  type ThreadLibraryPreflight,
+} from "./store/thread-store.ts";

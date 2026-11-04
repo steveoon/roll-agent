@@ -2798,3 +2798,42 @@ test("ChatApp session switching reads the selected archive instead of active con
   assert.deepEqual(opened, ["s1", "s2"]);
   assert.deepEqual(second.sent(), []);
 });
+
+test("ChatApp does not retire/delete a session whose cleanup failed", async () => {
+  const first = switchableFakeSession("s1");
+  const second = switchableFakeSession("s2");
+  let failed = false;
+  Object.defineProperty(first.session, "close", {
+    value: async () => {
+      failed = true;
+      throw new Error("cleanup remains unknown");
+    },
+  });
+  const retired: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "fixture",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [{ id: "t2", title: "next", meta: "fixture" }],
+        resume: async () => second.session,
+        onRetired: (id: string) => retired.push(id),
+      },
+    }),
+  );
+  try {
+    await delay(20);
+    stdin.write("/resume");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.match(lastFrame() ?? "", /切换会话/u));
+    stdin.write("\r");
+    await waitFor(() => assert.equal(failed, true));
+    await delay(10);
+    assert.deepEqual(retired, []);
+  } finally {
+    unmount();
+  }
+});

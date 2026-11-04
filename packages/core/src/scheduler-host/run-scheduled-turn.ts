@@ -1,3 +1,4 @@
+import { createOwnedThreadStore } from "../runtime-host/session-ownership.ts";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -113,7 +114,7 @@ export function createScheduledTurnRunner(
         error: "运行会话登记失败：执行所有权已变化",
       };
     }
-    const store = new input.runtime.ThreadStore(threadsDir);
+    const store = createOwnedThreadStore(input.runtime, threadsDir, "scheduler");
     let engine: ReturnType<typeof createChatEngine> | undefined;
     let session:
       | Awaited<ReturnType<ReturnType<typeof createChatEngine>["createSession"]>>

@@ -1358,3 +1358,74 @@ test("runRepl /diff on 让后续文件变更 diff 完整输出，/diff off 恢�
     process.stderr.write = originalWrite;
   }
 });
+
+test(
+  "basic CLI switch keeps its current claim on conflict, then retires only after successful resume",
+  { timeout: 10_000 },
+  async () => {
+    const runtime = await import("@roll-agent/runtime");
+    const { createOwnedThreadStore } = await import("../../runtime-host/session-ownership.ts");
+    const root = mkdtempSync(join(tmpdir(), "roll-cli-switch-claims-"));
+    const first = createOwnedThreadStore(runtime, root);
+    const second = createOwnedThreadStore(runtime, root, "desktop");
+    const engine = (store: InstanceType<typeof runtime.ThreadStore>) =>
+      new runtime.ConversationEngine({
+        store,
+        provider: "mock",
+        modelName: "unused",
+        model: new MockLanguageModelV4({}),
+        settings: runtime.runtimeSettingsSchema.parse({}),
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+      });
+    const cli = engine(first);
+    const desktop = engine(second);
+    const input = new PassThrough();
+    let repl: Promise<void> | undefined;
+    try {
+      const currentId = first.createThread();
+      const targetId = first.createThread();
+      first.appendMessages(currentId, [{ role: "user", content: "saved current" }]);
+      first.appendMessages(targetId, [{ role: "user", content: "saved target" }]);
+      const current = await cli.resumeSession(currentId);
+      const occupied = await desktop.resumeSession(targetId);
+      const attempted = Promise.withResolvers<void>();
+      const switched = Promise.withResolvers<void>();
+      repl = runRepl(current, first, false, {
+        input,
+        output: sink(),
+        sessionPicker: async () => targetId,
+        resumeSession: async (id) => {
+          try {
+            return await cli.resumeSession(id);
+          } catch (error) {
+            attempted.resolve();
+            throw error;
+          }
+        },
+        onActiveSessionChange: () => switched.resolve(),
+      });
+      input.write("/resume\n");
+      await attempted.promise;
+      await delay(20);
+      await assert.rejects(desktop.resumeSession(currentId), runtime.SessionOccupiedError);
+      await occupied.close();
+      input.write("/resume\n");
+      await switched.promise;
+      await delay(20);
+      await desktop.resumeSession(currentId);
+      await assert.rejects(desktop.resumeSession(targetId), runtime.SessionOccupiedError);
+      input.write("exit\n");
+      await repl;
+    } finally {
+      input.end();
+      await repl;
+      await cli.dispose();
+      await desktop.dispose();
+      first.close();
+      second.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

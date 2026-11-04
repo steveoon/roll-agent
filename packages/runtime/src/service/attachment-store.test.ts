@@ -410,7 +410,7 @@ test("并存实例互不破坏：新实例构造不删活跃实例的附件，cl
   rmSync(workDir, { recursive: true, force: true });
 });
 
-test("构造时清扫超龄的孤儿实例目录", () => {
+test("构造与关闭不因目录年龄删除其他实例", () => {
   const storeDir = join(tempDir(), "attachments");
   const staleDir = join(storeDir, "00000000-dead-4000-8000-000000000001");
   mkdirSync(staleDir, { recursive: true });
@@ -419,8 +419,10 @@ test("构造时清扫超龄的孤儿实例目录", () => {
   utimesSync(staleDir, staleMs / 1_000, staleMs / 1_000);
 
   const store = new AttachmentStore({ dir: storeDir });
-  assert.equal(existsSync(staleDir), false);
+  assert.equal(existsSync(staleDir), true);
   store.close();
+  assert.equal(existsSync(staleDir), true);
+  rmSync(storeDir, { recursive: true, force: true });
 });
 
 test("local-path committed 附件计入暂存配额", () => {

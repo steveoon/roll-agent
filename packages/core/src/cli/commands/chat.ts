@@ -1,3 +1,7 @@
+import {
+  createOwnedThreadStore,
+  captureSessionLibraryBinding,
+} from "../../runtime-host/session-ownership.ts";
 import { resolveReasoningPresentation } from "../../llm/reasoning-presentation.ts";
 import { ChatGptConnection, type ChatConnection } from "../../runtime-host/chatgpt-connection.ts";
 import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-session-preparation.ts";
@@ -169,6 +173,7 @@ async function runChatOnboardingFlow(provider: string, model: string): Promise<b
 }
 
 export async function runServer(config: RollConfig): Promise<void> {
+  captureSessionLibraryBinding();
   const llmStatus = resolveChatLlmReadiness(config);
   if (!llmStatus.configured || !llmStatus.providerConfig) {
     log.error(llmStatus.message);
@@ -184,7 +189,6 @@ export async function runServer(config: RollConfig): Promise<void> {
     AttachmentStore,
     RuntimeClientRequestCoordinator,
     RuntimeService,
-    ThreadStore,
     RuntimeServer,
     createStdioConnection,
   } = runtime;
@@ -208,7 +212,7 @@ export async function runServer(config: RollConfig): Promise<void> {
   const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
     calls;
   const display = resolveReasoningPresentation(model, providerOptions);
-  const store = new ThreadStore(config.runtime.threadsDir);
+  const store = createOwnedThreadStore(runtime, config.runtime.threadsDir, "runtime");
   const chatCliScope = createChatCliScope();
   let engine: ConversationEngineInstance | undefined;
   let signalScope: ChatEngineSignalScope | undefined;
@@ -283,8 +287,8 @@ export async function runServer(config: RollConfig): Promise<void> {
 
 async function listSessions(config: RollConfig, asJson: boolean): Promise<void> {
   const runtime = await loadRuntime();
-  const { ThreadStore } = runtime;
-  const store = new ThreadStore(config.runtime.threadsDir);
+
+  const store = createOwnedThreadStore(runtime, config.runtime.threadsDir);
   try {
     backfillScheduledThreads(config, runtime, store);
     const threads = store.listThreads({ origin: "interactive" });
@@ -443,16 +447,23 @@ export async function runRepl(
           session = next;
           io.onActiveSessionChange?.(session);
           previous.setUserInputAvailable(false);
-          await previous.close().catch((error: unknown) => {
-            log.warn(`原会话清理未完成：${error instanceof Error ? error.message : String(error)}`);
-          });
+          const settled = await previous
+            .close()
+            .then(() => true)
+            .catch((error: unknown) => {
+              log.warn(
+                `原会话清理未完成：${error instanceof Error ? error.message : String(error)}`,
+              );
+              return false;
+            });
           if (
+            settled &&
             initial.isNew &&
             previous.id === initial.id &&
             !initial.submitted &&
             store.countMessages(previous.id) === 0
           ) {
-            store.deleteThread(previous.id);
+            store.deleteThread(previous.id, { onlyIfEmpty: true });
           }
           session.setUserInputAvailable(true);
           const previousDiffDisplay = renderer.diffDisplay;
@@ -504,7 +515,7 @@ export async function runRepl(
           !initial.submitted &&
           store.countMessages(previous.id) === 0
         ) {
-          store.deleteThread(previous.id);
+          store.deleteThread(previous.id, { onlyIfEmpty: true });
         }
         session = next;
         session.setUserInputAvailable(true);
@@ -556,7 +567,7 @@ export async function runRepl(
         !initial.submitted &&
         store.countMessages(session.id) === 0
       ) {
-        store.deleteThread(session.id);
+        store.deleteThread(session.id, { onlyIfEmpty: true });
       }
     }
   }
@@ -592,6 +603,7 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    captureSessionLibraryBinding();
     let { config } = loadConfig();
     const applyLlmOverrides = (loaded: RollConfig): RollConfig => {
       const runtime = { ...loaded.runtime };
@@ -764,7 +776,7 @@ export default defineCommand({
     }
 
     const runtime = await loadRuntime();
-    const { ThreadStore } = runtime;
+
     const {
       model,
       modelRecovery,
@@ -772,7 +784,7 @@ export default defineCommand({
       structuredOutputProviderOptions,
       structuredOutputReasoning,
     } = selection;
-    const store = new ThreadStore(config.runtime.threadsDir);
+    const store = createOwnedThreadStore(runtime, config.runtime.threadsDir);
     const modelCatalog = createChatGptCatalog(
       runtime,
       runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath()),

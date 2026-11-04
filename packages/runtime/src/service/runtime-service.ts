@@ -1,3 +1,4 @@
+import type { SessionClaim } from "../ownership/session-claims.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
@@ -106,7 +107,16 @@ export type RuntimeServiceSession = Pick<
   | "getCapabilityManifest"
   | "getCapabilityTurnContext"
 > &
-  Partial<Pick<AgentSession, "setUserInputAvailable" | "resolveUserInput" | "cancelUserInput">>;
+  Partial<
+    Pick<
+      AgentSession,
+      | "setUserInputAvailable"
+      | "resolveUserInput"
+      | "cancelUserInput"
+      | "assertWritable"
+      | "addCloseBarrier"
+    >
+  >;
 
 export interface RuntimeServiceEngine {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
@@ -141,6 +151,7 @@ export type RuntimeApprovalDecision =
   | { readonly decision: "reject"; readonly reason?: string };
 
 interface ActiveTurnState {
+  readonly ownership: SessionClaim | undefined;
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly session: RuntimeServiceSession;
@@ -164,6 +175,7 @@ interface TurnProjectionState {
 }
 
 interface PendingApprovalState {
+  readonly ownership: SessionClaim | undefined;
   readonly threadId: ThreadId;
   readonly session: RuntimeServiceSession;
   readonly approval: PendingApproval;
@@ -298,6 +310,10 @@ export class MutationRequestCache {
       },
     );
     return pending;
+  }
+
+  async settlePending(): Promise<void> {
+    await Promise.allSettled([...this.inFlight.values()].map((entry) => entry.response));
   }
 
   clear(): void {
@@ -531,6 +547,12 @@ function toPendingApproval(
 }
 
 export class RuntimeService {
+  private closePromise: Promise<void> | undefined;
+  private readonly openingSessions = new Map<string, Promise<RuntimeServiceSession>>();
+  private readonly closingThreads = new Set<string>();
+  private readonly ownership = new Map<string, SessionClaim>();
+  private readonly turnJobs = new Map<string, Promise<void>>();
+
   readonly runtimeInstanceId: RuntimeInstanceId;
 
   private readonly engine: RuntimeServiceEngine;
@@ -840,7 +862,7 @@ export class RuntimeService {
     params: RuntimeMethodParams<"thread.rename">,
   ): Promise<RuntimeMethodResult<"thread.rename">> {
     return this.mutationRequests.run(params.requestId, RUNTIME_METHODS.threadRename, params, () => {
-      this.assertOpen();
+      this.assertThreadOpen(params.threadId);
       this.requireThread(params.threadId);
       this.store.updateTitle(params.threadId, params.title);
       return {
@@ -857,7 +879,7 @@ export class RuntimeService {
       RUNTIME_METHODS.threadDelete,
       params,
       async () => {
-        this.assertOpen();
+        this.assertThreadOpen(params.threadId);
         this.requireThread(params.threadId);
         if (this.activeTurns.has(params.threadId)) {
           throw new RuntimeServiceError(
@@ -866,13 +888,17 @@ export class RuntimeService {
             { retryable: true },
           );
         }
+        const hold = this.store.retainThread(params.threadId);
+        this.closingThreads.add(params.threadId);
+        await Promise.allSettled([this.openingSessions.get(params.threadId)]);
         const session = this.sessions.get(params.threadId);
-        if (session !== undefined) {
-          await session.close();
-          this.sessions.delete(params.threadId);
-        }
-        this.attachmentStore?.releaseThread(params.threadId);
+        await session?.close();
+        await this.turnJobs.get(params.threadId);
+        this.finishThread(params.threadId);
+        hold?.assert();
         this.store.deleteThread(params.threadId);
+        hold?.release();
+        this.closingThreads.delete(params.threadId);
         return { deleted: true };
       },
     );
@@ -888,15 +914,18 @@ export class RuntimeService {
       async () => {
         this.assertOpen();
         this.requireThread(params.threadId);
-        if (this.activeTurns.has(params.threadId)) {
-          return { detached: false };
-        }
+        if (this.closingThreads.has(params.threadId)) return { detached: false };
+        this.closingThreads.add(params.threadId);
+        await Promise.allSettled([this.openingSessions.get(params.threadId)]);
         const session = this.sessions.get(params.threadId);
-        if (session === undefined) {
+        if (session === undefined && !this.ownership.has(params.threadId)) {
+          this.closingThreads.delete(params.threadId);
           return { detached: false };
         }
-        await session.close();
-        this.sessions.delete(params.threadId);
+        await session?.close();
+        await this.turnJobs.get(params.threadId);
+        this.finishThread(params.threadId);
+        this.closingThreads.delete(params.threadId);
         return { detached: true };
       },
     );
@@ -942,7 +971,7 @@ export class RuntimeService {
             `Turn "${params.turnId}" 已属于另一个 Thread`,
           );
         }
-        if (this.activeTurns.has(params.threadId)) {
+        if (this.activeTurns.has(params.threadId) || this.turnJobs.has(params.threadId)) {
           throw new RuntimeServiceError(
             RUNTIME_ERROR_CODES.turnAlreadyActive,
             `Thread "${params.threadId}" 已有活动 Turn`,
@@ -960,15 +989,17 @@ export class RuntimeService {
             `Turn "${params.turnId}" 已属于另一个 Thread`,
           );
         }
-        if (this.activeTurns.has(params.threadId)) {
+        if (this.activeTurns.has(params.threadId) || this.turnJobs.has(params.threadId)) {
           throw new RuntimeServiceError(
             RUNTIME_ERROR_CODES.turnAlreadyActive,
             `Thread "${params.threadId}" 已有活动 Turn`,
             { retryable: true },
           );
         }
+        this.assertThreadOpen(params.threadId);
         const attachments = this.resolveTurnAttachments(params);
         const state: ActiveTurnState = {
+          ownership: this.ownership.get(params.threadId),
           threadId: params.threadId,
           turnId: params.turnId,
           session,
@@ -980,13 +1011,21 @@ export class RuntimeService {
         this.activeTurns.set(params.threadId, state);
         this.activeTurnOwners.set(params.turnId, params.threadId);
         try {
-          this.emit(params.threadId, params.turnId, { type: "turn.started" });
+          this.emit(state.ownership, params.threadId, params.turnId, { type: "turn.started" });
         } catch (error: unknown) {
           this.activeTurns.delete(params.threadId);
           this.activeTurnOwners.delete(params.turnId);
           throw error;
         }
-        this.driveTurn(state, params.input.text, attachments, reasoning).catch(() => undefined);
+        const job = this.driveTurn(state, params.input.text, attachments, reasoning);
+        this.turnJobs.set(params.threadId, job);
+        job.then(
+          () => {
+            if (this.turnJobs.get(params.threadId) === job) this.turnJobs.delete(params.threadId);
+          },
+          () => undefined,
+        ); // Failed projection remains a failed close barrier; never release it.
+
         return { accepted: true, turnId: params.turnId };
       },
     );
@@ -1085,7 +1124,9 @@ export class RuntimeService {
       RUNTIME_METHODS.attachmentStage,
       params,
       () => {
-        this.assertOpen();
+        this.assertThreadOpen(params.threadId);
+        this.requireThread(params.threadId);
+        this.retainOwnership(params.threadId);
         this.requireThread(params.threadId);
         const result = this.requireAttachmentStore().stage({
           threadId: params.threadId,
@@ -1116,7 +1157,9 @@ export class RuntimeService {
       RUNTIME_METHODS.attachmentChunk,
       params,
       () => {
-        this.assertOpen();
+        this.assertThreadOpen(params.threadId);
+        this.requireThread(params.threadId);
+        this.retainOwnership(params.threadId);
         const result = this.requireAttachmentStore().appendChunk({
           threadId: params.threadId,
           attachmentId: params.attachmentId,
@@ -1139,7 +1182,9 @@ export class RuntimeService {
       RUNTIME_METHODS.attachmentCommit,
       params,
       () => {
-        this.assertOpen();
+        this.assertThreadOpen(params.threadId);
+        this.requireThread(params.threadId);
+        this.retainOwnership(params.threadId);
         const result = this.requireAttachmentStore().commit({
           threadId: params.threadId,
           attachmentId: params.attachmentId,
@@ -1160,7 +1205,9 @@ export class RuntimeService {
       RUNTIME_METHODS.attachmentRelease,
       params,
       () => {
-        this.assertOpen();
+        this.assertThreadOpen(params.threadId);
+        this.requireThread(params.threadId);
+        this.retainOwnership(params.threadId);
         const result = this.requireAttachmentStore().release({
           threadId: params.threadId,
           attachmentId: params.attachmentId,
@@ -1366,28 +1413,39 @@ export class RuntimeService {
     };
   }
 
-  async close(): Promise<void> {
-    if (this.closing) {
-      return;
-    }
+  close(): Promise<void> {
+    if (this.closePromise !== undefined) return this.closePromise;
     this.closing = true;
     this.setUserInputAvailable(false);
-    for (const turn of this.activeTurns.values()) {
-      turn.session.cancel();
-    }
-    const sessions = [...this.sessions.values()];
-    this.sessions.clear();
-    this.activeTurns.clear();
-    this.activeTurnOwners.clear();
-    this.settledTurnOwners.clear();
-    this.pendingApprovals.clear();
-    this.pendingUserInputs.clear();
-    this.userInputListeners.clear();
-    this.reasoningTextSubscription = undefined;
-    this.attachmentStore?.close();
-    await Promise.allSettled(sessions.map((session) => session.close()));
-    this.mutationRequests.clear();
-    this.fatalErrorListeners.clear();
+    for (const turn of this.activeTurns.values()) turn.session.cancel();
+    this.closePromise = (async () => {
+      await this.mutationRequests.settlePending();
+      await Promise.allSettled(this.openingSessions.values());
+      const results = await Promise.allSettled(
+        [...this.sessions.values()].map((session) => session.close()),
+      );
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((result) => result.reason),
+          "Runtime session cleanup failed",
+        );
+      }
+      await Promise.all(this.turnJobs.values());
+      for (const id of this.ownership.keys()) this.finishThread(id);
+      this.sessions.clear();
+      this.activeTurns.clear();
+      this.activeTurnOwners.clear();
+      this.settledTurnOwners.clear();
+      this.pendingApprovals.clear();
+      this.pendingUserInputs.clear();
+      this.userInputListeners.clear();
+      this.reasoningTextSubscription = undefined;
+      this.attachmentStore?.close();
+      this.mutationRequests.clear();
+      this.fatalErrorListeners.clear();
+    })();
+    return this.closePromise;
   }
 
   private assertOpen(): void {
@@ -1410,23 +1468,88 @@ export class RuntimeService {
   }
 
   private async requireSession(threadId: ThreadId): Promise<RuntimeServiceSession> {
-    this.assertOpen();
+    this.assertThreadOpen(threadId);
     this.requireThread(threadId);
     const existing = this.sessions.get(threadId);
     if (existing !== undefined) {
+      existing.assertWritable?.();
+      this.ownership.get(threadId)?.assert();
       return existing;
     }
-    const session = await this.engine.resumeSession(threadId);
-    this.rememberSession(session);
-    return session;
+    const pending = this.openingSessions.get(threadId);
+    if (pending !== undefined) return pending;
+    const result = this.engine
+      .resumeSession(threadId)
+      .then((session) => {
+        this.rememberSession(session);
+        this.assertThreadOpen(threadId);
+        return session;
+      })
+      .finally(() => this.openingSessions.delete(threadId));
+    this.openingSessions.set(threadId, result);
+    return result;
+  }
+
+  private assertThreadOpen(threadId: string): void {
+    this.assertOpen();
+    if (this.closingThreads.has(threadId)) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.threadBusy,
+        "会话正在关闭，请等待清理完成",
+        { retryable: true },
+      );
+    }
+  }
+
+  private retainOwnership(threadId: string): void {
+    this.assertThreadOpen(threadId);
+    const existing = this.ownership.get(threadId);
+    if (existing !== undefined) {
+      existing.assert();
+      return;
+    }
+    const claim = this.store.retainThread(threadId);
+    if (claim !== undefined) this.ownership.set(threadId, claim);
+  }
+
+  private finishThread(threadId: string): void {
+    this.ownership.get(threadId)?.assert();
+    this.attachmentStore?.releaseThread(threadIdSchema.parse(threadId));
+    this.ownership.get(threadId)?.release();
+    this.ownership.delete(threadId);
+    this.sessions.delete(threadId);
   }
 
   private rememberSession(session: RuntimeServiceSession): void {
+    if (this.sessions.get(session.id) === session) return;
+    const claim = this.ownership.get(session.id) ?? this.store.retainThread(session.id);
+    if (claim !== undefined) {
+      claim.assert();
+      this.ownership.set(session.id, claim);
+    }
+    session.addCloseBarrier?.(async () => {
+      await this.turnJobs.get(session.id);
+      claim?.assert();
+      if (this.sessions.get(session.id) !== session) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.threadBusy,
+          "会话已关闭，不能释放后续会话的占用",
+        );
+      }
+      this.finishThread(session.id);
+    });
     session.setUserInputAvailable?.(this.userInputAvailable);
     this.sessions.set(session.id, session);
   }
 
-  private emit(threadId: ThreadId, turnId: TurnId | undefined, event: RuntimeEvent): void {
+  private emit(
+    ownership: SessionClaim | undefined,
+    threadId: ThreadId,
+    turnId: TurnId | undefined,
+    event: RuntimeEvent,
+  ): void {
+    // A late callback must never borrow a newer session's claim from the map.
+    ownership?.assert();
     const timestamp = new Date().toISOString();
     const commonEnvelope = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,
@@ -1512,7 +1635,9 @@ export class RuntimeService {
         return event.presentation === kind ? event.delta : undefined;
       },
       (reasoningId, delta) => {
-        if (canDeliver()) this.emit(state.threadId, state.turnId, { type, reasoningId, delta });
+        if (canDeliver()) {
+          this.emit(state.ownership, state.threadId, state.turnId, { type, reasoningId, delta });
+        }
       },
       kind === undefined,
     );
@@ -1607,7 +1732,7 @@ export class RuntimeService {
         const streamId = streamIdSchema.parse(randomUUID());
         projection.streamId = streamId;
         projection.text = "";
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "message.started",
           streamId,
         });
@@ -1617,13 +1742,13 @@ export class RuntimeService {
         const streamId = projection.streamId ?? streamIdSchema.parse(randomUUID());
         if (projection.streamId === undefined) {
           projection.streamId = streamId;
-          this.emit(state.threadId, state.turnId, {
+          this.emit(state.ownership, state.threadId, state.turnId, {
             type: "message.started",
             streamId,
           });
         }
         projection.text += event.delta;
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "message.delta",
           streamId,
           delta: event.delta,
@@ -1634,9 +1759,12 @@ export class RuntimeService {
         projection.reasoning?.finish();
         const streamId = projection.streamId ?? streamIdSchema.parse(randomUUID());
         if (projection.streamId === undefined) {
-          this.emit(state.threadId, state.turnId, { type: "message.started", streamId });
+          this.emit(state.ownership, state.threadId, state.turnId, {
+            type: "message.started",
+            streamId,
+          });
         }
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "message.completed",
           streamId,
           text: redactSecretText(projection.text || event.text),
@@ -1655,7 +1783,7 @@ export class RuntimeService {
         projection.reasoning?.end(event.reasoningId);
         return;
       case "tool-call":
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "tool.started",
           toolCallId: event.toolCallId,
           agentName: event.agentName,
@@ -1664,7 +1792,7 @@ export class RuntimeService {
         });
         return;
       case "tool-output-delta":
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "tool.output",
           toolCallId: event.toolCallId,
           agentName: event.agentName,
@@ -1674,7 +1802,7 @@ export class RuntimeService {
         });
         return;
       case "tool-result":
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "tool.completed",
           appOutput:
             event.executionId === undefined
@@ -1697,6 +1825,7 @@ export class RuntimeService {
       case "confirmation-required": {
         const approval = toPendingApproval(state.turnId, event);
         this.pendingApprovals.set(approval.id, {
+          ownership: state.ownership,
           threadId: state.threadId,
           session: state.session,
           approval,
@@ -1704,7 +1833,7 @@ export class RuntimeService {
           // Redact the whole snapshot once, before pagination, so page boundaries cannot reveal secrets.
           fullDiff: event.fullDiff === undefined ? undefined : redactSecretText(event.fullDiff),
         });
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "approval.required",
           approval,
         });
@@ -1785,7 +1914,7 @@ export class RuntimeService {
         };
         break;
       case "context-recovery":
-        this.emit(state.threadId, state.turnId, {
+        this.emit(state.ownership, state.threadId, state.turnId, {
           type: "context.recovery.changed",
           contextRecovery: event.state,
         });
@@ -1845,7 +1974,7 @@ export class RuntimeService {
       "reason" in resolution && resolution.reason !== undefined
         ? { ...resolution, reason: redactSecretText(resolution.reason) }
         : resolution;
-    this.emit(pending.threadId, pending.approval.turnId, {
+    this.emit(pending.ownership, pending.threadId, pending.approval.turnId, {
       type: "approval.resolved",
       approvalId: pending.approval.id,
       resolution: safeResolution,
@@ -1934,6 +2063,6 @@ export class RuntimeService {
         ? { status: "expired", reason: "Turn 已超时" }
         : { status: "cancelled", reason: `Turn 已终止：${event.type}` },
     );
-    this.emit(state.threadId, state.turnId, event);
+    this.emit(state.ownership, state.threadId, state.turnId, event);
   }
 }
