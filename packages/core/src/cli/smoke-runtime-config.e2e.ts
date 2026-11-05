@@ -36,7 +36,7 @@ test(
   "real stdio and restarted daemon preserve selected config, task cwd, Agent and library",
   { timeout: 90000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), "roll-context-live-"));
+    const root = mkdtempSync(join(tmpdir(), "roll context live-"));
     const source = join(root, "配置 source");
     const task = join(root, "daily task");
     const home = join(root, "home");
@@ -181,7 +181,7 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
       HOME: home,
       USERPROFILE: home,
       PATH: `${dirname(process.execPath)}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
-      NODE_OPTIONS: `--experimental-strip-types --experimental-sqlite --import=${preload}`,
+      NODE_OPTIONS: `--experimental-strip-types --experimental-sqlite --import=${pathToFileURL(preload).href}`,
       NO_PROXY: "127.0.0.1",
       TEMP: root,
       TMP: root,
@@ -189,6 +189,7 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
       ...(process.env.WINDIR === undefined ? {} : { WINDIR: process.env.WINDIR }),
     };
     let client: RollNodeClient | undefined;
+    let runtimeLog = "";
     let daemon: ChildProcessWithoutNullStreams | undefined;
     let daemonLog = "";
     let store: ScheduleStore | undefined;
@@ -245,6 +246,9 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
           source,
         ],
         env,
+        onStderr: (line) => {
+          runtimeLog += `${line}\n`;
+        },
         requestTimeoutMs: 15000,
       });
       const { thread } = await client.request("thread.create", { requestId: randomUUID() });
@@ -421,7 +425,9 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
       await stopDaemon();
       assert.equal(existsSync(join(task, "wrong-history")), false);
     } catch (error) {
-      throw new Error(`${String(error)}\n${daemonLog}\n${failures.join("\n")}`, { cause: error });
+      throw new Error(`${String(error)}\n${runtimeLog}\n${daemonLog}\n${failures.join("\n")}`, {
+        cause: error,
+      });
     } finally {
       await client?.shutdown();
       if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
