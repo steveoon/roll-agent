@@ -1,7 +1,6 @@
 import { describeAppOutput } from "@roll-agent/protocol";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import { buildSessionModelRequest } from "./model-request.ts";
 import { ModelRecoveryBudget, type ModelTurnRecovery } from "./model-recovery.ts";
 import {
@@ -34,6 +33,7 @@ import type {
   LanguageModelV4StreamPart,
   SharedV4ProviderOptions,
 } from "@ai-sdk/provider";
+import { InvalidResponseDataError, JSONParseError, TypeValidationError } from "@ai-sdk/provider";
 import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { SkillLibrary, SkillSummary } from "../skills/contracts.ts";
@@ -45,6 +45,7 @@ import type {
   ContextCompactionStrategy,
   SessionDebugData,
   SessionDebugStage,
+  ReasoningPresentation,
   SessionEvent,
   SessionTokenUsage,
 } from "../types/events.ts";
@@ -238,6 +239,10 @@ export interface SessionModelSwitch {
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
+  readonly resolveReasoningPresentation?: (
+    model: Pick<LanguageModelV4, "provider" | "modelId">,
+    options: SharedV4ProviderOptions | undefined,
+  ) => ReasoningPresentation | undefined;
   /** @internal Synchronous engine admission before accepting input or starting compaction. */
   readonly onBeforeTurn?: () => void;
   readonly modelRecovery?: ModelTurnRecovery;
@@ -387,7 +392,6 @@ interface TurnCancellationActivity {
   readonly hadPotentialSideEffects: boolean;
 }
 
-const SESSION_CLOSE_TIMEOUT_MS = 6_000;
 const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
 const INTERRUPTED_STEP_POLICIES = {
@@ -479,9 +483,39 @@ function markTurnSegmentPersisted(activeTurn: ActiveTurn): void {
   activeTurn.userMessagePersisted = true;
 }
 
+/** These SDK errors include the whole input/response, even when it is opaque provider state. */
+function findSdkDataError(error: unknown): Error | undefined {
+  const seen = new Set<Error>();
+  while (error instanceof Error && !seen.has(error)) {
+    if (
+      TypeValidationError.isInstance(error) ||
+      InvalidResponseDataError.isInstance(error) ||
+      JSONParseError.isInstance(error)
+    ) {
+      return error;
+    }
+    seen.add(error);
+    error = error.cause;
+  }
+  return undefined;
+}
+
+function invalidModelDataMessage(error: unknown): string | undefined {
+  const invalid = findSdkDataError(error);
+  if (!invalid) return undefined;
+  return JSONParseError.isInstance(invalid)
+    ? "模型调用返回了无效的 JSON。"
+    : "模型调用的数据未通过格式校验。";
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    // Keep the outer diagnosis, including when it wraps an SDK error from a tool or store.
+    const invalid = findSdkDataError(error);
+    if (invalid === error) return "数据格式无效。";
+    return invalid?.message
+      ? error.message.replaceAll(invalid.message, "数据格式无效。")
+      : error.message;
   }
   if (typeof error === "object" && error !== null) {
     if ("message" in error && typeof error.message === "string" && error.message.length > 0) {
@@ -567,7 +601,7 @@ function stopOnUserRejected(): StopCondition<ToolSet> {
 
 function isContextWindowError(error: unknown): boolean {
   return /context[_ -]?length|context window|maximum context|token limit|too many tokens|prompt is too long|input is too long/i.test(
-    errorMessage(error),
+    invalidModelDataMessage(error) ?? errorMessage(error),
   );
 }
 
@@ -674,6 +708,7 @@ function markSessionExecRoles(
 export class AgentSession {
   readonly id: string;
   private model: LanguageModelV4;
+  private readonly resolveReasoningPresentation: AgentSessionOptions["resolveReasoningPresentation"];
   private modelRecovery: ModelTurnRecovery | undefined;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
@@ -763,6 +798,9 @@ export class AgentSession {
   private emit: ((event: SessionEvent) => void) | undefined;
   private activeTurn: ActiveTurn | undefined;
   private closePromise: Promise<void> | undefined;
+  private readonly executionJobs = new Set<Promise<void>>();
+  private readonly closeBarriers = new Set<() => Promise<void>>();
+  private executionFailure: unknown;
   private closed = false;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   private lastInputTokens: number | undefined;
@@ -774,6 +812,7 @@ export class AgentSession {
   constructor(options: AgentSessionOptions) {
     this.id = options.id;
     this.model = options.model;
+    this.resolveReasoningPresentation = options.resolveReasoningPresentation;
     this.modelRecovery = options.modelRecovery;
     this.contextWindowSource = options.contextWindowSource;
     this.maxSteps = options.maxSteps;
@@ -1260,10 +1299,13 @@ export class AgentSession {
     const activeTurn = createActiveTurn();
     this.activeTurn = activeTurn;
 
-    this.runTurn(queue, activeTurn, normalizedInput).catch((error: unknown) => {
-      queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
-      queue.close();
-    });
+    this.trackExecution(
+      this.runTurn(queue, activeTurn, normalizedInput).catch((error: unknown) => {
+        this.executionFailure = error;
+        queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
+        queue.close();
+      }),
+    );
 
     try {
       for await (const event of queue) {
@@ -1293,10 +1335,13 @@ export class AgentSession {
     const activeTurn = createActiveTurn();
     this.activeTurn = activeTurn;
 
-    this.runCompactionTurn(queue, activeTurn, reason).catch((error: unknown) => {
-      queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
-      queue.close();
-    });
+    this.trackExecution(
+      this.runCompactionTurn(queue, activeTurn, reason).catch((error: unknown) => {
+        this.executionFailure = error;
+        queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+        queue.close();
+      }),
+    );
 
     try {
       for await (const event of queue) {
@@ -1625,9 +1670,12 @@ export class AgentSession {
             },
           },
         });
+        const providerOptions = this.providerOptions;
+        const display = this.resolveReasoningPresentation?.(this.model, providerOptions);
         const createStreamResult = () =>
           streamText({
             model: guardedModel,
+            ...(display ? { include: { rawChunks: true } } : {}),
             ...(recoveryPolicy === undefined ? {} : { maxRetries: 0 }),
             system: initialRequest.system,
             messages: initialRequest.messages,
@@ -1707,7 +1755,7 @@ export class AgentSession {
               );
             },
             abortSignal: activeTurn.abortController.signal,
-            ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
+            ...(providerOptions ? { providerOptions } : {}),
             onError: () => undefined,
             onStepEnd: (step) => {
               if (recoveryPolicy !== undefined && !providerStepFinished) return;
@@ -1789,6 +1837,9 @@ export class AgentSession {
           once: true,
         });
         try {
+          // One native chunk can produce several reasoning deltas, even across SDK block IDs.
+          let nativeDeltas: readonly string[] | undefined;
+          let nativeIndex = 0;
           for await (const part of result.fullStream) {
             if (this.closed) {
               activeTurn.aborted = true;
@@ -1802,6 +1853,7 @@ export class AgentSession {
             }
             switch (part.type) {
               case "start-step":
+                nativeDeltas = undefined;
                 if (recoveryPolicy !== undefined) queue.push({ type: "model-step-start" });
                 break;
               case "tool-input-start":
@@ -1813,16 +1865,25 @@ export class AgentSession {
               case "tool-input-end":
                 toolInputActivity.end(part.id);
                 break;
+              case "raw":
+                nativeDeltas = display?.readDeltas(part.rawValue);
+                nativeIndex = 0;
+                break;
               case "reasoning-start":
                 queue.push({ type: "reasoning-start", reasoningId: part.id });
                 break;
-              case "reasoning-delta":
+              case "reasoning-delta": {
+                const kind = nativeDeltas?.[nativeIndex] === part.text ? display?.kind : undefined;
+                if (kind) nativeIndex++;
+                else nativeDeltas = undefined; // Never resynchronize by searching ahead for a match.
                 queue.push({
                   type: "reasoning-delta",
                   reasoningId: part.id,
                   delta: part.text,
+                  ...(kind ? { presentation: kind } : {}),
                 });
                 break;
+              }
               case "reasoning-end":
                 queue.push({ type: "reasoning-end", reasoningId: part.id });
                 break;
@@ -2027,7 +2088,7 @@ export class AgentSession {
                 streamContextOverflow = isContextWindowError(part.error);
                 rawStreamError = part.error;
                 modelStreamFailure = true;
-                streamError = errorMessage(part.error);
+                streamError = invalidModelDataMessage(part.error) ?? errorMessage(part.error);
                 break;
               case "abort":
                 toolInputActivity.clear();
@@ -2278,7 +2339,8 @@ export class AgentSession {
         if (streamError !== undefined) {
           if (modelStreamFailure && !streamContextOverflow) terminalModelError = rawStreamError;
           if (modelStreamFailure && !streamContextOverflow && recoveryPolicy?.formatError) {
-            streamError = recoveryPolicy.formatError(rawStreamError);
+            streamError =
+              invalidModelDataMessage(rawStreamError) ?? recoveryPolicy.formatError(rawStreamError);
           }
           if (streamContextOverflow && dispatchedBudget !== undefined) {
             providerRejected.add(dispatchedBudget.fingerprint);
@@ -3801,6 +3863,21 @@ export class AgentSession {
     return true;
   }
 
+  assertWritable(): void {
+    if (this.closed) throw new Error("session is closing or closed");
+    this.onBeforeTurn?.();
+  }
+
+  addCloseBarrier(barrier: () => Promise<void>): void {
+    if (this.closed) throw new Error("Cannot register work on a closing session");
+    this.closeBarriers.add(barrier);
+  }
+
+  private trackExecution(job: Promise<void>): void {
+    this.executionJobs.add(job);
+    job.finally(() => this.executionJobs.delete(job));
+  }
+
   close(): Promise<void> {
     if (this.closePromise !== undefined) {
       return this.closePromise;
@@ -3817,31 +3894,19 @@ export class AgentSession {
     }
 
     this.closePromise = (async () => {
-      const managerCleanup = (this.sessionManager?.close() ?? Promise.resolve([])).then(
-        (results) => {
-          for (const result of results) {
-            if (result.cleanupError !== undefined) {
-              process.stderr.write(
-                `roll chat: 后台会话 ${String(result.sessionId)} 清理失败: ${result.cleanupError}\n`,
-              );
-            }
-          }
-        },
-        (error: unknown) => {
-          process.stderr.write(`roll chat: 会话 ${this.id} 后台清理失败: ${errorMessage(error)}\n`);
-        },
-      );
-      const completed = await waitForPromiseSettlement(managerCleanup, SESSION_CLOSE_TIMEOUT_MS);
-      if (!completed) {
-        process.stderr.write(
-          `roll chat: 会话 ${this.id} 在 ${String(SESSION_CLOSE_TIMEOUT_MS)}ms 内未完成全部关闭步骤\n`,
+      // The iterator may already be abandoned while its producer still persists cancellation.
+      const cleanup = this.sessionManager?.close() ?? Promise.resolve([]);
+      const [, results] = await Promise.all([Promise.all(this.executionJobs), cleanup]);
+      const failures = results.filter((result) => result.cleanupError !== undefined);
+      if (failures.length > 0) {
+        throw new Error(
+          `后台会话清理失败: ${failures.map((result) => result.cleanupError).join("; ")}`,
         );
       }
-      try {
-        this.onClose?.();
-      } catch (error) {
-        process.stderr.write(`roll chat: 会话 ${this.id} 关闭回调失败: ${errorMessage(error)}\n`);
-      }
+      if (this.executionFailure !== undefined) throw this.executionFailure;
+      // Protocol terminal projection and attachment disposal must settle before releasing owner.
+      for (const barrier of this.closeBarriers) await barrier();
+      this.onClose?.();
     })();
     return this.closePromise;
   }

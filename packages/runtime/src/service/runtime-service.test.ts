@@ -1153,7 +1153,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
     );
   } finally {
     database?.close();
-    await service.close();
+    await assert.rejects(service.close(), /blocked terminal runtime event insert/u);
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2276,6 +2276,132 @@ test("完整审批预览按页返回同一快照，不进入持久事件，审�
       }),
     );
     assert.throws(() => service.getApprovalPreview(params), /不存在或已失效/u);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const source of ["summary", "text", "legacy"] as const) {
+  const mode = source === "legacy" ? "summary" : source;
+  test(`RuntimeService isolates ${source} from raw deltas, public observers and replay`, async () => {
+    const dir = tempDir();
+    const store = new ThreadStore(dir);
+    const fixture = createFixture(store);
+    fixture.session.send = async function* () {
+      yield { type: "reasoning-delta", reasoningId: "r", delta: "unclassified" };
+      yield { type: "reasoning-delta", reasoningId: "r", presentation: mode, delta: "Inspect " };
+      yield { type: "reasoning-delta", reasoningId: "r", presentation: mode, delta: "Bea" };
+      yield {
+        type: "reasoning-delta",
+        reasoningId: "r",
+        presentation: mode,
+        delta: "rer fixture-only",
+      };
+      if (source !== "legacy") yield { type: "reasoning-end", reasoningId: "r" };
+      yield { type: "message-finish", text: "answer" };
+    };
+    const service = new RuntimeService(
+      fixture.engine,
+      store,
+      source === "legacy"
+        ? { reasoningSummaryProjector: (delta) => (delta === "unclassified" ? undefined : delta) }
+        : { providerReasoning: mode },
+    );
+    const publicEvents: RuntimeEventEnvelopeV16[] = [];
+    const privateEvents: RuntimeEventEnvelopeV16[] = [];
+    service.onEvent((event) => publicEvents.push(event));
+    try {
+      const handshake = service.initialize({
+        protocolVersions: ["1.6"],
+        client: { name: "display-test", version: "1" },
+      });
+      assert.equal(handshake.features.includes("reasoning-summary"), mode === "summary");
+      const unsubscribe = service.subscribeReasoningText((event) => privateEvents.push(event));
+      assert.equal(unsubscribe !== undefined, mode === "text");
+      assert.equal(
+        service.subscribeReasoningText(() => assert.fail("second subscriber")),
+        undefined,
+      );
+      await service.createThread(
+        runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+      );
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "check" },
+        }),
+      );
+      await nextTick();
+      const displayed = (mode === "text" ? privateEvents : publicEvents)
+        .flatMap(({ event }) =>
+          event.type === `reasoning.${mode}.delta` && "delta" in event ? [event.delta] : [],
+        )
+        .join("");
+      assert.equal(displayed, "Inspect Bearer [redacted]");
+      assert.ok(publicEvents.every(({ event }) => event.type !== "reasoning.text.delta"));
+      assert.doesNotMatch(
+        JSON.stringify([...publicEvents, ...privateEvents]),
+        /unclassified|fixture-only/u,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(store.resumeRuntimeEvents(IDS.thread, null)),
+        /reasoning\.(text|summary)|Inspect Bearer/u,
+      );
+      unsubscribe?.();
+    } finally {
+      await service.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("private text belongs to the original subscription, even when a callback is reused", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  fixture.session.send = async function* () {
+    for (const delta of ["first ", "tail"]) {
+      yield { type: "reasoning-delta", presentation: "text", reasoningId: "r", delta };
+    }
+    yield { type: "reasoning-end", reasoningId: "r" };
+    yield { type: "message-finish", text: "answer" };
+  };
+  const service = new RuntimeService(fixture.engine, store, { providerReasoning: "text" });
+  const seen: string[] = [];
+  function receive({ event }: RuntimeEventEnvelopeV16) {
+    assert.equal(event.type, "reasoning.text.delta");
+    seen.push(event.delta);
+    if (seen.length === 1) {
+      original?.();
+      service.subscribeReasoningText(receive);
+      original?.(); // Stale cleanup must not remove the replacement subscription.
+    }
+  }
+  const original = service.subscribeReasoningText(receive);
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({ requestId: IDS.requestCreate }),
+    );
+    for (const [turnId, requestId] of [
+      [IDS.firstTurn, IDS.requestFirstTurn],
+      [IDS.secondTurn, IDS.requestSecondTurn],
+    ]) {
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId,
+          turnId,
+          threadId: IDS.thread,
+          input: { text: "check" },
+        }),
+      );
+      await nextTick();
+    }
+    assert.deepEqual(seen, ["first ", "first ", "tail"]);
   } finally {
     await service.close();
     store.close();

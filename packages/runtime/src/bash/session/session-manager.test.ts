@@ -293,6 +293,10 @@ test("killTree 卡住时有界收口并标记 cleanup-failed", { skip }, async (
     assert.equal(terminal.kind, "exited");
     assert.equal(mgr.delete(session.id), true);
     assert.equal(mgr.size(), 0);
+    const cleanup = await mgr.close();
+    assert.equal(cleanup.length, 1);
+    assert.equal(cleanup[0]?.state, SESSION_STATES.cleanupFailed);
+    assert.match(cleanup[0]?.cleanupError ?? "", /进程树终止/u);
   } finally {
     killProcessGroup(session.child.pid, "SIGKILL");
   }

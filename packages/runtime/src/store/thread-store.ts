@@ -1,4 +1,11 @@
 import {
+  SessionClaims,
+  SessionOccupiedError,
+  canonicalSessionDatabasePath,
+  type SessionClaim,
+} from "../ownership/session-claims.ts";
+import type { SessionOwnershipHost } from "../host-contracts/session-ownership.ts";
+import {
   SemanticLedger,
   SEMANTIC_LEDGER_SQL,
   contextRecoveryNoteSchema,
@@ -6,7 +13,7 @@ import {
   type ContextRecoveryState,
   type SemanticLedgerRow,
 } from "./semantic-ledger.ts";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -86,7 +93,8 @@ import {
 import type { ExplicitSkillCheckpointV1 } from "../engine/explicit-skill-context.ts";
 
 // V11 introduces plain task-summary checkpoints. Older readers must refuse them.
-const SCHEMA_VERSION = 11;
+export const THREAD_STORE_SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = THREAD_STORE_SCHEMA_VERSION;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
@@ -550,17 +558,21 @@ function parseRuntimeEventRow(
 export interface ThreadStoreOptions {
   readonly now?: () => Date;
   readonly readOnly?: boolean;
+  readonly ownership?: SessionOwnershipHost;
 }
 
 export class ThreadStore {
   private readonly db: DatabaseSync;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
+  private readonly claims: SessionClaims | undefined;
+  private readonly sessionReservations = new Map<string, string>();
 
   constructor(dir: string = defaultThreadsDir(), options: ThreadStoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.readOnly = options.readOnly ?? false;
     const resolved = expandTilde(dir);
+    this.claims = undefined;
     if (options.readOnly) {
       this.db = new DatabaseSync(resolve(resolved, "threads.db"), { readOnly: true });
       try {
@@ -585,20 +597,39 @@ export class ThreadStore {
       // directory and newly created stores private instead of relying on the host umask.
       chmodSync(resolved, 0o700);
     }
-    const databasePath = resolve(resolved, "threads.db");
-    this.db = new DatabaseSync(databasePath);
-    if (process.platform !== "win32") {
-      try {
-        chmodSync(databasePath, 0o600);
-      } catch (error) {
-        this.db.close();
-        throw error;
+    this.claims =
+      options.ownership === undefined
+        ? undefined
+        : new SessionClaims(resolve(resolved, "threads.db"), options.ownership);
+    const databasePath = this.claims?.databasePath ?? resolve(resolved, "threads.db");
+    let opened: DatabaseSync | undefined;
+    let initialization: SessionClaim | undefined;
+    try {
+      const inspection =
+        options.ownership === undefined ? undefined : inspectThreadLibrary(resolved);
+      if (
+        inspection !== undefined &&
+        inspection.status !== "current" &&
+        inspection.status !== "new"
+      ) {
+        throw new ThreadLibraryMigrationRequiredError(inspection);
       }
+      // Serialize first creation with explicit migrations; init re-reads schema under the gate.
+      initialization = inspection?.status === "new" ? this.claims?.maintenance() : undefined;
+      this.db = opened = new DatabaseSync(databasePath);
+      if (process.platform !== "win32") chmodSync(databasePath, 0o600);
+      this.init(options.ownership !== undefined);
+    } catch (error) {
+      opened?.close();
+      initialization?.release();
+      this.claims?.close();
+      throw error;
+    } finally {
+      initialization?.release();
     }
-    this.init();
   }
 
-  private init(): void {
+  private init(coordinated = false): void {
     // v4 rewrites and prunes legacy secret-bearing evidence. Secure deletion overwrites removed
     // cells instead of leaving recoverable payloads on SQLite freelist pages.
     this.db.exec(
@@ -615,6 +646,11 @@ export class ThreadStore {
       );
     }
 
+    // Current-schema initialization must not prune or repair other threads behind their owners.
+    if (coordinated && versionRow.user_version === SCHEMA_VERSION) return;
+    if (coordinated && versionRow.user_version !== 0) {
+      throw new Error("Existing history requires explicit backed-up migration");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.exec(
@@ -990,8 +1026,14 @@ export class ThreadStore {
   }
 
   createThread(input: CreateThreadInput = {}): string {
-    if (this.readOnly) throw new Error("ThreadStore is read-only");
     const id = input.id ?? randomUUID();
+    return this.withThreadWrite(id, () => this.createThreadOwned({ ...input, id }));
+  }
+
+  private createThreadOwned(input: CreateThreadInput = {}): string {
+    const id = input.id ?? randomUUID();
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+
     const now = this.now().toISOString();
     const origin = threadOriginSchema.parse(input.origin ?? { kind: "interactive" });
     const derivedFrom =
@@ -1022,9 +1064,9 @@ export class ThreadStore {
       this.db
         .prepare(
           `INSERT INTO thread_runtime_event_state
-             (thread_id, event_log_id, next_sequence, retained_from_sequence,
-              retained_predecessor_event_id, latest_event_id, retained_count, retained_bytes)
-           VALUES (?, ?, 0, 0, NULL, NULL, 0, 0)`,
+           (thread_id, event_log_id, next_sequence, retained_from_sequence,
+            retained_predecessor_event_id, latest_event_id, retained_count, retained_bytes)
+         VALUES (?, ?, 0, 0, NULL, NULL, 0, 0)`,
         )
         .run(id, randomUUID());
       this.db.exec("RELEASE create_thread");
@@ -1057,6 +1099,20 @@ export class ThreadStore {
 
   /** Backfill only legacy rows; an explicit source is immutable, including interactive. */
   backfillScheduledOrigin(threadId: string, origin: ScheduledThreadOrigin): boolean {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    if (
+      this.db
+        .prepare("SELECT 1 FROM threads WHERE id = ? AND origin_json IS NULL")
+        .get(threadId) === undefined
+    ) {
+      return false;
+    }
+    return this.withThreadWrite(threadId, () =>
+      this.backfillScheduledOriginOwned(threadId, origin),
+    );
+  }
+
+  private backfillScheduledOriginOwned(threadId: string, origin: ScheduledThreadOrigin): boolean {
     if (this.readOnly) throw new Error("ThreadStore is read-only");
     const parsed = scheduledThreadOriginSchema.parse(origin);
     return (
@@ -1191,6 +1247,12 @@ export class ThreadStore {
 
   /** Copies durable evidence atomically; Runtime events and live authority are never copied. */
   forkSnapshot(snapshot: ThreadSnapshot, input: ForkThreadSnapshotInput = {}): string {
+    const id = input.id ?? randomUUID();
+    return this.withThreadWrite(id, () => this.forkSnapshotOwned(snapshot, { ...input, id }));
+  }
+
+  private forkSnapshotOwned(snapshot: ThreadSnapshot, input: ForkThreadSnapshotInput = {}): string {
+    const id = input.id ?? randomUUID();
     if (this.readOnly) throw new Error("ThreadStore is read-only");
     const ids = new Map<string, string>(
       snapshot.checkpoints.map((checkpoint) => [checkpoint.id, randomUUID()]),
@@ -1212,8 +1274,8 @@ export class ThreadStore {
     const now = this.now().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const id = this.createThread({
-        ...(input.id === undefined ? {} : { id: input.id }),
+      this.createThread({
+        id,
         ...(input.title === undefined
           ? snapshot.thread.title === undefined
             ? {}
@@ -1337,7 +1399,7 @@ export class ThreadStore {
           this.db
             .prepare(
               `INSERT INTO compaction_recovery
-            (thread_id,checkpoint_id,required,unextracted,memo) VALUES (?,?,1,?,?)`,
+          (thread_id,checkpoint_id,required,unextracted,memo) VALUES (?,?,1,?,?)`,
             )
             .run(
               id,
@@ -1382,18 +1444,43 @@ export class ThreadStore {
   }
 
   updateTitle(threadId: string, title: string): void {
+    return this.withThreadWrite(threadId, () => this.updateTitleOwned(threadId, title));
+  }
+
+  private updateTitleOwned(threadId: string, title: string): void {
     this.db.prepare("UPDATE threads SET title = ? WHERE id = ?").run(title, threadId);
   }
 
   updateModel(threadId: string, model: string): void {
+    return this.withThreadWrite(threadId, () => this.updateModelOwned(threadId, model));
+  }
+
+  private updateModelOwned(threadId: string, model: string): void {
     this.db.prepare("UPDATE threads SET model = ? WHERE id = ?").run(model, threadId);
   }
 
-  deleteThread(threadId: string): void {
+  deleteThread(threadId: string, options: { readonly onlyIfEmpty?: boolean } = {}): void {
+    return this.withThreadWrite(threadId, () => this.deleteThreadOwned(threadId, options));
+  }
+
+  private deleteThreadOwned(
+    threadId: string,
+    options: { readonly onlyIfEmpty?: boolean } = {},
+  ): void {
+    if (
+      options.onlyIfEmpty &&
+      (this.countMessages(threadId) > 0 || this.countTranscriptMessages(threadId) > 0)
+    ) {
+      return;
+    }
     this.db.prepare("DELETE FROM threads WHERE id = ?").run(threadId);
   }
 
   appendRuntimeEvent(input: AppendRuntimeEventInput): StoredRuntimeEvent {
+    return this.withThreadWrite(input.threadId, () => this.appendRuntimeEventOwned(input));
+  }
+
+  private appendRuntimeEventOwned(input: AppendRuntimeEventInput): StoredRuntimeEvent {
     const event = runtimeDurableEventV16Schema.parse(input.event);
     // Keep the on-disk event shape readable by older runtimes after rollback.
     const persistedEvent =
@@ -1415,10 +1502,10 @@ export class ThreadStore {
       const state = this.db
         .prepare(
           `SELECT event_log_id, next_sequence, retained_from_sequence,
-                  retained_predecessor_event_id, latest_event_id,
-                  retained_count, retained_bytes
-             FROM thread_runtime_event_state
-            WHERE thread_id = ?`,
+                retained_predecessor_event_id, latest_event_id,
+                retained_count, retained_bytes
+           FROM thread_runtime_event_state
+          WHERE thread_id = ?`,
         )
         .get(input.threadId) as RuntimeEventStateRow | undefined;
       if (state === undefined) {
@@ -1429,9 +1516,9 @@ export class ThreadStore {
       this.db
         .prepare(
           `INSERT INTO runtime_events
-             (thread_id, thread_sequence, event_id, turn_id, event_timestamp,
-              event_json, size_bytes, created_at, app_output_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (thread_id, thread_sequence, event_id, turn_id, event_timestamp,
+            event_json, size_bytes, created_at, app_output_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.threadId,
@@ -1447,10 +1534,10 @@ export class ThreadStore {
       this.db
         .prepare(
           `UPDATE thread_runtime_event_state
-              SET next_sequence = ?, latest_event_id = ?,
-                  retained_count = retained_count + 1,
-                  retained_bytes = retained_bytes + ?
-            WHERE thread_id = ?`,
+            SET next_sequence = ?, latest_event_id = ?,
+                retained_count = retained_count + 1,
+                retained_bytes = retained_bytes + ?
+          WHERE thread_id = ?`,
         )
         .run(threadSequence + 1, eventId, sizeBytes, input.threadId);
       this.enforceRuntimeEventRetentionInTransaction(input.threadId, timestamp);
@@ -1503,9 +1590,10 @@ export class ThreadStore {
       throw new RuntimeEventCursorGapError(afterCursor);
     }
 
-    this.db.exec("BEGIN IMMEDIATE");
+    const prune = !this.readOnly && this.claims === undefined;
+    this.db.exec(prune ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
-      this.enforceRuntimeEventRetentionInTransaction(threadId, this.now().toISOString());
+      if (prune) this.enforceRuntimeEventRetentionInTransaction(threadId, this.now().toISOString());
       const state = this.db
         .prepare(
           `SELECT event_log_id, next_sequence, retained_from_sequence,
@@ -1540,6 +1628,23 @@ export class ThreadStore {
             ORDER BY thread_sequence ASC`,
         )
         .all(threadId, afterSequence, throughSequence) as unknown as RuntimeEventRow[];
+      // Keep the same continuous-prefix retention rule as the writer, even if event
+      // timestamps move backwards. Never silently drop a hole from the middle of replay.
+      if (!prune) {
+        const cutoff = new Date(
+          this.now().getTime() - RUNTIME_EVENT_RETENTION_POLICY.maxAgeMs,
+        ).toISOString();
+        const ageBoundary = this.db
+          .prepare(
+            "SELECT MIN(thread_sequence) AS keep_from FROM runtime_events WHERE thread_id = ? AND created_at >= ?",
+          )
+          .get(threadId, cutoff) as unknown as RuntimeEventRetentionBoundaryRow;
+        const keepFrom = Math.max(
+          state.retained_from_sequence,
+          ageBoundary.keep_from ?? state.next_sequence,
+        );
+        if (afterSequence < keepFrom - 1) throw new RuntimeEventCursorExpiredError(afterCursor);
+      }
       const events = rows.map((row) => parseRuntimeEventRow(state.event_log_id, threadId, row));
       const throughCursor = createStoredRuntimeEventCursor(
         state.event_log_id,
@@ -1712,6 +1817,16 @@ export class ThreadStore {
 
   /** Internal acceptance boundary; the same receipt cannot reinsert compacted active history. */
   acceptTurnInput(threadId: string, inputId: string, message: UserModelMessage): AcceptedTurnInput {
+    return this.withThreadWrite(threadId, () =>
+      this.acceptTurnInputOwned(threadId, inputId, message),
+    );
+  }
+
+  private acceptTurnInputOwned(
+    threadId: string,
+    inputId: string,
+    message: UserModelMessage,
+  ): AcceptedTurnInput {
     if (this.readOnly) throw new Error("ThreadStore is read-only");
     const id = turnInputIdSchema.parse(inputId);
     const parsed = sanitizePersistedExplicitSkillCheckpoint(modelMessageSchema.parse(message));
@@ -1805,6 +1920,16 @@ export class ThreadStore {
     inputId: string,
     checkpoint: ExplicitSkillCheckpointV1,
   ): void {
+    return this.withThreadWrite(threadId, () =>
+      this.recordTurnSkillCheckpointOwned(threadId, inputId, checkpoint),
+    );
+  }
+
+  private recordTurnSkillCheckpointOwned(
+    threadId: string,
+    inputId: string,
+    checkpoint: ExplicitSkillCheckpointV1,
+  ): void {
     if (this.readOnly) throw new Error("ThreadStore is read-only");
     const parsed = turnInputSkillCheckpointSchema.parse(checkpoint);
     const serialized = JSON.stringify(parsed);
@@ -1831,6 +1956,16 @@ export class ThreadStore {
   }
 
   appendMessages(
+    threadId: string,
+    messages: readonly ModelMessage[],
+    options: AppendMessagesOptions = {},
+  ): void {
+    return this.withThreadWrite(threadId, () =>
+      this.appendMessagesOwned(threadId, messages, options),
+    );
+  }
+
+  private appendMessagesOwned(
     threadId: string,
     messages: readonly ModelMessage[],
     options: AppendMessagesOptions = {},
@@ -1879,6 +2014,15 @@ export class ThreadStore {
   }
 
   recoverUncoveredToolExecutions(
+    threadId: string,
+    createMessage: (records: readonly SequencedToolExecutionRecord[]) => ModelMessage,
+  ): ModelMessage | undefined {
+    return this.withThreadWrite(threadId, () =>
+      this.recoverUncoveredToolExecutionsOwned(threadId, createMessage),
+    );
+  }
+
+  private recoverUncoveredToolExecutionsOwned(
     threadId: string,
     createMessage: (records: readonly SequencedToolExecutionRecord[]) => ModelMessage,
   ): ModelMessage | undefined {
@@ -1988,6 +2132,10 @@ export class ThreadStore {
   }
 
   replaceMessages(threadId: string, messages: readonly ModelMessage[]): void {
+    return this.withThreadWrite(threadId, () => this.replaceMessagesOwned(threadId, messages));
+  }
+
+  private replaceMessagesOwned(threadId: string, messages: readonly ModelMessage[]): void {
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
@@ -2028,6 +2176,10 @@ export class ThreadStore {
   }
 
   appendToolExecution(threadId: string, record: ToolExecutionRecord): number {
+    return this.withThreadWrite(threadId, () => this.appendToolExecutionOwned(threadId, record));
+  }
+
+  private appendToolExecutionOwned(threadId: string, record: ToolExecutionRecord): number {
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
@@ -2046,8 +2198,8 @@ export class ThreadStore {
       this.db
         .prepare(
           `INSERT INTO tool_executions
-             (thread_id, sequence, id, tool_call_id, agent_name, tool_name, record_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (thread_id, sequence, id, tool_call_id, agent_name, tool_name, record_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           threadId,
@@ -2577,6 +2729,13 @@ export class ThreadStore {
   }
 
   commitCompaction(threadId: string, input: CommitCompactionInput): CompactionCheckpointV3 {
+    return this.withThreadWrite(threadId, () => this.commitCompactionOwned(threadId, input));
+  }
+
+  private commitCompactionOwned(
+    threadId: string,
+    input: CommitCompactionInput,
+  ): CompactionCheckpointV3 {
     if (!this.hasThread(threadId)) throw new Error(`Thread "${threadId}" 不存在`);
     const messages = input.messages.map((message) => modelMessageSchema.parse(message));
     const expectedActiveMessages = input.expectedActiveMessages.map((message) =>
@@ -2665,7 +2824,7 @@ export class ThreadStore {
         this.db
           .prepare(
             `INSERT INTO transcript_messages
-          (thread_id,sequence,role,message_json,provenance,created_at) VALUES (?,?,?,?,?,?)`,
+        (thread_id,sequence,role,message_json,provenance,created_at) VALUES (?,?,?,?,?,?)`,
           )
           .run(
             threadId,
@@ -2679,9 +2838,9 @@ export class ThreadStore {
       this.db
         .prepare(
           `INSERT INTO compaction_checkpoints
-        (id, thread_id, generation, schema_version, message_from_sequence, message_through_sequence,
-         tool_from_sequence, tool_through_sequence, checkpoint_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, thread_id, generation, schema_version, message_from_sequence, message_through_sequence,
+       tool_from_sequence, tool_through_sequence, checkpoint_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           checkpoint.id,
@@ -2946,7 +3105,186 @@ export class ThreadStore {
     }
   }
 
+  /** A retained claim spans idle gaps. Its exact token must fence delayed callbacks. */
+  retainSession(threadId: string): SessionClaim | undefined {
+    if (this.claims === undefined) return undefined;
+    if (this.sessionReservations.has(threadId)) throw new SessionOccupiedError(threadId);
+    const claim = this.claims.acquire(threadId);
+    try {
+      if (this.hasThread(threadId)) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          const now = this.now().toISOString();
+          this.enforceAppOutputRetention(threadId);
+          this.enforceToolExecutionRetentionInTransaction(threadId, now);
+          this.enforceRuntimeEventRetentionInTransaction(threadId, now);
+          this.db.exec("COMMIT");
+        } catch (error) {
+          this.db.exec("ROLLBACK");
+          throw error;
+        }
+      }
+    } catch (error) {
+      claim.release();
+      throw error;
+    }
+    this.sessionReservations.set(threadId, claim.token);
+    let released = false;
+    let releaseFailure: { readonly cause: unknown } | undefined;
+    return {
+      ...claim,
+      release: () => {
+        if (releaseFailure !== undefined) throw releaseFailure.cause;
+        if (released) return;
+        try {
+          claim.release();
+        } catch (cause) {
+          // Underlying release may already be non-retryable; retain the reservation on failure.
+          releaseFailure = { cause };
+          throw cause;
+        }
+        released = true;
+        if (this.sessionReservations.get(threadId) === claim.token) {
+          this.sessionReservations.delete(threadId);
+        }
+      },
+    };
+  }
+
+  retainThread(threadId: string): SessionClaim | undefined {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    return this.claims?.acquire(threadId);
+  }
+
+  private withThreadWrite<T>(threadId: string, operation: () => T): T {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    const claim = this.retainThread(threadId);
+    try {
+      claim?.assert();
+      return operation();
+    } finally {
+      claim?.release();
+    }
+  }
+
   close(): void {
+    this.claims?.close();
     this.db.close();
+  }
+}
+
+export const THREAD_LIBRARY_STATUSES = [
+  "new",
+  "current",
+  "needs_migration",
+  "unsupported",
+] as const;
+export interface ThreadLibraryPreflight {
+  readonly databasePath: string;
+  readonly physicalIdentity?: string;
+  readonly writableAliasSafe?: boolean;
+  readonly schemaVersion: number | null;
+  readonly supportedSchemaVersion: number;
+  readonly status: (typeof THREAD_LIBRARY_STATUSES)[number];
+}
+export class ThreadLibraryMigrationRequiredError extends Error {
+  readonly preflight: ThreadLibraryPreflight;
+  constructor(preflight: ThreadLibraryPreflight) {
+    super(
+      `会话库需要显式备份升级或受支持的新版本：${preflight.status} (v${String(preflight.schemaVersion)})。请停止所有客户端后确认迁移；未修改历史。`,
+    );
+    this.name = "ThreadLibraryMigrationRequiredError";
+    this.preflight = preflight;
+  }
+}
+
+/** Read-only preflight: does not create a directory, database, claim, or run migrations. */
+export function inspectThreadLibrary(dir: string = defaultThreadsDir()): ThreadLibraryPreflight {
+  const path = resolve(expandTilde(dir), "threads.db");
+  if (!existsSync(path)) {
+    return {
+      databasePath: path,
+      schemaVersion: null,
+      supportedSchemaVersion: SCHEMA_VERSION,
+      status: "new",
+    };
+  }
+  const canonical = realpathSync(path);
+  const identity = statSync(canonical, { bigint: true });
+  const db = new DatabaseSync(canonical, { readOnly: true });
+  try {
+    db.exec(
+      `PRAGMA busy_timeout = ${String(THREAD_STORE_BUSY_TIMEOUT_MS)}; PRAGMA query_only = ON;`,
+    );
+    const row = db.prepare("PRAGMA user_version").get();
+    const version = row?.user_version;
+    if (typeof version !== "number") throw new Error("Invalid ThreadStore schema version");
+    return {
+      databasePath: canonical,
+      physicalIdentity: `inode:${identity.dev}:${identity.ino}:${identity.birthtimeNs}`,
+      writableAliasSafe: identity.nlink === 1n,
+      schemaVersion: version,
+      supportedSchemaVersion: SCHEMA_VERSION,
+      status:
+        version === SCHEMA_VERSION
+          ? "current"
+          : version > SCHEMA_VERSION
+            ? "unsupported"
+            : "needs_migration",
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/** Call only after explicit user choice and stopping old clients (which do not honor claims). */
+export function migrateThreadLibrary(input: {
+  readonly dir: string;
+  readonly ownership: SessionOwnershipHost;
+  readonly confirmStoppedLegacyClients: true;
+}): { readonly backupPath: string; readonly preflight: ThreadLibraryPreflight } {
+  if (input.confirmStoppedLegacyClients !== true) {
+    throw new Error("Migration requires explicit confirmation that legacy clients are stopped");
+  }
+  const before = inspectThreadLibrary(input.dir);
+  if (before.status !== "needs_migration") throw new ThreadLibraryMigrationRequiredError(before);
+  const claims = new SessionClaims(before.databasePath, input.ownership);
+  let gate: SessionClaim | undefined;
+  try {
+    gate = claims.maintenance();
+    gate.assert();
+    const current = inspectThreadLibrary(input.dir);
+    if (current.status !== "needs_migration") {
+      throw new ThreadLibraryMigrationRequiredError(current);
+    }
+    const sourcePath = canonicalSessionDatabasePath(current.databasePath);
+    const backupPath = `${sourcePath}.backup-${randomUUID()}.sqlite`;
+    const source = new DatabaseSync(sourcePath, { readOnly: true });
+    try {
+      source.prepare("VACUUM INTO ?").run(backupPath);
+    } finally {
+      source.close();
+    }
+    if (process.platform !== "win32") chmodSync(backupPath, 0o600);
+    const backup = new DatabaseSync(backupPath, { readOnly: true });
+    try {
+      const check = backup.prepare("PRAGMA quick_check").all();
+      if (
+        check.length !== 1 ||
+        check[0]?.quick_check !== "ok" ||
+        backup.prepare("PRAGMA user_version").get()?.user_version !== current.schemaVersion
+      ) {
+        throw new Error("SQLite backup verification failed; original history was not migrated");
+      }
+    } finally {
+      backup.close();
+    }
+    gate.assert();
+    const upgraded = new ThreadStore(input.dir);
+    upgraded.close();
+    return { backupPath, preflight: inspectThreadLibrary(input.dir) };
+  } finally {
+    gate?.release();
+    claims.close();
   }
 }

@@ -41,6 +41,8 @@ import {
   projectRelayOperationGetResultV11,
   projectRelayThreadSnapshotV11,
   projectRuntimeEventEnvelopeForRelayV11,
+  projectRuntimeEventEnvelopeForRelayV12,
+  projectRuntimeEventEnvelopeForRelayV13,
   relayDeviceConnectSchema,
   relayInteractionCancelledSchemaV11,
   relayInteractionRequestSchemaV11,
@@ -762,5 +764,30 @@ test("ACK classification uses the caller-proven contiguous delivery prefix", () 
   ] as const;
   for (const entry of cases) {
     assert.equal(classifyRelayAck(entry.state), entry.expected);
+  }
+});
+
+test("all Relay projections exclude subscribed model thinking text and preserve public summaries", () => {
+  const base = {
+    protocolVersion: "1.6",
+    durability: "ephemeral",
+    runtimeInstanceId: IDS.runtime,
+    sequence: 8,
+    timestamp: "2026-11-03T00:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+  };
+  for (const project of [
+    projectRuntimeEventEnvelopeForRelayV11,
+    projectRuntimeEventEnvelopeForRelayV12,
+    projectRuntimeEventEnvelopeForRelayV13,
+  ]) {
+    const event = { type: "reasoning.text.delta", reasoningId: "r", delta: "private" };
+    assert.equal(project({ ...base, event }), undefined);
+    assert.equal(
+      project({ ...base, event: { ...event, type: "reasoning.summary.delta", delta: "public" } })
+        ?.event.type,
+      "reasoning.summary.delta",
+    );
   }
 });

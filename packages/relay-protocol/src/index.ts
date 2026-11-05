@@ -691,7 +691,7 @@ function projectRelayTimelineEventV11(
   event: RuntimeEventForRelayProjection,
 ): z.output<typeof relayTimelineEventSchemaV11> | undefined {
   if (event.type === "context.recovery.changed") return { type: "capabilities.changed" };
-  if (event.type === "tool.output") {
+  if (event.type === "tool.output" || event.type === "reasoning.text.delta") {
     return undefined;
   }
   if (event.type === "tool.started") {

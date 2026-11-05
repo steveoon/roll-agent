@@ -12,6 +12,7 @@ import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
+  runtimeProtocolErrorDataV14Schema,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
@@ -1321,6 +1322,9 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
   const model = sequencedModel([
     [
       { type: "stream-start", warnings: [] },
+      { type: "reasoning-start", id: "r" },
+      { type: "reasoning-delta", id: "r", delta: "private-legacy-fixture" },
+      { type: "reasoning-end", id: "r" },
       {
         type: "tool-call",
         toolCallId: "c1",
@@ -1332,7 +1336,12 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
     [
       { type: "stream-start", warnings: [] },
       { type: "text-start", id: "t" },
-      { type: "text-delta", id: "t", delta: "已发送" },
+      {
+        type: "text-delta",
+        id: "t",
+        delta: "已发送",
+        providerMetadata: { google: { thoughtSignature: "opaque-legacy-signature" } },
+      },
       { type: "text-end", id: "t" },
       { type: "finish", usage: usage(), finishReason: STOP },
     ],
@@ -1393,6 +1402,10 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
     input: "send hi",
   })) as { status: string };
   assert.equal(sendResult.status, "completed");
+  assert.doesNotMatch(JSON.stringify(events), /private-legacy-fixture|opaque-legacy-signature/u);
+  const messages = JSON.stringify(await request(3, RpcMethod.Messages, { sessionId }));
+  assert.match(messages, /已发送/u);
+  assert.doesNotMatch(messages, /private-legacy-fixture|opaque-legacy-signature/u);
 
   assert.ok(events.some((event) => event.type === "confirmation-required"));
   const toolResult = events.find((event) => event.type === "tool-result");
@@ -2235,6 +2248,7 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
       }
     >;
     emit(
+      ownership: undefined,
       targetThreadId: typeof threadId,
       targetTurnId: typeof turnId,
       event:
@@ -2281,8 +2295,11 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
         (message.params as RuntimeEventEnvelopeV14).event.type === "approval.required"
       ) {
         injectedLive = true;
-        internal.emit(threadId, turnId, { type: "approval.required", approval: liveApproval });
-        internal.emit(threadId, turnId, {
+        internal.emit(undefined, threadId, turnId, {
+          type: "approval.required",
+          approval: liveApproval,
+        });
+        internal.emit(undefined, threadId, turnId, {
           type: "message.completed",
           streamId: liveStreamId,
           text: largeLiveText,
@@ -4172,3 +4189,69 @@ test(
     assert.match(JSON.stringify(unavailable), /APPROVAL_NOT_FOUND/u);
   },
 );
+
+test("Protocol 1.6 returns strict THREAD_BUSY session_occupied details for another idle owner", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-occupied-wire-"));
+  const ownership = (identity: string) => ({
+    identity,
+    owner: { kind: "cli", label: "roll chat", workspace: "/fixture" },
+    probe: () => "alive" as const,
+  });
+  const first = new ThreadStore(dir, { ownership: ownership("first") });
+  const second = new ThreadStore(dir, { ownership: ownership("second") });
+  const id = first.createThread();
+  const held = first.retainThread(id);
+  const engine = new ConversationEngine({
+    settings: config,
+    provider: "mock",
+    modelName: "fixture",
+    model: new MockLanguageModelV4({}),
+    sources: [],
+    store: second,
+    skillLibrary: null,
+    workspaceInstructions: null,
+  });
+  const service = new RuntimeService(engine, second);
+  const pair = memoryPair();
+  const server = new RuntimeServer(engine, pair.serverConn, { runtimeService: service });
+  const pending = new Map<number, (message: JsonRpcMessage) => void>();
+  pair.clientConn.onMessage((message) => {
+    if ("id" in message && typeof message.id === "number") pending.get(message.id)?.(message);
+  });
+  const request = (id: number, method: string, params: unknown) =>
+    new Promise<JsonRpcMessage>((resolve) => {
+      pending.set(id, resolve);
+      pair.clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+  try {
+    const initialized = await request(1, "initialize", {
+      protocolVersions: ["1.6"],
+      client: { name: "fixture", version: "1" },
+    });
+    assert.ok("result" in initialized);
+    const conflict = await request(2, "thread.open", { threadId: id });
+    assert.ok("error" in conflict);
+    const data = runtimeProtocolErrorDataV14Schema.parse(conflict.error.data);
+    assert.equal(data.rollCode, "THREAD_BUSY");
+    assert.equal(data.retryable, true);
+    assert.deepEqual(data.details, {
+      reason: "session_occupied",
+      threadId: id,
+      ownerKind: "cli",
+      label: "roll chat",
+      workspace: "/fixture",
+      action: "close_other_client_and_retry",
+    });
+    assert.match(conflict.error.message, /两端请选择其一/u);
+    held?.release();
+    const opened = await request(3, "thread.open", { threadId: id });
+    assert.ok("result" in opened);
+  } finally {
+    held?.release();
+    await server.abortAll();
+    await engine.dispose();
+    first.close();
+    second.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

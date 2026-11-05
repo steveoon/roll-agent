@@ -1,3 +1,4 @@
+import type { SessionClaim } from "../ownership/session-claims.ts";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
@@ -80,6 +81,7 @@ export interface ConversationEngineOptions {
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
   readonly modelRecovery?: AgentSessionOptions["modelRecovery"];
+  readonly resolveReasoningPresentation?: AgentSessionOptions["resolveReasoningPresentation"];
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   readonly debugEvents?: boolean;
@@ -200,6 +202,7 @@ export class ConversationEngine {
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private modelRecovery: AgentSessionOptions["modelRecovery"];
+  private readonly resolveReasoningPresentation: AgentSessionOptions["resolveReasoningPresentation"];
   private modelOverride: LanguageModelV4 | undefined;
   private modelName: string;
   private provider: string;
@@ -234,6 +237,8 @@ export class ConversationEngine {
   private shellProfileResolution: ShellProfileResolutionResult | undefined;
   private shellUnsupportedWarned = false;
   private readonly liveSessions = new Map<string, AgentSession>();
+  private readonly openingSessions = new Map<string, Promise<AgentSession>>();
+  private readonly sessionClaims = new Map<string, SessionClaim>();
   private readonly shutdownController = new AbortController();
   private disposePromise: Promise<void> | undefined;
   private closing = false;
@@ -255,6 +260,7 @@ export class ConversationEngine {
     this.maxSteps = options.maxSteps ?? options.settings.maxSteps;
     this.providerOptions = options.providerOptions;
     this.modelRecovery = options.modelRecovery;
+    this.resolveReasoningPresentation = options.resolveReasoningPresentation;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
     this.debugEvents = options.debugEvents ?? false;
@@ -275,60 +281,88 @@ export class ConversationEngine {
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
-    this.assertAcceptingSessions();
-    const context = await this.ensureReady();
-    this.assertAcceptingSessions();
-    const id = this.store
-      ? this.store.createThread({
-          ...(input.id === undefined ? {} : { id: input.id }),
-          ...(input.origin === undefined ? {} : { origin: input.origin }),
-          ...(input.title ? { title: input.title } : {}),
-          model: this.resolveModelName(),
-        })
-      : (input.id ?? randomUUID());
-    return this.buildSession(context, id, []);
+    const id = input.id ?? randomUUID();
+    return this.openSession(id, async () => {
+      const claim = this.store?.retainSession(id);
+      try {
+        const context = await this.ensureReady();
+        this.assertAcceptingSessions();
+        claim?.assert();
+        this.store?.createThread({ ...input, id, model: this.resolveModelName() });
+        return this.buildSession(context, id, [], undefined, claim);
+      } catch (error) {
+        claim?.release();
+        throw error;
+      }
+    });
   }
 
   async resumeSession(threadId: string): Promise<AgentSession> {
     this.assertAcceptingSessions();
-    if (!this.store) {
-      throw new Error("resumeSession requires a ThreadStore");
-    }
-    if (this.store.getThread(threadId)?.origin.kind === "scheduled") {
+    if (this.store?.getThread(threadId)?.origin.kind === "scheduled") {
       throw new Error("定时执行会话是只读记录；请基于该次运行创建新对话");
     }
-    const liveSession = this.liveSessions.get(threadId);
-    if (liveSession !== undefined) {
-      return liveSession;
-    }
-    if (!this.store.hasThread(threadId)) {
-      throw new Error(`Thread "${threadId}" 不存在`);
-    }
-    const context = await this.ensureReady();
-    this.assertAcceptingSessions();
-    const concurrentlyResumedSession = this.liveSessions.get(threadId);
-    if (concurrentlyResumedSession !== undefined) {
-      return concurrentlyResumedSession;
-    }
-    this.recoverUncoveredToolExecutionContext(threadId);
-    const state = this.store.loadSessionState(threadId);
-    return this.buildSession(context, threadId, state.messages, state.checkpoint);
+    return this.openSession(threadId, async () => {
+      if (!this.store) throw new Error("resumeSession requires a ThreadStore");
+      const claim = this.store.retainSession(threadId);
+      try {
+        if (!this.store.hasThread(threadId)) throw new Error(`Thread "${threadId}" 不存在`);
+        if (this.store.getThread(threadId)?.origin.kind === "scheduled") {
+          throw new Error("定时执行会话是只读记录；请基于该次运行创建新对话");
+        }
+        const context = await this.ensureReady();
+        this.assertAcceptingSessions();
+        claim?.assert();
+        this.recoverUncoveredToolExecutionContext(threadId);
+        const state = this.store.loadSessionState(threadId);
+        return this.buildSession(context, threadId, state.messages, state.checkpoint, claim);
+      } catch (error) {
+        claim?.release();
+        throw error;
+      }
+    });
   }
 
   async forkSession(snapshot: ThreadSnapshot, input: ForkSessionInput = {}): Promise<AgentSession> {
+    const id = randomUUID();
+    return this.openSession(id, async () => {
+      if (!this.store) throw new Error("forkSession requires a ThreadStore");
+      const claim = this.store.retainSession(id);
+      let created = false;
+      try {
+        const context = await this.ensureReady();
+        this.assertAcceptingSessions();
+        claim?.assert();
+        this.store.forkSnapshot(snapshot, { ...input, id, model: this.resolveModelName() });
+        created = true;
+        this.recoverUncoveredToolExecutionContext(id);
+        const state = this.store.loadSessionState(id);
+        return this.buildSession(context, id, state.messages, state.checkpoint, claim);
+      } catch (error) {
+        if (created) {
+          claim?.assert();
+          this.store.deleteThread(id);
+        }
+        claim?.release();
+        throw error;
+      }
+    });
+  }
+
+  private openSession(id: string, open: () => Promise<AgentSession>): Promise<AgentSession> {
     this.assertAcceptingSessions();
-    if (!this.store) throw new Error("forkSession requires a ThreadStore");
-    const context = await this.ensureReady();
-    this.assertAcceptingSessions();
-    const id = this.store.forkSnapshot(snapshot, { ...input, model: this.resolveModelName() });
-    try {
-      this.recoverUncoveredToolExecutionContext(id);
-      const state = this.store.loadSessionState(id);
-      return this.buildSession(context, id, state.messages, state.checkpoint);
-    } catch (error) {
-      this.store.deleteThread(id);
-      throw error;
+    const live = this.liveSessions.get(id);
+    if (live !== undefined) {
+      live.assertWritable();
+      return Promise.resolve(live);
     }
+    const pending = this.openingSessions.get(id);
+    if (pending !== undefined) return pending;
+    const result = Promise.resolve()
+      .then(open)
+      .finally(() => this.openingSessions.delete(id));
+    this.openingSessions.set(id, result);
+    return result;
   }
 
   private assertAcceptingSessions(): void {
@@ -401,8 +435,13 @@ export class ConversationEngine {
     id: string,
     initialMessages: readonly ModelMessage[],
     initialCheckpoint?: ReturnType<ThreadStore["getLatestCheckpoint"]>,
+    claim?: SessionClaim,
   ): AgentSession {
     const store = this.store;
+    const fenced = <T>(operation: () => T): T => {
+      claim?.assert();
+      return operation();
+    };
     const derivedFrom = store?.getThread(id)?.derivedFrom;
     const contextWindowResolution = this.resolveContextWindowFor(
       this.resolveProviderName(),
@@ -433,7 +472,13 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
-      onBeforeTurn: this.assertModelUpdateIdle,
+      ...(this.resolveReasoningPresentation
+        ? { resolveReasoningPresentation: this.resolveReasoningPresentation }
+        : {}),
+      onBeforeTurn: () => {
+        claim?.assert();
+        this.assertModelUpdateIdle();
+      },
       ...(this.modelRecovery === undefined ? {} : { modelRecovery: this.modelRecovery }),
       sources: context.sources,
       toolSchemaPolicy: this.toolSchemaPolicy,
@@ -501,28 +546,34 @@ export class ConversationEngine {
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {
-            onAcceptInput: (inputId, message) => store.acceptTurnInput(id, inputId, message),
+            onAcceptInput: (inputId, message) =>
+              fenced(() => store.acceptTurnInput(id, inputId, message)),
             onRecordInputSkillCheckpoint: (inputId, checkpoint) =>
-              store.recordTurnSkillCheckpoint(id, inputId, checkpoint),
+              fenced(() => store.recordTurnSkillCheckpoint(id, inputId, checkpoint)),
             getInputSkillCheckpoint: (sequence) => store.getTurnInputSkillCheckpoint(id, sequence),
-            onPersist: (messages, options) => store.appendMessages(id, messages, options),
-            onReplace: (messages) => store.replaceMessages(id, messages),
-            onToolExecution: (record) => store.appendToolExecution(id, record),
+            onPersist: (messages, options) =>
+              fenced(() => store.appendMessages(id, messages, options)),
+            onReplace: (messages) => fenced(() => store.replaceMessages(id, messages)),
+            onToolExecution: (record) => fenced(() => store.appendToolExecution(id, record)),
             listToolExecutions: (options) => store.listToolExecutions(id, options),
             getToolExecution: (executionId) => store.getToolExecution(id, executionId),
-            recoverUncoveredToolExecutions: () => this.recoverUncoveredToolExecutionContext(id),
+            recoverUncoveredToolExecutions: () =>
+              fenced(() => this.recoverUncoveredToolExecutionContext(id)),
             listTranscriptMessages: (options) => store.listTranscriptMessages(id, options),
-            commitCompaction: (input) => store.commitCompaction(id, input),
+            commitCompaction: (input) => fenced(() => store.commitCompaction(id, input)),
             readCheckpointTranscript: (options) => store.readCheckpointTranscript(id, options),
           }
         : {}),
       onClose: () => {
+        claim?.release();
+        this.sessionClaims.delete(id);
         if (this.liveSessions.get(id) === session) {
           this.liveSessions.delete(id);
         }
       },
     });
     this.liveSessions.set(id, session);
+    if (claim !== undefined) this.sessionClaims.set(id, claim);
     return session;
   }
 
@@ -591,6 +642,7 @@ export class ConversationEngine {
       this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
       this.structuredOutputReasoning = input.structuredOutputReasoning;
       for (const id of this.liveSessions.keys()) {
+        this.sessionClaims.get(id)?.assert();
         this.store?.updateModel(id, input.modelName);
       }
       return resolution;
@@ -792,6 +844,7 @@ export class ConversationEngine {
     this.closing = true;
     this.disposePromise = Promise.resolve().then(async () => {
       const errors: unknown[] = [];
+      await Promise.allSettled(this.openingSessions.values());
       const closed = await Promise.allSettled(
         [...this.liveSessions.values()].map((session) => session.close()),
       );

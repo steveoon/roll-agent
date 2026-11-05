@@ -1,5 +1,36 @@
 # @roll-agent/runtime
 
+## 1.2.0
+
+### Minor Changes
+
+- [#307](https://github.com/steveoon/roll-agent/pull/307) [`74fe470`](https://github.com/steveoon/roll-agent/commit/74fe47006c4904759faa5ae891c59d9668581eb3) Thanks [@steveoon](https://github.com/steveoon)! - Coordinate writable sessions across Roll CLI and Runtime hosts using process-identity-verified SQLite sidecar claims. Keep ownership during idle input, fence metadata, transcript, tool ledger, compaction, event and attachment writes, and settle execution plus terminal projection before releasing a session. Conflicts use existing THREAD_BUSY details with guidance to choose one client.
+  
+  Expose read-only schema preflight and explicitly confirmed, exclusively gated history migration with a verified SQLite backup. Preserve primary history schema 11; old clients remain unverified and must be used sequentially. Reject writable hardlink aliases with ambiguous SQLite journal identity. Stop deleting other attachment instances solely because their directories are old.
+  
+  Coordinated hosts prune retained tool evidence and Runtime events only for the thread they own when opening or writing it. Cold unopened threads are physically pruned lazily; unrelated startup and read-only replay never prune another owner’s history. Expired event replay requires a snapshot instead of silently skipping events.
+
+### Patch Changes
+
+- [#307](https://github.com/steveoon/roll-agent/pull/307) [`74fe470`](https://github.com/steveoon/roll-agent/commit/74fe47006c4904759faa5ae891c59d9668581eb3) Thanks [@steveoon](https://github.com/steveoon)! - Use the Windows namespaced executable path when launching bundled ripgrep so grep and glob tools work from installations whose ripgrep path exceeds 260 characters. POSIX execution and search behavior are unchanged.
+
+- [#307](https://github.com/steveoon/roll-agent/pull/307) [`74fe470`](https://github.com/steveoon/roll-agent/commit/74fe47006c4904759faa5ae891c59d9668581eb3) Thanks [@steveoon](https://github.com/steveoon)! - Provide `roll runtime migrate` to explicitly confirm, back up and upgrade an older session library without configuring an LLM. Old-schema CLI errors now point to this recovery command; active claims and unsupported future schemas remain protected.
+  
+  Release a thread deletion's temporary claim and closing state when database deletion fails after session cleanup has completed. Preserve fail-closed ownership when cleanup itself fails, and allow retry or another client to reopen surviving history after a recoverable write failure.
+
+## 1.1.0
+
+### Minor Changes
+
+- [#304](https://github.com/steveoon/roll-agent/pull/304) [`a88b359`](https://github.com/steveoon/roll-agent/commit/a88b359523475d223514e913b7c2f43562eee1e0) Thanks [@steveoon](https://github.com/steveoon)! - 本地 Runtime 客户端可以实时展示 OpenAI Responses、Claude Messages、Gemini Generate Content 和 Grok 4.7 Responses 的公开推理摘要。连接 Relay 时，远端客户端也可收到公开摘要。DeepSeek 和 Qwen 的思考文本只交付给轮次开始时已订阅的本地连接。显示内容被截断时，客户端会收到省略提示。旧版 session 接口不再透出思考正文或 SDK 续轮选项。模型响应格式错误时，事件日志只保存错误类别。
+  
+  Grok 4.5、4.6 和 4.7 不支持关闭思考。配置 `runtime.thinking-level: off` 时，Core 会在请求前提示使用 `low` 或更高档位。
+
+### Patch Changes
+
+- Updated dependencies [[`a88b359`](https://github.com/steveoon/roll-agent/commit/a88b359523475d223514e913b7c2f43562eee1e0)]:
+  - @roll-agent/protocol@0.11.0
+
 ## 1.0.2
 
 ### Patch Changes

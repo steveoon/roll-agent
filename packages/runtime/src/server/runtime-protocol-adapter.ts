@@ -102,6 +102,7 @@ export class RuntimeProtocolAdapter {
   private transportFailed = false;
   private controlsService = false;
   private protocolVersion: RuntimeProtocolVersion | undefined;
+  private unsubscribeReasoningText: (() => void) | undefined;
   private capabilityRevision: number | undefined;
   private capabilityMethods: readonly string[] | undefined;
   private capabilityResult: ClientCapabilitiesSetResult | undefined;
@@ -349,6 +350,12 @@ export class RuntimeProtocolAdapter {
     }
 
     switch (request.method) {
+      case RUNTIME_METHODS.reasoningTextSubscribe:
+        runtimeMethodSchemas[RUNTIME_METHODS.reasoningTextSubscribe].params.parse(request.params);
+        this.unsubscribeReasoningText ??= this.service.subscribeReasoningText((event) =>
+          this.handleServiceEvent(event),
+        );
+        return { subscribed: this.unsubscribeReasoningText !== undefined };
       case RUNTIME_METHODS.threadList:
         return this.service.listThreads(
           runtimeMethodSchemas[RUNTIME_METHODS.threadList].params.parse(request.params),
@@ -475,6 +482,7 @@ export class RuntimeProtocolAdapter {
 
   disposeConstructionFailure(): void {
     this.closing = true;
+    this.unsubscribeReasoningText?.();
     this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();
@@ -498,6 +506,7 @@ export class RuntimeProtocolAdapter {
     while (this.settlementTasks.size > 0) {
       await Promise.allSettled([...this.settlementTasks]);
     }
+    this.unsubscribeReasoningText?.();
     this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();
@@ -614,6 +623,7 @@ export class RuntimeProtocolAdapter {
     this.service.setUserInputAvailable(false);
     this.detachResponder?.();
     this.detachResponder = undefined;
+    this.unsubscribeReasoningText?.();
     this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();

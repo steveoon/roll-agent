@@ -571,6 +571,40 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
   );
 });
 
+test("local thinking subscription and ephemeral event are available only on 1.6", () => {
+  const envelope = {
+    protocolVersion: "1.6",
+    runtimeInstanceId: IDS.runtime,
+    sequence: 2,
+    timestamp: "2026-07-28T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    durability: "ephemeral",
+    event: { type: "reasoning.text.delta", reasoningId: "r", delta: "thinking" },
+  };
+  assert.equal(isRuntimeMethodAvailable("1.6", "reasoning.text.subscribe"), true);
+  assert.equal(runtimeEventEnvelopeSchema.safeParse(envelope).success, true);
+  assert.equal(
+    runtimeEventEnvelopeSchema.safeParse({
+      ...envelope,
+      durability: "durable",
+      eventId: IDS.event,
+      cursor: CURSORS.first,
+    }).success,
+    false,
+  );
+  for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
+    (version) => version !== "1.6",
+  )) {
+    assert.equal(isRuntimeMethodAvailable(version, "reasoning.text.subscribe"), false);
+    assert.equal(
+      runtimeEventEnvelopeSchema.safeParse({ ...envelope, protocolVersion: version }).success,
+      false,
+    );
+    assert.throws(() => projectRuntimeEventEnvelopeForVersion(version, envelope));
+  }
+});
+
 test("runtime event envelopes project explicitly to the frozen v1.1 shape", () => {
   const latest = runtimeEventEnvelopeSchema.parse({
     protocolVersion: "1.3",

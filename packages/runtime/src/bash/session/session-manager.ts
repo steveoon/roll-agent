@@ -89,6 +89,7 @@ export class SessionManager {
   private readonly terminations = new Map<number, TerminationControl>();
   private readonly options: SessionManagerOptions;
   private acceptingSessions = true;
+  private readonly cleanupFailures = new Map<number, SessionCleanupResult>();
 
   constructor(options: SessionManagerOptions) {
     this.options = options;
@@ -180,7 +181,11 @@ export class SessionManager {
 
   async close(): Promise<readonly SessionCleanupResult[]> {
     this.acceptingSessions = false;
-    return this.terminateAll();
+    const results = await this.terminateAll();
+    // Reading/deleting a terminal tombstone is not proof that its process tree settled.
+    const complete = new Map(results.map((result) => [result.sessionId, result]));
+    for (const [id, failure] of this.cleanupFailures) complete.set(id, failure);
+    return [...complete.values()];
   }
 
   private activeIds(): readonly number[] {
@@ -308,11 +313,13 @@ export class SessionManager {
       throw new Error(`会话 ${String(session.id)} 清理后仍处于非终态`);
     }
 
-    return {
+    const result: SessionCleanupResult = {
       sessionId: session.id,
       state: finalState,
       ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}),
     };
+    if (result.cleanupError !== undefined) this.cleanupFailures.set(session.id, result);
+    return result;
   }
 
   private async killTree(

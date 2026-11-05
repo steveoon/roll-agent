@@ -204,14 +204,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
 
   useEffect(() => {
     const retiring = retiringRef.current;
-    if (retiring === undefined || retiring === activeSession) {
-      return;
-    }
+    if (retiring === undefined || retiring === activeSession) return;
     retiringRef.current = undefined;
-    const finish = (): void => {
-      sessionSwitching?.onRetired(retiring.id);
-    };
-    retiring.close().then(finish, finish);
+    retiring
+      .close()
+      .then(() => sessionSwitching?.onRetired(retiring.id))
+      .catch((error: unknown) => {
+        process.stderr.write(`原会话清理未完成：${errorText(error)}\n`);
+      });
   }, [activeSession, sessionSwitching]);
 
   const openPicker = useCallback((): boolean => {
