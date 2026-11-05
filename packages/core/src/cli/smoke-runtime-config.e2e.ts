@@ -44,7 +44,7 @@ test(
   "real stdio and restarted daemon preserve selected config, task cwd, Agent and library",
   { timeout: 90000 },
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "roll context live-")));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "roll context live-")));
     const source = join(root, "配置 source");
     const task = join(root, "daily task");
     const home = join(root, "home");
@@ -105,10 +105,13 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
             assert.ok(outputs.includes("context-agent-proof"));
             assert.ok(
               outputs.includes(task) || outputs.includes(JSON.stringify(task).slice(1, -1)),
-              outputs,
+              `Expected task cwd ${task} in tool results:\n${outputs}`,
             );
             const normalizedOutput = outputs.replaceAll("\\\\", "\\").replaceAll("\\\\", "\\");
-            assert.ok(normalizedOutput.includes(join(source, "bin", "chrome")), outputs);
+            assert.ok(
+              normalizedOutput.includes(join(source, "bin", "chrome")),
+              `Expected browser executable ${join(source, "bin", "chrome")} in tool results:\n${outputs}`,
+            );
             proofs++;
             delta = { content: "context-execution-complete" };
             finish = "stop";
