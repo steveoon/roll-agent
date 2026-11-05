@@ -259,7 +259,8 @@ export async function runServer(config: RollConfig): Promise<void> {
           signalScope?.dispose();
           chatCliScope.dispose();
           store.close();
-          process.exit(process.exitCode ?? 0);
+          // Let pending HTTP/libuv handle cleanup drain before exiting the stdio host.
+          process.exitCode ??= 0;
         });
     });
     signalScope = createChatEngineSignalScope({
