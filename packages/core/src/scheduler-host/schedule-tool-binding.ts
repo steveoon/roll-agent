@@ -1,3 +1,21 @@
+import { randomBytes } from "node:crypto";
+import type { RuntimeConfigContext } from "../config/runtime-context.ts";
+import {
+  type ScheduleHostContext,
+  SCHEDULE_TOOL_ERROR_CODES,
+  type ScheduleToolError,
+  type ScheduleReadinessWarning,
+  type ScheduleExecutionReadiness,
+  type ScheduleToolScheduleView,
+  type ScheduleToolListItem,
+  type ScheduleToolPort,
+} from "@roll-agent/runtime/host-contracts";
+import {
+  decodeScheduleHostContext,
+  encodeScheduleHostContext,
+  loadScheduleConfig,
+  scheduleConfigRevision,
+} from "./config-context.ts";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -14,7 +32,6 @@ import {
   readScheduleLedger,
   type ScheduleRecord,
 } from "@roll-agent/runtime";
-import { loadConfig } from "../config/loader.ts";
 import { auditScheduledServicePlaceholders } from "../config/placeholder-audit.ts";
 import { computeAuthorityDigest } from "./authority.ts";
 import {
@@ -32,15 +49,6 @@ import {
   schedulerServiceStatePath,
 } from "./service-state.ts";
 
-import {
-  SCHEDULE_TOOL_ERROR_CODES,
-  type ScheduleToolError,
-  type ScheduleReadinessWarning,
-  type ScheduleExecutionReadiness,
-  type ScheduleToolScheduleView,
-  type ScheduleToolListItem,
-  type ScheduleToolPort,
-} from "@roll-agent/runtime/host-contracts";
 export { SCHEDULE_TOOL_ERROR_CODES } from "@roll-agent/runtime/host-contracts";
 export type {
   ScheduleToolError,
@@ -98,9 +106,11 @@ function canonicalizeCwd(
 function probeUnresolvedPlaceholders(
   configCwd: string,
   secretsPath: string | undefined,
+  hostContext?: ScheduleHostContext,
 ): ScheduleReadinessWarning | undefined {
   const audit = auditScheduledServicePlaceholders({
-    loadOptions: { cwd: configCwd },
+    loadOptions:
+      hostContext === undefined ? { cwd: configCwd } : decodeScheduleHostContext(hostContext),
     ...(secretsPath === undefined ? {} : { secretsPath }),
   });
   if (audit === undefined || audit.unresolved.length === 0) {
@@ -118,6 +128,7 @@ function probeReadiness(
   serviceStatePath: string,
   configCwd: string,
   secretsPath: string | undefined,
+  hostContext?: ScheduleHostContext,
 ): ScheduleExecutionReadiness {
   const paths = createSchedulerPaths(dataDir);
   const daemon = inspectDaemon(paths.daemonRecordPath);
@@ -157,7 +168,7 @@ function probeReadiness(
       message: `已安装的调度服务固定在数据目录 ${installedDataDir ?? ""}，与当前配置 ${paths.dataDir} 不一致；该任务不会被现有服务执行`,
     });
   }
-  const placeholderWarning = probeUnresolvedPlaceholders(configCwd, secretsPath);
+  const placeholderWarning = probeUnresolvedPlaceholders(configCwd, secretsPath, hostContext);
   if (placeholderWarning !== undefined) {
     warnings.push(placeholderWarning);
   }
@@ -226,19 +237,29 @@ interface ScheduleLedgerContext {
   readonly maxSchedules: number;
 }
 
-function resolveLedgerContext(sessionCwd: string): ScheduleLedgerContext {
-  const { config } = loadConfig({ cwd: sessionCwd });
+function resolveLedgerContext(
+  sessionCwd: string,
+  hostContext?: ScheduleHostContext,
+): ScheduleLedgerContext {
+  const { config } = loadScheduleConfig({
+    cwd: sessionCwd,
+    ...(hostContext === undefined ? {} : { hostContext }),
+  });
   return {
     dataDir: createSchedulerPaths(config.scheduler.dataDir).dataDir,
     maxSchedules: config.scheduler.maxSchedules,
   };
 }
 
-function resolveAuthorityDigest(taskCwd: string): string {
-  return computeAuthorityDigest(loadConfig({ cwd: taskCwd }).config);
+function resolveAuthorityDigest(taskCwd: string, hostContext?: ScheduleHostContext): string {
+  return computeAuthorityDigest(
+    loadScheduleConfig({ cwd: taskCwd, ...(hostContext === undefined ? {} : { hostContext }) })
+      .config,
+  );
 }
 
 export interface ScheduleToolBindingOptions {
+  readonly configContext?: RuntimeConfigContext;
   readonly serviceStatePath?: string;
   readonly secretsPath?: string;
 }
@@ -247,6 +268,13 @@ export function createScheduleToolBinding(
   options: ScheduleToolBindingOptions = {},
 ): ScheduleToolPort {
   const serviceStatePath = options.serviceStatePath ?? schedulerServiceStatePath();
+  const hostContext =
+    options.configContext === undefined
+      ? undefined
+      : encodeScheduleHostContext(options.configContext);
+  const revisionKey = randomBytes(32);
+  const revision = (cwd: string, context: ScheduleHostContext) =>
+    scheduleConfigRevision(cwd, context, revisionKey);
   return {
     captureExtend: (request, sessionCwd) => {
       if (
@@ -264,7 +292,7 @@ export function createScheduleToolBinding(
         );
       }
       try {
-        const ledger = resolveLedgerContext(sessionCwd);
+        const ledger = resolveLedgerContext(sessionCwd, hostContext);
         const snapshot = readScheduleLedger(ledger.dataDir);
         if (snapshot.status === "migration-required") {
           return toolError(
@@ -288,7 +316,10 @@ export function createScheduleToolBinding(
           request: { ...request },
           sessionCwd,
           dataDir: ledger.dataDir,
-          authorityDigest: resolveAuthorityDigest(schedule.cwd),
+          authorityDigest: resolveAuthorityDigest(schedule.cwd, schedule.hostContext),
+          ...(schedule.hostContext === undefined
+            ? {}
+            : { hostContextRevision: revision(schedule.cwd, schedule.hostContext) }),
           schedule,
         };
       } catch (error) {
@@ -297,13 +328,16 @@ export function createScheduleToolBinding(
     },
     extend: async (admission) => {
       try {
-        const ledger = resolveLedgerContext(admission.sessionCwd);
+        const ledger = resolveLedgerContext(admission.sessionCwd, hostContext);
         const cwd = canonicalizeCwd(admission.schedule.cwd, admission.sessionCwd);
         if (
           ledger.dataDir !== admission.dataDir ||
           typeof cwd !== "string" ||
           cwd !== admission.schedule.cwd ||
-          resolveAuthorityDigest(cwd) !== admission.authorityDigest
+          resolveAuthorityDigest(cwd, admission.schedule.hostContext) !==
+            admission.authorityDigest ||
+          (admission.schedule.hostContext !== undefined &&
+            revision(cwd, admission.schedule.hostContext) !== admission.hostContextRevision)
         ) {
           return toolError(
             SCHEDULE_TOOL_ERROR_CODES.admissionStale,
@@ -336,6 +370,7 @@ export function createScheduleToolBinding(
             current.name !== captured.name ||
             current.prompt !== captured.prompt ||
             current.cwd !== captured.cwd ||
+            current.hostContext !== captured.hostContext ||
             JSON.stringify(current.trigger) !== JSON.stringify(captured.trigger) ||
             current.maxRunMs !== captured.maxRunMs ||
             current.createdAtMs !== captured.createdAtMs
@@ -357,7 +392,13 @@ export function createScheduleToolBinding(
             extended: result.extended,
             requestId: admission.request.requestId,
             schedule: toScheduleView(result.schedule),
-            readiness: probeReadiness(ledger.dataDir, serviceStatePath, cwd, options.secretsPath),
+            readiness: probeReadiness(
+              ledger.dataDir,
+              serviceStatePath,
+              cwd,
+              options.secretsPath,
+              admission.schedule.hostContext,
+            ),
           };
         } finally {
           store.close();
@@ -391,7 +432,7 @@ export function createScheduleToolBinding(
           request.maxRun === undefined || request.maxRun.length === 0
             ? undefined
             : parseMaxRunText(request.maxRun);
-        const ledger = resolveLedgerContext(sessionCwd);
+        const ledger = resolveLedgerContext(sessionCwd, hostContext);
         assertCompatibleSchedulerDaemon(
           createSchedulerPaths(ledger.dataDir).daemonRecordPath,
           SCHEDULER_SCHEMA_VERSION,
@@ -409,9 +450,18 @@ export function createScheduleToolBinding(
           maxRounds: request.rounds,
           maxRunDisplay: formatDuration(maxRunMs ?? SCHEDULER_LIMITS.maxRunMs),
           dataDir: ledger.dataDir,
-          authorityDigest: resolveAuthorityDigest(cwd),
+          authorityDigest: resolveAuthorityDigest(cwd, hostContext),
+          ...(hostContext === undefined
+            ? {}
+            : { hostContext, hostContextRevision: revision(cwd, hostContext) }),
           firstRunAt: new Date(computeFirstRunAtMs(trigger, nowMs)).toISOString(),
-          readiness: probeReadiness(ledger.dataDir, serviceStatePath, cwd, options.secretsPath),
+          readiness: probeReadiness(
+            ledger.dataDir,
+            serviceStatePath,
+            cwd,
+            options.secretsPath,
+            hostContext,
+          ),
         };
       } catch (error) {
         return fromKnownError(error);
@@ -436,10 +486,13 @@ export function createScheduleToolBinding(
             "任务工作目录在确认期间发生变化，已放弃创建；请重新发起",
           );
         }
-        ledger = resolveLedgerContext(admission.sessionCwd);
+        ledger = resolveLedgerContext(admission.sessionCwd, hostContext);
         if (
           ledger.dataDir !== admission.dataDir ||
-          resolveAuthorityDigest(admission.cwd) !== admission.authorityDigest
+          resolveAuthorityDigest(admission.cwd, hostContext) !== admission.authorityDigest ||
+          admission.hostContext !== hostContext ||
+          (hostContext !== undefined &&
+            revision(admission.cwd, hostContext) !== admission.hostContextRevision)
         ) {
           return toolError(
             SCHEDULE_TOOL_ERROR_CODES.admissionStale,
@@ -473,6 +526,7 @@ export function createScheduleToolBinding(
           name: admission.name,
           prompt: admission.prompt,
           cwd: admission.cwd,
+          ...(hostContext === undefined ? {} : { hostContext }),
           trigger: admission.trigger,
           ...(admission.trigger.kind === "calendar" || admission.trigger.startAtMs !== undefined
             ? { expectedFirstRunAtMs: Date.parse(admission.firstRunAt) }
@@ -491,6 +545,7 @@ export function createScheduleToolBinding(
             serviceStatePath,
             admission.cwd,
             options.secretsPath,
+            hostContext,
           ),
         };
       } catch (error) {
@@ -502,7 +557,10 @@ export function createScheduleToolBinding(
     list: async (query, sessionCwd) => {
       let dataDir: string;
       try {
-        const { config } = loadConfig({ cwd: sessionCwd });
+        const { config } = loadScheduleConfig({
+          cwd: sessionCwd,
+          ...(hostContext === undefined ? {} : { hostContext }),
+        });
         dataDir = createSchedulerPaths(config.scheduler.dataDir).dataDir;
       } catch (error) {
         return fromKnownError(error);
@@ -536,7 +594,13 @@ export function createScheduleToolBinding(
         offset,
         hasMore: offset + page.length < filtered.length,
         schedules: page.map(toListItem),
-        readiness: probeReadiness(dataDir, serviceStatePath, sessionCwd, options.secretsPath),
+        readiness: probeReadiness(
+          dataDir,
+          serviceStatePath,
+          sessionCwd,
+          options.secretsPath,
+          hostContext,
+        ),
       };
     },
   };

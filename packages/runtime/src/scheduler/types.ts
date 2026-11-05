@@ -1,3 +1,4 @@
+import type { ScheduleHostContext } from "../host-contracts/schedule-context.ts";
 import type { TriggerSpec } from "./trigger.ts";
 
 export const SCHEDULE_STATUSES = {
@@ -133,6 +134,7 @@ export type InvocationTreeLiveness =
   (typeof INVOCATION_TREE_LIVENESS)[keyof typeof INVOCATION_TREE_LIVENESS];
 
 export interface ScheduleRecord {
+  readonly hostContext?: ScheduleHostContext;
   readonly id: string;
   readonly name: string;
   readonly prompt: string;
@@ -229,6 +231,7 @@ export interface ClaimedInvocation {
 }
 
 export interface CreateScheduleInput {
+  readonly hostContext?: ScheduleHostContext;
   readonly name: string;
   readonly prompt: string;
   readonly cwd: string;

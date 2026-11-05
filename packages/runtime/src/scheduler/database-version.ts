@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEDULER_SCHEMA_VERSION = 9;
+export const SCHEDULER_SCHEMA_VERSION = 10;
 const WRITER_MARKER = `roll_scheduler_writer_v${String(SCHEDULER_SCHEMA_VERSION)}`;
 
 /** Connection-local compatibility marker, not an authorization or security boundary. */

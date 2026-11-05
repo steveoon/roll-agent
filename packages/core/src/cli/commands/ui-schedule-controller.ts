@@ -1,3 +1,4 @@
+import { loadScheduleConfig } from "../../scheduler-host/config-context.ts";
 import { loadConfig } from "../../config/loader.ts";
 import { auditScheduledServicePlaceholders } from "../../config/placeholder-audit.ts";
 import { computeAuthorityDigest } from "../../scheduler-host/authority.ts";
@@ -105,6 +106,7 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
         return { ok: true, uninstalled };
       },
     },
-    authorityDigestFor: (cwd) => computeAuthorityDigest(loadConfig({ cwd }).config),
+    authorityDigestFor: (_cwd, schedule) =>
+      computeAuthorityDigest(loadScheduleConfig(schedule).config),
   });
 }

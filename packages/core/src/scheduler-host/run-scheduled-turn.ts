@@ -1,3 +1,4 @@
+import { decodeScheduleHostContext } from "./config-context.ts";
 import { createOwnedThreadStore } from "../runtime-host/session-ownership.ts";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -126,6 +127,9 @@ export function createScheduledTurnRunner(
       engine = createChatEngine({
         runtime: input.runtime,
         config,
+        ...(schedule.hostContext === undefined
+          ? {}
+          : { configContext: decodeScheduleHostContext(schedule.hostContext) }),
         model: llm.model,
         store,
         surface: CHAT_ENGINE_SURFACES.background,
