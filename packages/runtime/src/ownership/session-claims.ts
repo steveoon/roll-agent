@@ -206,6 +206,41 @@ export class SessionClaims {
     return this.acquireKey(MAINTENANCE);
   }
 
+  /** Keep first creation and writable preflight under the same cross-process SQLite gate. */
+  beginLibraryInitialization(isNew: () => boolean): () => void {
+    this.checkOpen();
+    for (let attempt = 0; attempt < 32; attempt++) {
+      this.db.exec("BEGIN IMMEDIATE");
+      let conflict: Claim | undefined;
+      try {
+        const fresh = isNew();
+        conflict =
+          this.read(MAINTENANCE) ??
+          (fresh
+            ? this.db
+                .prepare("SELECT * FROM claims LIMIT 1")
+                .all()
+                .map((row) => claimSchema.parse(row))[0]
+            : undefined);
+        if (conflict === undefined) {
+          let released = false;
+          return () => {
+            if (released) return;
+            this.db.exec("COMMIT");
+            released = true;
+          };
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+      // A host probe must never run while the SQLite write gate is held.
+      if (!this.reap(conflict)) throw new SessionOccupiedError(MAINTENANCE, conflict);
+    }
+    throw new SessionOccupiedError(MAINTENANCE);
+  }
+
   private assert(claim: Claim): void {
     this.checkOpen();
     if (this.read(claim.thread_id)?.claim_id !== claim.claim_id) {

@@ -105,3 +105,13 @@ Runtime 只验证、事务性保存可选的 opaque host context；配置内容�
 ## Residual risks / follow-ups
 
 后续 PR 应运行跨平台 CI；Electron 任务需使用本次公开 helper/flags 的新构建做集成验证。打包探针复用本地已安装第三方依赖，未模拟全新机器下载 standalone；其结论只覆盖发布导出与本地构建产物。升级前按现有运维流程重启旧 scheduler，schema writer fence 会拒绝旧连接继续写入。
+
+## PR CI 跟进中的修复
+
+- Windows 启动 smoke 使用 `file://` URL 传递 ESM preload，并在临时根目录加入空格；失败诊断保留 Runtime stderr。
+- CI 暴露已有的首次建库竞态：一个宿主创建 `threads.db` 后、schema 提交前，另一个宿主将 v0 误判为旧库。受控 Worker 在该窗口暂停，修改前稳定失败；修复后等待第一个初始化提交再预检。既存 v0 内容仍拒绝隐式迁移且字节不变，当前库的活跃同级会话仍能保持占用。
+- 修复复用 Runtime 的 occupancy SQLite；预检与初始化持有同一写门禁，SQL busy timeout 保持 15 秒。显式 maintenance 与 session claim 的既有排他语义保留，OS 探活仅在事务外进行，没有新增 Core 依赖、数据库版本、自动迁移或接管。
+- 相关 ownership/lifecycle/初始化回归 25 项通过。Core/Runtime 完整单测及真实 CLI E2E 另行复跑；远端最终状态以 PR #309 的当前 HEAD checks 为准。
+- Windows 重跑另暴露 `/show-think` 测试在草稿未提交渲染时发送 Enter 的时序依赖。测试改为等待实际草稿渲染，保留原输出断言和超时。
+
+首次初始化门禁的释放在异常和正常路径均幂等执行。对存量旧库的预检失败会回滚 occupancy 事务、关闭连接，不修改历史；新库初始化事务仍由 ThreadStore 负责，跨包职责保持不变。

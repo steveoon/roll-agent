@@ -1030,7 +1030,7 @@ test("/show-think toggles committed reasoning between collapsed and expanded", a
   for (const ch of "/show-think on") {
     stdin.write(ch);
   }
-  await delay(20);
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), literalPattern("/show-think on")));
   stdin.write("\r");
   await waitFor(() => {
     const frame = plain(lastFrame() ?? "");
@@ -1042,7 +1042,7 @@ test("/show-think toggles committed reasoning between collapsed and expanded", a
   for (const ch of "/show-think off") {
     stdin.write(ch);
   }
-  await delay(20);
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), literalPattern("/show-think off")));
   stdin.write("\r");
   await waitFor(() => {
     const frame = plain(lastFrame() ?? "");

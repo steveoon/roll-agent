@@ -64,6 +64,24 @@ jobs:
             throw "PowerShell 7+ is required"
           }
 
+      - name: Runtime configuration context regressions
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
+          packages/core/src/config/runtime-context.test.ts
+          packages/core/src/scheduler-host/config-context.test.ts
+          packages/core/src/ui/schedule-controller.test.ts
+          packages/runtime/src/scheduler/host-context.test.ts
+          packages/runtime/src/store/thread-store-initialization.test.ts
+          packages/runtime/src/scheduler/schedule-calendar.test.ts
+          packages/runtime/src/scheduler/schedule-extend.test.ts
+          packages/runtime/src/scheduler/schedule-rounds.test.ts
+
+      - name: Runtime configuration context real execution
+        timeout-minutes: 3
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test
+          packages/core/src/cli/smoke-runtime-config.e2e.ts
+
       - name: Targeted shell tests
         # PowerShell-heavy files share a runner; bound contention without relaxing test deadlines.
         run: >
@@ -131,20 +149,3 @@ jobs:
         run: >
           node --experimental-strip-types --experimental-sqlite --test
           packages/core/src/cli/smoke-schedule.e2e.ts
-
-      - name: Runtime configuration context regressions
-        run: >
-          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
-          packages/core/src/config/runtime-context.test.ts
-          packages/core/src/scheduler-host/config-context.test.ts
-          packages/core/src/ui/schedule-controller.test.ts
-          packages/runtime/src/scheduler/host-context.test.ts
-          packages/runtime/src/scheduler/schedule-calendar.test.ts
-          packages/runtime/src/scheduler/schedule-extend.test.ts
-          packages/runtime/src/scheduler/schedule-rounds.test.ts
-
-      - name: Runtime configuration context real execution
-        timeout-minutes: 3
-        run: >
-          node --experimental-strip-types --experimental-sqlite --test
-          packages/core/src/cli/smoke-runtime-config.e2e.ts
