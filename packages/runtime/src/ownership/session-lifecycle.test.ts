@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
@@ -121,6 +122,127 @@ test("coalesced resume and close barriers reject stale cached sessions until aut
     assert.ok(JSON.stringify(reopened.getMessages()).includes("persist across owner transition"));
     await assert.rejects(drain(one.send("stale")), /closed/);
   } finally {
+    await f.close();
+  }
+});
+
+test("delete after settled session cleanup can retry a failed database write without retaining ownership", async () => {
+  const f = setup();
+  const service = new RuntimeService(f.a, f.first);
+  const db = new DatabaseSync(join(f.dir, "threads.db"));
+  try {
+    const id = f.first.createThread();
+    await service.openThread(runtimeMethodSchemas["thread.open"].params.parse({ threadId: id }));
+    db.exec(
+      "CREATE TRIGGER reject_delete BEFORE DELETE ON threads BEGIN SELECT RAISE(ABORT, 'controlled delete failure'); END",
+    );
+    const params = runtimeMethodSchemas["thread.delete"].params.parse({
+      requestId: randomUUID(),
+      threadId: id,
+    });
+    await assert.rejects(service.deleteThread(params), /controlled delete failure/u);
+    assert.equal(f.first.hasThread(id), true);
+    db.exec("DROP TRIGGER reject_delete");
+    f.second.updateTitle(id, "other client can write after failure");
+    await service.openThread(runtimeMethodSchemas["thread.open"].params.parse({ threadId: id }));
+    // Replaying a known failed request preserves its result; an explicit retry has a new ID.
+    await assert.rejects(service.deleteThread(params), /controlled delete failure/u);
+    assert.deepEqual(
+      await service.deleteThread(
+        runtimeMethodSchemas["thread.delete"].params.parse({ ...params, requestId: randomUUID() }),
+      ),
+      { deleted: true },
+    );
+    assert.equal(f.second.hasThread(id), false);
+  } finally {
+    db.close();
+    await service.close();
+    await f.close();
+  }
+});
+
+test(
+  "real SQLite writer timeout during unopened-thread deletion leaves service and Store closable",
+  { timeout: 30_000 },
+  async () => {
+    const f = setup();
+    const service = new RuntimeService(f.a, f.first);
+    const db = new DatabaseSync(join(f.dir, "threads.db"));
+    try {
+      const id = f.first.createThread();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        await assert.rejects(
+          service.deleteThread(
+            runtimeMethodSchemas["thread.delete"].params.parse({
+              requestId: randomUUID(),
+              threadId: id,
+            }),
+          ),
+          /database is locked/u,
+        );
+      } finally {
+        db.exec("ROLLBACK");
+      }
+      f.second.updateTitle(id, "writer lock released");
+      await service.renameThread(
+        runtimeMethodSchemas["thread.rename"].params.parse({
+          requestId: randomUUID(),
+          threadId: id,
+          title: "recovered",
+        }),
+      );
+      assert.equal(f.first.getThread(id)?.title, "recovered");
+    } finally {
+      db.close();
+      await service.close();
+      await f.close();
+    }
+  },
+);
+
+test("delete retains ownership when session cleanup itself fails", async (t) => {
+  const f = setup();
+  const service = new RuntimeService(f.a, f.first);
+  const id = f.first.createThread();
+  await service.openThread(runtimeMethodSchemas["thread.open"].params.parse({ threadId: id }));
+  const session = await f.a.resumeSession(id);
+  const close = t.mock.method(session, "close", async () => {
+    throw new Error("unsettled cleanup");
+  });
+  const retain = f.first.retainThread.bind(f.first);
+  let hold: ReturnType<typeof retain>;
+  const retainMock = t.mock.method(f.first, "retainThread", (threadId: string) => {
+    hold = retain(threadId);
+    return hold;
+  });
+  try {
+    await assert.rejects(
+      service.deleteThread(
+        runtimeMethodSchemas["thread.delete"].params.parse({
+          requestId: randomUUID(),
+          threadId: id,
+        }),
+      ),
+      /unsettled cleanup/u,
+    );
+    assert.equal(f.first.hasThread(id), true);
+    assert.throws(() => f.second.updateTitle(id, "unsafe"), SessionOccupiedError);
+    await assert.rejects(
+      service.renameThread(
+        runtimeMethodSchemas["thread.rename"].params.parse({
+          requestId: randomUUID(),
+          threadId: id,
+          title: "unsafe",
+        }),
+      ),
+      /正在关闭/u,
+    );
+  } finally {
+    close.mock.restore();
+    retainMock.mock.restore();
+    await service.close();
+    hold?.release();
     await f.close();
   }
 });

@@ -50,6 +50,13 @@ convert it into proof of process-tree settlement. OS death permits reclaiming th
 parent's claim; it does **not** prove arbitrary external MCP work or orphaned child
 side effects stopped, and does not promise exactly-once effects.
 
+Deletion retains its temporary claim through session, event and attachment cleanup.
+If cleanup fails, ownership remains fenced. Once cleanup settles, a failed database
+DELETE releases the temporary claim and closing state so the request can be retried
+and another client can reopen the surviving history.
+The original `requestId` still replays its cached failure; an explicit new deletion
+attempt must use a fresh `requestId`, following the existing mutation contract.
+
 ## Read-only inspection and explicit migration
 
 `inspectThreadLibrary(dir)` never creates a directory, claim, or database and never
@@ -63,6 +70,25 @@ schema access. Existing lower or higher schemas fail with
 The upper client must preserve user choice and explain old-CLI effects before
 calling `migrateOwnedThreadLibrary(runtime, dir, true)`, or Runtime's
 `migrateThreadLibrary({ dir, ownership, confirmStoppedLegacyClients: true })`.
+
+CLI users run `roll runtime migrate` in the original project directory to inspect
+the selected library and receive the confirmation instructions. It does not require
+LLM configuration or create a library when none exists. After stopping every CLI,
+desktop client and scheduler using that library, explicitly confirm the backup and
+upgrade:
+
+```sh
+roll runtime migrate --confirm-stopped-clients
+# Select a library explicitly, including when the original project is unavailable:
+roll runtime migrate --threads-dir "/path/to/threads" --confirm-stopped-clients --json
+```
+
+`--threads-dir` overrides config discovery. Without it, the command uses the current
+project's `runtime.threads-dir`. No confirmation means no migration; live coordinated
+claims still block an explicitly confirmed migration. JSON success returns
+`{ backupPath, preflight }`; `backupPath` is `null` when the library is already current
+or absent. Unsupported future schemas are refused. Normal chat startup remains
+protected and points old-schema users to this command instead of migrating implicitly.
 
 Migration acquires the library gate, requires no thread claims, rechecks schema,
 uses SQLite `VACUUM INTO` to create a consistent unique backup, verifies the backup

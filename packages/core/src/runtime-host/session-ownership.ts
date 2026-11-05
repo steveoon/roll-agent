@@ -53,13 +53,24 @@ export function createSessionOwnershipHost(kind = "cli"): SessionOwnershipHost {
 
 export function createOwnedThreadStore(runtime: RuntimeModule, dir: string, kind = "cli") {
   assertExpectedSessionLibrary(runtime, dir);
-  const store = new runtime.ThreadStore(resolve(runtime.expandTilde(dir)), {
-    ownership: createSessionOwnershipHost(kind),
-  });
-  if (launchBinding?.expected?.state === "missing") {
-    launchBinding = { expected: inspectSessionLibraryBinding(runtime, dir) };
+  try {
+    const store = new runtime.ThreadStore(resolve(runtime.expandTilde(dir)), {
+      ownership: createSessionOwnershipHost(kind),
+    });
+    if (launchBinding?.expected?.state === "missing") {
+      launchBinding = { expected: inspectSessionLibraryBinding(runtime, dir) };
+    }
+    return store;
+  } catch (error) {
+    if (
+      error instanceof runtime.ThreadLibraryMigrationRequiredError &&
+      error.preflight.status === "needs_migration"
+    ) {
+      error.message +=
+        " 请在相同工作目录和配置下运行 `roll runtime migrate` 查看迁移步骤，或用 --threads-dir 指定会话库目录。";
+    }
+    throw error;
   }
-  return store;
 }
 
 /** Explicit user-approved backend operation; callers must explain old CLI sequential access. */

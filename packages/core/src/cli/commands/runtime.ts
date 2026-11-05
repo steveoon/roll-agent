@@ -8,8 +8,9 @@ function loadRuntimeCommand(fileName: string) {
 }
 
 export default defineCommand({
-  meta: { description: "启动和管理供第三方客户端使用的 Roll Runtime" },
+  meta: { description: "管理本地 Roll Runtime 与会话库" },
   subCommands: {
     serve: () => loadRuntimeCommand("runtime-serve"),
+    migrate: () => loadRuntimeCommand("runtime-migrate"),
   },
 });

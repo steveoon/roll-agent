@@ -890,16 +890,25 @@ export class RuntimeService {
         }
         const hold = this.store.retainThread(params.threadId);
         this.closingThreads.add(params.threadId);
-        await Promise.allSettled([this.openingSessions.get(params.threadId)]);
-        const session = this.sessions.get(params.threadId);
-        await session?.close();
-        await this.turnJobs.get(params.threadId);
-        this.finishThread(params.threadId);
-        hold?.assert();
-        this.store.deleteThread(params.threadId);
-        hold?.release();
-        this.closingThreads.delete(params.threadId);
-        return { deleted: true };
+        let cleanupSettled = false;
+        try {
+          await Promise.allSettled([this.openingSessions.get(params.threadId)]);
+          const session = this.sessions.get(params.threadId);
+          await session?.close();
+          await this.turnJobs.get(params.threadId);
+          this.finishThread(params.threadId);
+          cleanupSettled = true;
+          hold?.assert();
+          this.store.deleteThread(params.threadId);
+          return { deleted: true };
+        } finally {
+          // Failed cleanup must keep fencing writers. A failed DELETE after settled cleanup
+          // has no producer left to fence, so release the temporary hold and allow retry.
+          if (cleanupSettled) {
+            hold?.release();
+            this.closingThreads.delete(params.threadId);
+          }
+        }
       },
     );
   }
