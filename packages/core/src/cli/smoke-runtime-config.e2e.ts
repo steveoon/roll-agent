@@ -163,7 +163,12 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
         providers: { qwen: { apiKey: "fixture", baseUrl: `http://127.0.0.1:${address.port}/v1` } },
       },
       agents: { dataDir: "./agents" },
-      runtime: { threadsDir: "./history", approval: { default: "auto" }, shell: { enabled: true } },
+      runtime: {
+        threadsDir: "./history",
+        // PowerShell has no safe-command classifier; authorize this fixture's fixed pwd call.
+        approval: { default: "auto", overrides: { "roll.powershell": "auto" } },
+        shell: { enabled: true },
+      },
       scheduler: { dataDir: "./ledger" },
       browser: {
         instances: {
