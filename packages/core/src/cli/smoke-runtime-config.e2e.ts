@@ -5,7 +5,15 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, unlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -36,7 +44,7 @@ test(
   "real stdio and restarted daemon preserve selected config, task cwd, Agent and library",
   { timeout: 90000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), "roll context live-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "roll context live-")));
     const source = join(root, "配置 source");
     const task = join(root, "daily task");
     const home = join(root, "home");

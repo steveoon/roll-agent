@@ -109,6 +109,7 @@ Runtime 只验证、事务性保存可选的 opaque host context；配置内容�
 ## PR CI 跟进中的修复
 
 - Windows 启动 smoke 使用 `file://` URL 传递 ESM preload，并在临时根目录加入空格；失败诊断保留 Runtime stderr。
+- 隔离 fixture 显式授权固定的 PowerShell `pwd`；临时根目录用 `realpathSync` 归一 Windows 短/长路径，目录断言仍比较实际执行目录。产品审批策略未修改。
 - CI 暴露已有的首次建库竞态：一个宿主创建 `threads.db` 后、schema 提交前，另一个宿主将 v0 误判为旧库。受控 Worker 在该窗口暂停，修改前稳定失败；修复后等待第一个初始化提交再预检。既存 v0 内容仍拒绝隐式迁移且字节不变，当前库的活跃同级会话仍能保持占用。
 - 修复复用 Runtime 的 occupancy SQLite；预检与初始化持有同一写门禁，SQL busy timeout 保持 15 秒。显式 maintenance 与 session claim 的既有排他语义保留，OS 探活仅在事务外进行，没有新增 Core 依赖、数据库版本、自动迁移或接管。
 - 相关 ownership/lifecycle/初始化回归 25 项通过。Core/Runtime 完整单测及真实 CLI E2E 另行复跑；远端最终状态以 PR #309 的当前 HEAD checks 为准。
