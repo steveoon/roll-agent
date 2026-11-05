@@ -19,7 +19,7 @@
     "verify:published-packages": "pnpm verify:dependency-denylist && node scripts/verify-published-packages.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
-    "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
+    "test:scripts": "node --experimental-strip-types --experimental-sqlite --test \"scripts/**/*.test.mjs\"",
     "test:structured-output": "node --experimental-strip-types --experimental-sqlite scripts/test-structured-output-e2e.mjs",
     "test:e2e": "pnpm --filter @roll-agent/core run test:e2e",
     "perf:chat": "python3 benchmarks/chat-pty/benchmark.py",

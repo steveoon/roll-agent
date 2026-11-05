@@ -1,3 +1,4 @@
+import { SessionOccupiedError } from "../ownership/session-claims.ts";
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
 import type { ModelMessage } from "ai";
 import {
@@ -78,14 +79,14 @@ function toJsonRpcError(
   readonly message: string;
   readonly data?: RuntimeProtocolErrorDataV14;
 } {
-  if (error instanceof RuntimeServiceError) {
+  if (error instanceof RuntimeServiceError || error instanceof SessionOccupiedError) {
     const details = jsonValueSchema.safeParse(error.details);
     return {
       code: -32_000,
       message: error.message,
       data: {
-        rollCode: error.rollCode,
-        retryable: error.retryable,
+        rollCode: error instanceof SessionOccupiedError ? "THREAD_BUSY" : error.rollCode,
+        retryable: error instanceof SessionOccupiedError ? true : error.retryable,
         ...(details.success ? { details: details.data } : {}),
       },
     };

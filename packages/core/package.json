@@ -50,6 +50,10 @@
     "./cli/utils/*": {
       "types": "./src/cli/utils/*.ts",
       "default": "./src/cli/utils/*.ts"
+    },
+    "./runtime-host/session-ownership": {
+      "types": "./src/runtime-host/session-ownership.ts",
+      "default": "./src/runtime-host/session-ownership.ts"
     }
   },
   "bin": {
@@ -97,6 +101,10 @@
       "./cli/utils/*": {
         "types": "./dist/cli/utils/*.d.ts",
         "default": "./dist/cli/utils/*.js"
+      },
+      "./runtime-host/session-ownership": {
+        "types": "./dist/runtime-host/session-ownership.d.ts",
+        "default": "./dist/runtime-host/session-ownership.js"
       }
     }
   },

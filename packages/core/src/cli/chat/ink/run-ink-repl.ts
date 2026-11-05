@@ -29,7 +29,7 @@ export interface InkReplThreadSummary {
 export interface InkReplStore extends Partial<TranscriptHistoryStore> {
   updateTitle(threadId: string, title: string): void;
   countMessages(threadId: string): number;
-  deleteThread(threadId: string): void;
+  deleteThread(threadId: string, options?: { readonly onlyIfEmpty?: boolean }): void;
   listThreads(options?: { readonly origin?: "interactive" }): readonly InkReplThreadSummary[];
 }
 
@@ -97,7 +97,7 @@ export async function runInkRepl(
               !initial.submitted &&
               store.countMessages(threadId) === 0
             ) {
-              store.deleteThread(threadId);
+              store.deleteThread(threadId, { onlyIfEmpty: true });
             }
           },
         };
@@ -205,7 +205,7 @@ export async function runInkRepl(
     !initial.submitted &&
     store.countMessages(active.id) === 0
   ) {
-    store.deleteThread(active.id);
+    store.deleteThread(active.id, { onlyIfEmpty: true });
     process.stderr.write("本次会话无消息，未保存\n");
     return;
   }

@@ -1,14 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFileSync,
-  lstatSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-  type Dirent,
-} from "node:fs";
+import { appendFileSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, isAbsolute, join } from "node:path";
 import {
   attachmentIdSchema,
@@ -112,29 +103,6 @@ function extensionMatchesMediaType(fileName: string, mediaType: string): boolean
   return allowed.includes(extension);
 }
 
-function sweepStaleInstanceDirs(rootDir: string, staleMs: number): void {
-  let entries: Dirent[];
-  try {
-    entries = readdirSync(rootDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  const cutoffMs = Date.now() - staleMs;
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const path = join(rootDir, entry.name);
-    try {
-      if (lstatSync(path).mtimeMs < cutoffMs) {
-        rmSync(path, { recursive: true, force: true });
-      }
-    } catch {
-      continue;
-    }
-  }
-}
-
 export class AttachmentStore {
   private readonly dir: string;
   private readonly maxAttachmentBytes: number;
@@ -152,7 +120,7 @@ export class AttachmentStore {
     this.committedTtlMs = options.committedTtlMs ?? DEFAULT_COMMITTED_TTL_MS;
     this.now = options.now ?? Date.now;
     this.dir = join(options.dir, randomUUID());
-    sweepStaleInstanceDirs(options.dir, Math.max(this.stagedTtlMs, this.committedTtlMs) * 2);
+    // A sibling directory can belong to an idle live process. Age is not proof of death.
     mkdirSync(this.dir, { recursive: true });
   }
 

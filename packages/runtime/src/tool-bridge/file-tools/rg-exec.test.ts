@@ -1,9 +1,51 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, toNamespacedPath } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { rgPath } from "@vscode/ripgrep";
 import { runRg } from "./rg-exec.ts";
+
+test(
+  "Windows 深安装路径中的实际 ripgrep 可通过生产 runRg 执行",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-rg-long-install-"));
+    try {
+      const deep = join(
+        dir,
+        ...Array.from({ length: 6 }, () => "中文 installed path with spaces ".repeat(2).trimEnd()),
+      );
+      mkdirSync(toNamespacedPath(deep), { recursive: true });
+      const executable = join(deep, "rg.exe");
+      assert(executable.length > 300);
+      copyFileSync(rgPath, toNamespacedPath(executable));
+      const packageRoot = join(dir, "node_modules/@vscode/ripgrep");
+      mkdirSync(packageRoot, { recursive: true });
+      writeFileSync(
+        join(packageRoot, "package.json"),
+        JSON.stringify({ type: "module", exports: "./index.js" }),
+      );
+      writeFileSync(
+        join(packageRoot, "index.js"),
+        `export const rgPath = ${JSON.stringify(executable)};`,
+      );
+      const copied = join(dir, "rg-exec.ts");
+      copyFileSync(fileURLToPath(new URL("./rg-exec.ts", import.meta.url)), copied);
+      const isolated: { runRg: typeof runRg } = await import(pathToFileURL(copied).href);
+      writeFileSync(join(dir, "fixture.txt"), "deep-installed-rg-marker\n");
+      const result = await isolated.runRg(
+        ["--line-number", "deep-installed-rg-marker", "fixture.txt"],
+        dir,
+      );
+      assert.equal(result.ok, true, result.errorMessage);
+      assert.match(result.stdout, /1:deep-installed-rg-marker/u);
+    } finally {
+      rmSync(toNamespacedPath(dir), { recursive: true, force: true });
+    }
+  },
+);
 
 test("有命中返回 stdout，无命中返回空且 ok", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rg-exec-test-"));
