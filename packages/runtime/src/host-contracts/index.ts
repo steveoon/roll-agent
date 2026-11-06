@@ -9,3 +9,5 @@ export type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts"
 export type { ToolAnnotations } from "../types/policy.ts";
 export type { ToolResourceHint } from "../tool-contracts/resource-hints.ts";
 export { SESSION_OWNER_LIVENESS, type SessionOwnershipHost } from "./session-ownership.ts";
+
+export { scheduleHostContextSchema, type ScheduleHostContext } from "./schedule-context.ts";

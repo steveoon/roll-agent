@@ -1,5 +1,5 @@
 import { SCHEDULE_STATUSES } from "@roll-agent/runtime";
-import type { ScheduleStore } from "@roll-agent/runtime";
+import type { ScheduleStore, ScheduleRecord } from "@roll-agent/runtime";
 import {
   serializeInvocation,
   serializeSchedule,
@@ -73,7 +73,7 @@ export interface ScheduleHostPort {
 export interface RollUiScheduleControllerOptions {
   readonly ledger: ScheduleLedgerPort;
   readonly host: ScheduleHostPort;
-  readonly authorityDigestFor: (cwd: string) => string;
+  readonly authorityDigestFor: (cwd: string, schedule: ScheduleRecord) => string;
   readonly cancel?: typeof cancelScheduledInvocation;
 }
 
@@ -285,7 +285,7 @@ export function createRollUiScheduleController(
           if (schedule === undefined) {
             throw new Error(`定时任务 ${id} 不存在；刷新列表后重试`);
           }
-          const digest = options.authorityDigestFor(schedule.cwd);
+          const digest = options.authorityDigestFor(schedule.cwd, schedule);
           if (!ledger.resumeSchedule(schedule.id, digest, Date.now())) {
             throw new Error(`定时任务 ${id} 已被删除；刷新列表后重试`);
           }
@@ -301,7 +301,7 @@ export function createRollUiScheduleController(
           if (schedule === undefined) {
             throw new Error(`定时任务 ${parsed.id} 不存在；刷新列表后重试`);
           }
-          const digest = options.authorityDigestFor(schedule.cwd);
+          const digest = options.authorityDigestFor(schedule.cwd, schedule);
           const result = ledger.extendSchedule(
             {
               scheduleId: schedule.id,

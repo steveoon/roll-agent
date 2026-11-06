@@ -1,3 +1,4 @@
+import type { RuntimeConfigContext } from "../config/runtime-context.ts";
 import type { ChildProcess } from "node:child_process";
 import type { EngineModelSwitch } from "@roll-agent/runtime";
 import { runtimeSettingsSchema, type RuntimeSettings } from "@roll-agent/runtime/host-contracts";
@@ -48,6 +49,7 @@ export function chatHostModeForSurface(
 }
 
 export interface CreateChatEngineInput {
+  readonly configContext?: RuntimeConfigContext;
   readonly runtime: RuntimeModule;
   readonly config: RollConfig;
   readonly model: NonNullable<ChatEngineOptions["model"]>;
@@ -118,7 +120,9 @@ export function createChatEngine(input: CreateChatEngineInput) {
       ? { resolveDynamicCapabilityContext: input.resolveDynamicCapabilityContext }
       : {}),
     ...(input.modelCatalog ? { modelCatalog: input.modelCatalog } : {}),
-    scheduleTools: createScheduleToolBinding(),
+    scheduleTools: createScheduleToolBinding(
+      input.configContext === undefined ? {} : { configContext: input.configContext },
+    ),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,

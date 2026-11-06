@@ -603,29 +603,25 @@ export class ThreadStore {
         : new SessionClaims(resolve(resolved, "threads.db"), options.ownership);
     const databasePath = this.claims?.databasePath ?? resolve(resolved, "threads.db");
     let opened: DatabaseSync | undefined;
-    let initialization: SessionClaim | undefined;
+    let releaseInitialization: ReturnType<SessionClaims["beginLibraryInitialization"]> | undefined;
     try {
-      const inspection =
-        options.ownership === undefined ? undefined : inspectThreadLibrary(resolved);
-      if (
-        inspection !== undefined &&
-        inspection.status !== "current" &&
-        inspection.status !== "new"
-      ) {
-        throw new ThreadLibraryMigrationRequiredError(inspection);
-      }
-      // Serialize first creation with explicit migrations; init re-reads schema under the gate.
-      initialization = inspection?.status === "new" ? this.claims?.maintenance() : undefined;
+      releaseInitialization = this.claims?.beginLibraryInitialization(() => {
+        const inspection = inspectThreadLibrary(resolved);
+        if (inspection.status !== "current" && inspection.status !== "new") {
+          throw new ThreadLibraryMigrationRequiredError(inspection);
+        }
+        return inspection.status === "new";
+      });
       this.db = opened = new DatabaseSync(databasePath);
       if (process.platform !== "win32") chmodSync(databasePath, 0o600);
       this.init(options.ownership !== undefined);
     } catch (error) {
       opened?.close();
-      initialization?.release();
+      releaseInitialization?.();
       this.claims?.close();
       throw error;
     } finally {
-      initialization?.release();
+      releaseInitialization?.();
     }
   }
 

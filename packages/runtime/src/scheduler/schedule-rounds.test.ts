@@ -1,3 +1,4 @@
+import { SCHEDULER_SCHEMA_VERSION } from "./database-version.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -687,7 +688,10 @@ for (const version of [5, 6] as const) {
       assert.equal(store.getInvocation("legacy-run")?.treeUnsettled, true);
       assert.equal(readScheduleLedger(dir).status, "ok");
       const migrated = new DatabaseSync(join(dir, "schedules.db"));
-      assert.equal(migrated.prepare("PRAGMA user_version").get()?.user_version, 9);
+      assert.equal(
+        migrated.prepare("PRAGMA user_version").get()?.user_version,
+        SCHEDULER_SCHEMA_VERSION,
+      );
       assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
       if (version === 6) {
         assert.equal(

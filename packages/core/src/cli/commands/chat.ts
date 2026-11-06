@@ -1,3 +1,4 @@
+import type { RuntimeConfigContext } from "../../config/runtime-context.ts";
 import {
   createOwnedThreadStore,
   captureSessionLibraryBinding,
@@ -172,7 +173,10 @@ async function runChatOnboardingFlow(provider: string, model: string): Promise<b
   return setupModule.runChatOnboarding({}, { provider, model });
 }
 
-export async function runServer(config: RollConfig): Promise<void> {
+export async function runServer(
+  config: RollConfig,
+  configContext?: RuntimeConfigContext,
+): Promise<void> {
   captureSessionLibraryBinding();
   const llmStatus = resolveChatLlmReadiness(config);
   if (!llmStatus.configured || !llmStatus.providerConfig) {
@@ -224,6 +228,7 @@ export async function runServer(config: RollConfig): Promise<void> {
       model,
       store,
       surface: CHAT_ENGINE_SURFACES.server,
+      ...(configContext === undefined ? {} : { configContext }),
       ...(display ? { resolveReasoningPresentation } : {}),
       shellEnv: chatCliScope.env,
       ...(providerOptions ? { providerOptions } : {}),

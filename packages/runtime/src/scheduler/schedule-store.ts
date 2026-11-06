@@ -1,3 +1,4 @@
+import { scheduleHostContextSchema } from "../host-contracts/schedule-context.ts";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -131,6 +132,7 @@ interface ScheduleRow {
   readonly trigger_json: string;
   readonly status: string;
   readonly authority_digest: string | null;
+  readonly host_context?: string | null;
   readonly max_run_ms: unknown;
   readonly max_rounds?: unknown;
   readonly rounds_started?: unknown;
@@ -449,6 +451,7 @@ function toScheduleRecord(row: ScheduleRow, db: DatabaseSync): ScheduleRecord {
     trigger: parseTriggerJson(row.trigger_json),
     status: row.status,
     authorityDigest: row.authority_digest ?? undefined,
+    ...(row.host_context == null ? {} : { hostContext: parseHostContext(row.host_context) }),
     maxRunMs: validateMaxRunMs(row.max_run_ms),
     maxRounds,
     roundsStarted,
@@ -487,6 +490,17 @@ function validateMaxRounds(value: unknown): number | undefined {
   return value;
 }
 
+function parseHostContext(value: unknown) {
+  const parsed = scheduleHostContextSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      "Invalid schedule host context",
+    );
+  }
+  return parsed.data;
+}
+
 function validateCreateInput(input: CreateScheduleInput): {
   readonly name: string;
   readonly prompt: string;
@@ -495,6 +509,7 @@ function validateCreateInput(input: CreateScheduleInput): {
   readonly maxRunMs: number | undefined;
   readonly maxRounds: number | undefined;
 } {
+  if (input.hostContext !== undefined) parseHostContext(input.hostContext);
   const name = input.name.trim();
   if (name.length === 0 || name.length > SCHEDULER_LIMITS.maxNameChars) {
     throw new ScheduleStoreError(
@@ -567,7 +582,7 @@ export class ScheduleStore {
       try {
         if (existing) {
           const version = this.db.prepare("PRAGMA user_version").get()?.user_version;
-          if (![5, 6, 7, 8, SCHEMA_VERSION].includes(Number(version))) {
+          if (![5, 6, 7, 8, 9, SCHEMA_VERSION].includes(Number(version))) {
             throw new Error(
               `scheduler schema v${String(version)} 不支持只读查询；请停止旧 daemon 后由新版 daemon 初始化迁移`,
             );
@@ -733,6 +748,10 @@ export class ScheduleStore {
             "scheduler 迁移失败：外键关联不完整",
           );
         }
+        const scheduleColumns = this.db.prepare("PRAGMA table_info(schedules)").all();
+        if (!scheduleColumns.some((column) => column.name === "host_context")) {
+          this.db.exec("ALTER TABLE schedules ADD COLUMN host_context TEXT");
+        }
         installSchedulerWriterGuards(this.db);
         if (lockedVersion !== SCHEMA_VERSION) {
           this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
@@ -882,7 +901,7 @@ export class ScheduleStore {
           `SELECT * FROM schedules
             WHERE status = ? AND prompt = ? AND cwd = ? AND trigger_json = ?
               AND COALESCE(max_run_ms, ${defaultMaxRunMs}) = COALESCE(?, ${defaultMaxRunMs})
-              AND max_rounds IS ?`,
+              AND max_rounds IS ? AND host_context IS ?`,
         )
         .get(
           SCHEDULE_STATUSES.active,
@@ -891,6 +910,7 @@ export class ScheduleStore {
           JSON.stringify(valid.trigger),
           valid.maxRunMs ?? null,
           valid.maxRounds ?? null,
+          input.hostContext ?? null,
         ) as ScheduleRow | undefined;
       if (existing !== undefined) {
         const nextDigest = input.authorityDigest ?? null;
@@ -954,8 +974,8 @@ export class ScheduleStore {
       .prepare(
         `INSERT INTO schedules
            (id, name, prompt, cwd, trigger_json, status, authority_digest, max_run_ms,
-            next_run_at, created_at, updated_at, max_rounds)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            next_run_at, created_at, updated_at, max_rounds, host_context)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -970,6 +990,7 @@ export class ScheduleStore {
         nowMs,
         nowMs,
         valid.maxRounds ?? null,
+        input.hostContext ?? null,
       );
     return this.requireSchedule(id);
   }
@@ -2369,7 +2390,7 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
     const versionRow = db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    if (![5, 6, 7, 8, SCHEMA_VERSION].includes(versionRow.user_version)) {
+    if (![5, 6, 7, 8, 9, SCHEMA_VERSION].includes(versionRow.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: versionRow.user_version,
@@ -2432,7 +2453,7 @@ function readSchedulerSnapshot<T>(
     snapshotOpen = true;
     const version = db.prepare("PRAGMA user_version").get() as { readonly user_version: number };
     // v5 has all invocation columns used by the reader; its reference table is simply absent.
-    if (![5, 6, 7, 8, SCHEMA_VERSION].includes(version.user_version)) {
+    if (![5, 6, 7, 8, 9, SCHEMA_VERSION].includes(version.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: version.user_version,
