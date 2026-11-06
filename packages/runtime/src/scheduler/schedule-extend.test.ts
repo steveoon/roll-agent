@@ -1,3 +1,4 @@
+import { SCHEDULER_SCHEMA_VERSION } from "./database-version.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -393,7 +394,7 @@ test("schedule extension: removing task cascades its receipt but retains other t
   }
 });
 
-test("schedule extension: upgrading populated v7 to v9 preserves finite quota, state, runs and readonly compatibility", () => {
+test("schedule extension: upgrading populated v7 to current schema preserves finite quota, state, runs and readonly compatibility", () => {
   const f = fixture();
   let closed = false;
   let upgraded: ScheduleStore | undefined;
@@ -415,7 +416,10 @@ test("schedule extension: upgrading populated v7 to v9 preserves finite quota, s
     assert.deepEqual(upgraded.listInvocations(id), runsBefore);
     assert.equal(readScheduleLedger(f.dir).status, "ok");
     const check = new DatabaseSync(join(f.dir, "schedules.db"), { readOnly: true });
-    assert.equal(check.prepare("PRAGMA user_version").get()?.user_version, 9);
+    assert.equal(
+      check.prepare("PRAGMA user_version").get()?.user_version,
+      SCHEDULER_SCHEMA_VERSION,
+    );
     assert.deepEqual(check.prepare("PRAGMA foreign_key_check").all(), []);
     check.close();
     assert.equal(

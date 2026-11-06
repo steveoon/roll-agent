@@ -1,3 +1,4 @@
+import { SCHEDULER_SCHEMA_VERSION } from "./database-version.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -219,7 +220,7 @@ test("calendar store: invalid starts and now conflicts do not insert", () => {
   }
 });
 
-test("calendar store: readonly v8 stays v8, writer upgrades to v9 preserving old rules", () => {
+test("calendar store: readonly v8 stays v8, writer upgrades to current schema preserving old rules", () => {
   const f = fixture();
   try {
     const record = f.store.createSchedule(
@@ -234,7 +235,10 @@ test("calendar store: readonly v8 stays v8, writer upgrades to v9 preserving old
       const reopened = new ScheduleStore(f.dir);
       try {
         assert.equal(reopened.getSchedule(record.id)?.nextRunAtMs, NOW + HALF_HOUR);
-        assert.equal(raw.prepare("PRAGMA user_version").get()?.user_version, 9);
+        assert.equal(
+          raw.prepare("PRAGMA user_version").get()?.user_version,
+          SCHEDULER_SCHEMA_VERSION,
+        );
       } finally {
         reopened.close();
       }

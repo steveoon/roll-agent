@@ -417,3 +417,36 @@ test("schedule-controller validates extension requests and replays one request w
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("schedule-controller reauthorization receives the persisted schedule binding", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-ui-host-context-"));
+  const store = new ScheduleStore(dir);
+  try {
+    const { scheduleHostContextSchema } = await import("@roll-agent/runtime/host-contracts");
+    const context = scheduleHostContextSchema.parse("opaque-host-fixture");
+    const schedule = store.createSchedule({
+      name: "bound",
+      prompt: "fixture",
+      cwd: dir,
+      trigger: createIntervalTrigger("1h"),
+      hostContext: context,
+    });
+    store.setScheduleStatus(schedule.id, "paused");
+    const controller = createRollUiScheduleController({
+      ledger: {
+        openReader: async () => new ScheduleStore(dir, { readOnly: true }),
+        open: async () => new ScheduleStore(dir),
+      },
+      host: createFakeHost(),
+      authorityDigestFor: (_cwd, captured) => {
+        assert.equal(captured?.hostContext, context);
+        return "bound-authority";
+      },
+    });
+    await controller.resumeSchedule({ id: schedule.id });
+    assert.equal(store.getSchedule(schedule.id)?.authorityDigest, "bound-authority");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,3 +1,4 @@
+import { SCHEDULER_SCHEMA_VERSION } from "./database-version.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -264,7 +265,7 @@ test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列�
     assert.ok(columns.includes("tree_tracked_pgids"));
     assert.ok(columns.includes("tree_unsettled"));
     assert.ok(columns.includes("tree_survivor_pids"));
-    assert.equal(version.user_version, 9);
+    assert.equal(version.user_version, SCHEDULER_SCHEMA_VERSION);
     const claims = reopened.claimDue({
       workerId: "new-daemon",
       nowMs: NOW + SCHEDULER_LIMITS.claimLeaseMs + 1,

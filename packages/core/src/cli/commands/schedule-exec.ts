@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../../config/loader.ts";
+import { loadScheduleConfig } from "../../scheduler-host/config-context.ts";
+import type { RollConfig } from "../../config/schema.ts";
 import {
   applySchedulerConfigEnv,
   prependExecDirToPath,
@@ -91,25 +92,36 @@ export default defineCommand({
         const previousExecutorPid = previous?.executor?.pid;
         const persistedGroups = previous?.treeTrackedGroups ?? [];
         const ledger = new ProcessGroupLedger();
-        const { config } = loadConfig();
-        applySchedulerConfigEnv(process.env, config.scheduler.env);
         const result = await executeInvocation({
           store,
           invocationId: args.invocation,
           ownershipToken: execEnv.ownershipToken,
           executor,
-          runTurn: createScheduledTurnRunner({
-            config,
-            runtime,
-            ledgerDir: execEnv.dataDir,
-            registerThreadReference: (reference) =>
-              store.registerThreadReference({
-                ...reference,
-                ownershipToken: execEnv.ownershipToken,
-              }) !== undefined,
-            stopSignal: stop.controller.signal,
-            onShellCommandSpawn: (child) => ledger.track(child),
-          }),
+          runTurn: async (schedule, invocation) => {
+            let config: RollConfig;
+            try {
+              config = loadScheduleConfig(schedule).config;
+            } catch (error) {
+              return {
+                status: "failed",
+                terminal: true,
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+            applySchedulerConfigEnv(process.env, config.scheduler.env);
+            return createScheduledTurnRunner({
+              config,
+              runtime,
+              ledgerDir: execEnv.dataDir,
+              registerThreadReference: (reference) =>
+                store.registerThreadReference({
+                  ...reference,
+                  ownershipToken: execEnv.ownershipToken,
+                }) !== undefined,
+              stopSignal: stop.controller.signal,
+              onShellCommandSpawn: (child) => ledger.track(child),
+            })(schedule, invocation);
+          },
           stopSignal: stop.controller.signal,
           trackedGroups: (report) =>
             mergeTrackedGroups(persistedGroups, ledger.persisted(), report.skippedReusedGroups),

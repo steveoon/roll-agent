@@ -1,3 +1,4 @@
+import type { ScheduleHostContext } from "./schedule-context.ts";
 import type { ScheduleRecord } from "../scheduler/types.ts";
 import type { ScheduleTimingInput } from "../scheduler/trigger.ts";
 
@@ -43,6 +44,8 @@ export interface ScheduleToolCreateRequest extends ScheduleTimingInput {
 }
 
 export interface ScheduleCreateAdmission {
+  readonly hostContextRevision?: string;
+  readonly hostContext?: ScheduleHostContext;
   readonly ok: true;
   readonly name: string;
   readonly prompt: string;
@@ -129,6 +132,7 @@ export interface ScheduleToolExtendRequest {
 }
 
 export interface ScheduleExtendAdmission {
+  readonly hostContextRevision?: string;
   readonly ok: true;
   readonly request: ScheduleToolExtendRequest;
   readonly sessionCwd: string;
