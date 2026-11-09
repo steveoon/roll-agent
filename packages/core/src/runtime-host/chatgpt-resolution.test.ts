@@ -1,15 +1,195 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
+import { ModelConfigController } from "@roll-agent/runtime";
 import { rollConfigSchema } from "../config/schema.ts";
 import { resolveChatLlmReadiness } from "./engine-factory.ts";
+import { ChatGptConnection } from "./chatgpt-connection.ts";
 import {
   resolveInteractiveChatLlm,
   resolveInteractiveChatSwitch,
+  prepareInteractiveChatReload,
   chatModelPickerItems,
   chatGptThinkingOptions,
   type ChatGptAuth,
 } from "./chatgpt-resolution.ts";
+
+function reloadFixture() {
+  const selected: Array<string | undefined> = [];
+  const freshModels = [
+    {
+      slug: "reload-model",
+      displayName: "Reload",
+      supportsFastMode: false,
+      reasoningEfforts: ["low", "medium"],
+    },
+  ];
+  const auth: ChatGptAuth = {
+    async status() {
+      return {
+        currentAccountId: "other-account",
+        accounts: [
+          { id: "bound-account", label: "Bound", connected: true, authorized: true },
+          { id: "other-account", label: "Other", connected: true, authorized: true },
+        ],
+        usageUrl: "https://example.invalid/usage",
+      };
+    },
+    async models(accountId) {
+      selected.push(accountId);
+      return freshModels;
+    },
+    async getAccessToken() {
+      throw new Error("reload must not invoke inference");
+    },
+  };
+  const staleModels = [{ slug: "old-model", displayName: "Old" }];
+  const connection = new ChatGptConnection(auth, "bound-account", staleModels);
+  return { auth, selected, freshModels, staleModels, connection };
+}
+
+for (const [label, override, pattern] of [
+  ["unknown model", { model: "missing" }, /不提供模型/],
+  ["unsupported effort", { thinkingLevel: "high" }, /不支持推理强度/],
+  ["unsupported compaction effort", { compaction: { thinkingLevel: "high" } }, /不支持推理强度/],
+  ["unsupported Fast", { fastMode: true }, /Fast/],
+] as const) {
+  test(`reload preparation rejects ${label} before mutating the active catalog`, async () => {
+    const fixture = reloadFixture();
+    const runtime = { provider: "chatgpt", model: "reload-model", thinkingLevel: "low" };
+    try {
+      await assert.rejects(
+        prepareInteractiveChatReload(
+          config({ ...runtime, ...override }),
+          fixture.connection,
+          undefined,
+          fixture.auth,
+        ),
+        pattern,
+      );
+      assert.deepEqual(fixture.selected, ["bound-account"]);
+      assert.deepEqual(fixture.connection.models, fixture.staleModels);
+    } finally {
+      fixture.connection.dispose();
+    }
+  });
+}
+
+test("reload preparation validates a fresh account-bound catalog without committing it", async () => {
+  const fixture = reloadFixture();
+  try {
+    const prepared = await prepareInteractiveChatReload(
+      config({ provider: "chatgpt", model: "reload-model", thinkingLevel: "low" }),
+      fixture.connection,
+      undefined,
+      fixture.auth,
+    );
+    assert.equal(prepared.selection.modelName, "reload-model");
+    assert.deepEqual(prepared.selection.providerOptions, { openai: { reasoningEffort: "low" } });
+    assert.equal(prepared.accountId, "bound-account");
+    assert.deepEqual(prepared.models, fixture.freshModels);
+    assert.deepEqual(fixture.selected, ["bound-account"]);
+    assert.deepEqual(fixture.connection.models, fixture.staleModels);
+  } finally {
+    fixture.connection.dispose();
+  }
+});
+
+test("reload preparation refuses to pair another account's catalog with the existing connection", async () => {
+  const fixture = reloadFixture();
+  try {
+    await assert.rejects(
+      prepareInteractiveChatReload(
+        config({ provider: "chatgpt", model: "reload-model", chatgptAccountId: "other-account" }),
+        fixture.connection,
+        undefined,
+        fixture.auth,
+      ),
+      /账号.*重启/,
+    );
+    assert.deepEqual(fixture.selected, []);
+    assert.equal(fixture.connection.accountId, "bound-account");
+  } finally {
+    fixture.connection.dispose();
+  }
+});
+
+test("API reload preparation reuses the API resolver without requesting subscription credentials", async () => {
+  const fixture = reloadFixture();
+  try {
+    const prepared = await prepareInteractiveChatReload(
+      config(),
+      fixture.connection,
+      undefined,
+      fixture.auth,
+    );
+    assert.equal(prepared.selection.provider, "openai");
+    assert.equal(prepared.selection.modelName, "gpt-api");
+    assert.equal(prepared.models, undefined);
+    assert.deepEqual(fixture.selected, []);
+  } finally {
+    fixture.connection.dispose();
+  }
+});
+
+test(
+  "closing reload preparation aborts its catalog request without awaiting an external release",
+  { timeout: 1000 },
+  async () => {
+    const fixture = reloadFixture();
+    let started: (() => void) | undefined;
+    const requested = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted = false;
+    let committed = false;
+    fixture.auth.models = async (_accountId, signal) => {
+      started?.();
+      return new Promise((_resolve, reject) => {
+        const abort = () => {
+          aborted = true;
+          reject(signal?.reason);
+        };
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    };
+    const control = new ModelConfigController({
+      host: {
+        initial: { provider: "chatgpt", model: "old-model" },
+        async reload(signal) {
+          const prepared = await prepareInteractiveChatReload(
+            config({ provider: "chatgpt", model: "reload-model", thinkingLevel: "low" }),
+            fixture.connection,
+            undefined,
+            fixture.auth,
+            signal,
+          );
+          signal?.throwIfAborted();
+          committed = true;
+          return {
+            status: "applied",
+            model: { provider: prepared.selection.provider, model: prepared.selection.modelName },
+          };
+        },
+      },
+      isBusy: () => false,
+    });
+    try {
+      control.reload();
+      await requested;
+      control.close();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(aborted, true);
+      assert.equal(committed, false);
+      assert.equal(control.getStatus().active.model, "old-model");
+      assert.deepEqual(fixture.connection.models, fixture.staleModels);
+    } finally {
+      control.close();
+      fixture.connection.dispose();
+    }
+  },
+);
 
 const current = randomUUID();
 const saved = randomUUID();

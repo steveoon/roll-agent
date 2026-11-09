@@ -360,3 +360,10 @@ export {
   THREAD_STORE_SCHEMA_VERSION,
   type ThreadLibraryPreflight,
 } from "./store/thread-store.ts";
+
+export { ModelConfigController } from "./service/model-config-controller.ts";
+export type {
+  ModelConfigControllerOptions,
+  RuntimeModelConfigHost,
+  RuntimeModelConfigReloadResult,
+} from "./service/model-config-controller.ts";

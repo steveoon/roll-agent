@@ -1,3 +1,4 @@
+import { resolveChatWorkspace } from "../runtime-host/workspace-identity.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -118,7 +119,10 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
       fresh.child.stdin.write("exit\n");
       assert.equal((await waitForSpawnedRollExit(fresh, "new CLI exit", 15_000)).code, 0);
       assert.equal(store.hasThread(id), false, "empty new CLI session was safely removed");
-      const saved = store.createThread({ title: "saved" });
+      const saved = store.createThread({
+        title: "saved",
+        workspace: resolveChatWorkspace(workspace),
+      });
       store.appendMessages(saved, [{ role: "user", content: "authoritative persisted history" }]);
       const resumed = start(["--last"]);
       await prompt(resumed);

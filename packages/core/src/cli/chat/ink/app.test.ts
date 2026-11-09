@@ -2837,3 +2837,86 @@ test("ChatApp does not retire/delete a session whose cleanup failed", async () =
     unmount();
   }
 });
+
+test("reload completion preserves a draft typed during asynchronous application", async () => {
+  const fake = switchableFakeSession("reload-draft");
+  type Snapshot = import("../configuration-control.ts").ChatConfigurationSnapshot;
+  let listener: ((value: Snapshot) => void) | undefined;
+  let subscriptions = 0;
+  let unsubscriptions = 0;
+  const snapshot: Snapshot = {
+    text: "模型配置等待应用",
+    model: "test-model",
+    thinkingLevel: "medium",
+  };
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: fake.session,
+      model: "test-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      configuration: {
+        snapshot: () => snapshot,
+        reload: () => {
+          listener?.(snapshot);
+          return snapshot;
+        },
+        subscribe: (next) => {
+          subscriptions++;
+          listener = next;
+          return () => {
+            unsubscriptions++;
+            listener = undefined;
+          };
+        },
+      },
+    }),
+  );
+  await delay(30);
+  stdin.write("/reload");
+  await delay(20);
+  stdin.write("\r");
+  await delay(30);
+  stdin.write("keep-my-draft");
+  await delay(30);
+  listener?.({ ...snapshot, text: "模型配置已应用", model: "new-model" });
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /keep-my-draft/u);
+    assert.match(lastFrame() ?? "", /模型配置已应用/u);
+  });
+  assert.deepEqual(fake.sent(), []);
+  assert.equal(
+    subscriptions,
+    1,
+    "model display changes must not replace the configuration subscription",
+  );
+  unmount();
+  assert.equal(unsubscriptions, 1);
+});
+
+test("resume all forwards explicit global scope to the session picker", async () => {
+  const fake = switchableFakeSession("scope");
+  const scopes: Array<boolean | undefined> = [];
+  const { stdin, unmount } = render(
+    h(ChatApp, {
+      session: fake.session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: (_id, all) => {
+          scopes.push(all);
+          return [];
+        },
+        resume: async () => fake.session,
+        onRetired: () => {},
+      },
+    }),
+  );
+  await delay(30);
+  stdin.write("/resume all");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(scopes, [true]));
+  unmount();
+});

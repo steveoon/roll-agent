@@ -730,7 +730,10 @@ globalThis.fetch = (input, options) => {
       assert.equal(rejected.status === "failed" && rejected.reason, "restart-required");
       assert.equal(existsSync(join(source, "different-library")), false);
       save(config);
-      assert.deepEqual(await reload(), {
+      const restoring = await reload();
+      assert.equal(restoring.revision, 4);
+      assert.ok(restoring.status === "pending" || restoring.status === "applied");
+      assert.deepEqual(await get(), {
         status: "applied",
         revision: 4,
         active: { revision: 4, provider: "qwen", model: "qwen3.7-plus", reasoning: null },

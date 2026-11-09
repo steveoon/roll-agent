@@ -284,3 +284,15 @@ test("tool-result 的 {text, diff} display 在 stderr 打印 diff，且受 /diff
   assert.doesNotMatch(stripVTControlCharacters(expanded), /另 \d+ 行/u);
   assert.match(stripVTControlCharacters(expanded), /50 \+ R49/u);
 });
+
+test("usage display follows the session context window after a model reload", async () => {
+  const renderer = new ChatRenderer(async () => false, 1_000);
+  let window: number | undefined = 200_000;
+  const responder: ChatApprover = { approve() {}, reject() {}, getContextWindow: () => window };
+  const event: SessionEvent = { type: "message-finish", text: "", contextInputTokens: 10_000 };
+  const known = await captureStderr(() => renderer.handle(event, responder));
+  assert.match(known, /200k/u);
+  window = undefined;
+  const unknown = await captureStderr(() => renderer.handle(event, responder));
+  assert.doesNotMatch(unknown, /ctx /u);
+});

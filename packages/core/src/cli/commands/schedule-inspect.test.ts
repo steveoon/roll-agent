@@ -105,7 +105,7 @@ function fixture(baseUrl = "http://127.0.0.1:1") {
   };
 }
 
-test("real CLI inspect is read-only and ordinary --list excludes scheduled records", async () => {
+test("real CLI inspect is read-only and global --list excludes scheduled records", async () => {
   const f = fixture();
   try {
     const before = statSync(join(f.threadsDir, "threads.db")).mtimeMs;
@@ -114,7 +114,7 @@ test("real CLI inspect is read-only and ordinary --list excludes scheduled recor
     assert.equal(detail.sessionId, f.source);
     assert.match(detail.transcript.join("\n"), /原始执行结果/u);
     assert.equal(statSync(join(f.threadsDir, "threads.db")).mtimeMs, before);
-    const listed = await f.invoke("chat", "--list", "--json");
+    const listed = await f.invoke("chat", "--list", "--all-projects", "--json");
     const rows = JSON.parse(listed.stdout) as Array<{ id: string }>;
     assert.deepEqual(
       rows.map((row) => row.id),

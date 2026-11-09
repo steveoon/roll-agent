@@ -14,20 +14,23 @@ function startupSettings(config: RollConfig) {
   return { ...rest, runtime: settings };
 }
 
+export function modelConfigRequiresRestart(startup: RollConfig, latest: RollConfig): boolean {
+  return !isDeepStrictEqual(startupSettings(startup), startupSettings(latest));
+}
+
 export function createRuntimeModelConfig(
   config: RollConfig,
   initial: NonNullable<RuntimeServiceOptions["modelConfig"]>["initial"],
   read: () => RollConfig,
   engine: Pick<ConversationEngineInstance, "switchModel">,
 ): NonNullable<RuntimeServiceOptions["modelConfig"]> {
-  const startup = startupSettings(config);
   return {
     initial,
     reload() {
       let selection: ReturnType<typeof resolveChatLlmSwitch>;
       try {
         const latest = read();
-        if (!isDeepStrictEqual(startup, startupSettings(latest))) {
+        if (modelConfigRequiresRestart(config, latest)) {
           return { status: "failed", reason: "restart-required" };
         }
         const choice = resolveChatLlmReadiness(latest);

@@ -233,6 +233,61 @@ export async function resolveInteractiveChatSwitch(
   };
 }
 
+export interface PreparedInteractiveChatReload {
+  readonly selection: EngineModelSwitch;
+  readonly models?: ChatGptModels;
+  readonly accountId?: string;
+}
+
+/** Validate a fresh selection before the caller atomically commits catalog and engine changes. */
+export async function prepareInteractiveChatReload(
+  config: RollConfig,
+  connection: ChatGptConnection,
+  accountId?: string,
+  auth?: ChatGptAuth,
+  signal?: AbortSignal,
+): Promise<PreparedInteractiveChatReload> {
+  signal?.throwIfAborted();
+  const provider = config.runtime.provider ?? config.llm.defaultProvider;
+  const model = config.runtime.model ?? config.llm.defaultModel;
+  if (provider !== "chatgpt") {
+    return {
+      selection: resolveChatLlmSwitch(config, { provider, model }, config.runtime.thinkingLevel),
+    };
+  }
+  const preferredAccount = config.runtime.chatgptAccountId ?? accountId ?? connection.accountId;
+  if (connection.accountId !== undefined && preferredAccount !== connection.accountId) {
+    throw new Error("更改 ChatGPT 账号需要重启当前会话");
+  }
+  const selectedAuth = auth ?? getChatGptAuthService();
+  const choices = await loadAuthenticatedChatGptModels(selectedAuth, preferredAccount, signal);
+  signal?.throwIfAborted();
+  if (choices.accountId === undefined) {
+    throw new Error("所选 ChatGPT 账号尚未连接或授权，请登录后重试 /reload");
+  }
+  const selected = choices.models.find(({ slug }) => slug === model);
+  if (selected === undefined) throw new Error(`当前 ChatGPT 账号不提供模型 "${model}"`);
+  chatGptThinkingOptions(config.runtime.thinkingLevel, selected);
+  chatGptThinkingOptions(
+    config.runtime.compaction.thinkingLevel ?? config.runtime.thinkingLevel,
+    selected,
+  );
+  assertChatGptFastModeSupported(config.runtime.fastMode, selected);
+  const selection = await resolveInteractiveChatSwitch(
+    config,
+    { provider, model },
+    config.runtime.thinkingLevel,
+    choices.accountId,
+    selectedAuth,
+    connection,
+  );
+  signal?.throwIfAborted();
+  if (connection.accountId !== undefined && connection.accountId !== choices.accountId) {
+    throw new Error("更改 ChatGPT 账号需要重启当前会话");
+  }
+  return { selection, models: choices.models, accountId: choices.accountId };
+}
+
 /** These choices belong to one registration, never the shared static catalog. */
 export function chatGptModelChoices(models: ChatGptModels): readonly LlmModelChoice[] {
   return models.map(({ slug }) => ({
@@ -262,11 +317,16 @@ export function chatModelPickerItems(
 export async function loadAuthenticatedChatGptModels(
   auth: ChatGptAuth,
   preferredAccountId?: string,
+  signal?: AbortSignal,
 ): Promise<{ readonly accountId?: string; readonly models: ChatGptModels }> {
+  signal?.throwIfAborted();
   const status = await auth.status();
+  signal?.throwIfAborted();
   const account = status.accounts.find(
     ({ id }) => id === (preferredAccountId ?? status.currentAccountId),
   );
   if (!account?.connected || !account.authorized) return { models: [] };
-  return { accountId: account.id, models: await auth.models(account.id) };
+  const models = await auth.models(account.id, signal);
+  signal?.throwIfAborted();
+  return { accountId: account.id, models };
 }

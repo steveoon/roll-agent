@@ -1,3 +1,4 @@
+import { ModelConfigController, type RuntimeModelConfigHost } from "./model-config-controller.ts";
 import type { SessionClaim } from "../ownership/session-claims.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
@@ -40,8 +41,6 @@ import {
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
-  type RuntimeModelConfigFailure,
-  type RuntimeModelConfigIdentity,
   type RuntimeModelConfigStatus,
   type LatestRuntimeMethodParams,
   type LatestRuntimeMethodResult,
@@ -78,6 +77,8 @@ import {
   type SequencedToolExecutionRecord,
   type ThreadRecord,
 } from "../store/thread-store.ts";
+
+export type { RuntimeModelConfigHost } from "./model-config-controller.ts";
 
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1_024 * 1_024;
 const DEFAULT_MAX_PAGE_SIZE = 500;
@@ -124,18 +125,6 @@ export type RuntimeServiceSession = Pick<
 export interface RuntimeServiceEngine {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
   resumeSession(threadId: string): Promise<RuntimeServiceSession>;
-}
-
-/** The host rereads its bound source and applies a model without replacing the engine. */
-export interface RuntimeModelConfigHost {
-  readonly initial: RuntimeModelConfigIdentity;
-  reload():
-    | {
-        readonly status: "applied";
-        readonly model: RuntimeModelConfigIdentity;
-        readonly reasoning?: ReasoningPresentation["kind"];
-      }
-    | { readonly status: "failed"; readonly reason: RuntimeModelConfigFailure };
 }
 
 export interface RuntimeServiceOptions {
@@ -583,9 +572,7 @@ export class RuntimeService {
     | RuntimeServiceOptions["reasoningSummaryProjector"]
     | undefined;
   private providerReasoning: RuntimeServiceOptions["providerReasoning"];
-  private readonly modelConfig: RuntimeModelConfigHost | undefined;
-  private modelConfigStatus: RuntimeModelConfigStatus | undefined;
-  private modelConfigTurnFailed = false;
+  private readonly modelConfigController: ModelConfigController | undefined;
   private reasoningTextSubscription:
     | { deliver: (event: RuntimeEventEnvelopeV16) => void }
     | undefined;
@@ -622,18 +609,19 @@ export class RuntimeService {
     this.mutationRequests = new MutationRequestCache(this.idempotencyCacheEntries);
     this.reasoningSummaryProjector = options.reasoningSummaryProjector;
     this.providerReasoning = options.providerReasoning;
-    this.modelConfig = options.modelConfig;
-    if (options.modelConfig !== undefined) {
-      this.modelConfigStatus = {
-        status: "applied",
-        revision: 0,
-        active: {
-          ...options.modelConfig.initial,
-          revision: 0,
-          reasoning: this.providerReasoning ?? null,
-        },
-      };
-    }
+    this.modelConfigController =
+      options.modelConfig === undefined
+        ? undefined
+        : new ModelConfigController({
+            host: options.modelConfig,
+            isBusy: () => this.activeTurns.size > 0 || this.turnJobs.size > 0,
+            ...(this.providerReasoning === undefined
+              ? {}
+              : { initialReasoning: this.providerReasoning }),
+            onApplied: (result) => {
+              this.providerReasoning = result.reasoning;
+            },
+          });
     this.attachmentStore = options.attachmentStore;
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
@@ -1017,13 +1005,13 @@ export class RuntimeService {
 
   getModelConfig(): RuntimeModelConfigStatus {
     this.assertOpen();
-    if (this.modelConfigStatus === undefined) {
+    if (this.modelConfigController === undefined) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
         "当前 Runtime 没有可重新加载的模型配置来源",
       );
     }
-    return this.modelConfigStatus;
+    return this.modelConfigController.getStatus();
   }
 
   reloadModelConfig(
@@ -1034,47 +1022,18 @@ export class RuntimeService {
       RUNTIME_METHODS.modelConfigReload,
       params,
       () => {
-        const { active, revision } = this.getModelConfig();
-        this.modelConfigStatus = { status: "pending", active, revision: revision + 1 };
-        this.applyPendingModelConfig();
-        return this.getModelConfig();
+        this.getModelConfig();
+        return this.modelConfigController?.reload() ?? this.getModelConfig();
       },
     );
   }
 
   private applyPendingModelConfig(): void {
-    const host = this.modelConfig;
-    const pending = this.modelConfigStatus;
-    if (this.closing || host === undefined || pending?.status !== "pending") return;
-    if (this.modelConfigTurnFailed) {
-      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
-      return;
-    }
-    if (this.activeTurns.size > 0 || this.turnJobs.size > 0) return;
-
-    try {
-      const result = host.reload();
-      if (result.status === "failed") {
-        this.modelConfigStatus = { ...pending, status: "failed", reason: result.reason };
-        return;
-      }
-      this.providerReasoning = result.reasoning;
-      this.modelConfigStatus = {
-        status: "applied",
-        revision: pending.revision,
-        active: {
-          ...result.model,
-          revision: pending.revision,
-          reasoning: result.reasoning ?? null,
-        },
-      };
-    } catch {
-      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
-    }
+    if (!this.closing) this.modelConfigController?.tryApply();
   }
 
   private assertModelConfigReady(): void {
-    const status = this.modelConfigStatus?.status;
+    const status = this.modelConfigController?.getStatus().status;
     if (status === "pending" || status === "failed") {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -1167,8 +1126,7 @@ export class RuntimeService {
             this.applyPendingModelConfig();
           },
           () => {
-            this.modelConfigTurnFailed = true;
-            this.applyPendingModelConfig();
+            this.modelConfigController?.fail();
           },
         ); // Failed projection remains a failed close barrier; never release it.
 
@@ -1562,6 +1520,7 @@ export class RuntimeService {
   close(): Promise<void> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closing = true;
+    this.modelConfigController?.close();
     this.setUserInputAvailable(false);
     for (const turn of this.activeTurns.values()) turn.session.cancel();
     this.closePromise = (async () => {

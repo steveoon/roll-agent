@@ -260,6 +260,13 @@ chat:
 手动执行 `/compact` 也使用相同的提交检查。配置、边界与迁移行为见
 [上下文压缩说明](docs/how-to-context-compaction.md)。
 
+### `roll chat` 项目会话与配置更新
+
+`--last`、`--list` 和 `/resume` 默认仅选择当前项目；`--all-projects`、`/resume all` 查看全部历史。
+`--view <id>` 只读查看占用中的会话。普通 chat 支持 `--config` / `--config-workspace`，
+并通过 `/status` / `/reload` 查看和应用所选文件的模型配置；新定时任务继承配置绑定。
+会话库 schema 12 的备份迁移与旧客户端升级要求见 [终端项目会话指南](docs/how-to-use-chat-workspaces.md)。
+
 ### `roll chat` 工作区工程约定（AGENTS.md / CLAUDE.md）
 
 `roll chat` 启动时从工作目录逐级向上查找最近一层的 `AGENTS.md`（优先）或 `CLAUDE.md`，
