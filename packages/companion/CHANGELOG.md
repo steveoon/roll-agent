@@ -1,5 +1,14 @@
 # @roll-agent/companion
 
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [[`f68ffa7`](https://github.com/steveoon/roll-agent/commit/f68ffa7db015305127346161de9dd33ed4dd8b56)]:
+  - @roll-agent/protocol@0.12.0
+  - @roll-agent/client-node@0.8.0
+  - @roll-agent/relay-protocol@0.5.3
+
 ## 1.0.1
 
 ### Patch Changes
