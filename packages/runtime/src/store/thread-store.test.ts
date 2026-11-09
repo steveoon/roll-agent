@@ -12,6 +12,7 @@ import {
   RuntimeEventCursorExpiredError,
   RuntimeEventCursorGapError,
   ThreadStore,
+  THREAD_STORE_SCHEMA_VERSION,
   TOOL_EXECUTION_RETENTION_POLICY,
   type CommitCompactionInput,
   type ReadCheckpointTranscriptOptions,
@@ -724,7 +725,7 @@ test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
       readonly user_version: number;
     };
     assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
-    assert.equal(version.user_version, 11);
+    assert.equal(version.user_version, THREAD_STORE_SCHEMA_VERSION);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -933,7 +934,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      11,
+      THREAD_STORE_SCHEMA_VERSION,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1752,7 +1753,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 11);
+    assert.equal(version.user_version, THREAD_STORE_SCHEMA_VERSION);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -2333,7 +2334,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 11);
+    assert.equal(version.user_version, THREAD_STORE_SCHEMA_VERSION);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

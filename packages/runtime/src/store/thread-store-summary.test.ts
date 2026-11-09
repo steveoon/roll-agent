@@ -8,7 +8,7 @@ import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { runtimeSettingsSchema } from "../host-contracts/runtime-settings.ts";
 import { threadIdSchema } from "@roll-agent/protocol";
-import { ThreadStore } from "./thread-store.ts";
+import { THREAD_STORE_SCHEMA_VERSION, ThreadStore } from "./thread-store.ts";
 import { SemanticLedger } from "./semantic-ledger.ts";
 import { ConversationEngine } from "../engine/conversation-engine.ts";
 import { RuntimeService } from "../service/runtime-service.ts";
@@ -446,7 +446,10 @@ for (const version of [7, 8, 9, 10]) {
       if (version < 8) f.database.exec("DROP TABLE thread_turn_inputs");
       f.database.exec(`PRAGMA user_version = ${String(version)}`);
       const reopened = new ThreadStore(f.dir);
-      assert.equal(f.database.prepare("PRAGMA user_version").get()?.user_version, 11);
+      assert.equal(
+        f.database.prepare("PRAGMA user_version").get()?.user_version,
+        THREAD_STORE_SCHEMA_VERSION,
+      );
       assert.equal(reopened.loadSessionState(f.threadId).checkpoint?.id, legacy.id);
       const forkId = reopened.forkSnapshot(reopened.readSnapshot(f.threadId));
       assert.equal(reopened.getLatestCheckpoint(forkId)?.version, version % 2 === 0 ? 2 : 1);

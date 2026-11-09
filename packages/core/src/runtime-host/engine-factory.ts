@@ -8,6 +8,7 @@ import type { RollConfig } from "../config/schema.ts";
 import { providerAcceptsToolSchemaIssues, resolveLLMCall } from "../llm/providers.ts";
 import { CoreAgentHost } from "./agent-host.ts";
 import { isDebugLogEnabled, log } from "../cli/utils/output.ts";
+import { resolveChatWorkspace } from "./workspace-identity.ts";
 
 export type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -100,6 +101,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
       onSkillLibraryIssue: reportSkillLibraryIssue,
     }),
     store: input.store,
+    workspace: resolveChatWorkspace(),
     hostMode: chatHostModeForSurface(input.surface),
     ...(input.resolveReasoningPresentation
       ? { resolveReasoningPresentation: input.resolveReasoningPresentation }

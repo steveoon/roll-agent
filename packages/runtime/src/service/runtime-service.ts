@@ -785,6 +785,34 @@ export class RuntimeService {
     };
   }
 
+  /** Pure committed-history browsing: never bootstrap an engine or acquire a session claim. */
+  browseThreads(
+    params: LatestRuntimeMethodParams<"thread.browse">,
+  ): LatestRuntimeMethodResult<"thread.browse"> {
+    this.assertOpen();
+    const offset = params.cursor === undefined ? 0 : Number(params.cursor);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.invalidParams,
+        "thread.browse cursor 超出安全整数范围",
+      );
+    }
+    const records = this.store.listThreads({
+      origin: "interactive",
+      ...(params.workspace === undefined ? {} : { workspace: params.workspace }),
+    });
+    const items = records.slice(offset, offset + params.limit).map((record) => ({
+      thread: toThreadSummary(this.store, record),
+      workspace: record.workspace ?? null,
+      occupancy: this.store.inspectSessionOccupancy(record.id),
+    }));
+    const nextOffset = offset + items.length;
+    return {
+      items,
+      nextCursor: nextOffset < records.length ? String(nextOffset) : null,
+    };
+  }
+
   async createThread(
     params: RuntimeMethodParams<"thread.create">,
   ): Promise<RuntimeMethodResult<"thread.create">> {

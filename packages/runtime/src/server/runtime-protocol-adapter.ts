@@ -367,6 +367,10 @@ export class RuntimeProtocolAdapter {
         return this.service.listThreads(
           runtimeMethodSchemas[RUNTIME_METHODS.threadList].params.parse(request.params),
         );
+      case RUNTIME_METHODS.threadBrowse:
+        return this.service.browseThreads(
+          runtimeMethodSchemas[RUNTIME_METHODS.threadBrowse].params.parse(request.params),
+        );
       case RUNTIME_METHODS.threadCreate:
         return this.service.createThread(
           runtimeMethodSchemas[RUNTIME_METHODS.threadCreate].params.parse(request.params),

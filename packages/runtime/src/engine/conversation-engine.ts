@@ -68,6 +68,8 @@ export interface EngineModelSwitch extends Omit<SessionModelSwitch, "contextWind
 }
 
 export interface ConversationEngineOptions {
+  /** Host-resolved workspace identity; Runtime never discovers product paths. */
+  readonly workspace?: string;
   readonly settings: RuntimeSettings;
   readonly provider: string;
   readonly modelName: string;
@@ -194,6 +196,7 @@ function resolveWorkspaceInstructionsSource(
 }
 
 export class ConversationEngine {
+  private readonly workspace: string | undefined;
   private readonly settings: RuntimeSettings;
   private readonly agentHost: AgentHost | undefined;
   private readonly store: ThreadStore | undefined;
@@ -244,6 +247,7 @@ export class ConversationEngine {
   private closing = false;
 
   constructor(options: ConversationEngineOptions) {
+    this.workspace = options.workspace;
     if (!options.model) throw new Error("ConversationEngine requires a model supplied by its host");
     if (options.agentHost !== undefined && options.sources !== undefined) {
       throw new Error("ConversationEngine accepts either sources or agentHost, not both");
@@ -288,7 +292,12 @@ export class ConversationEngine {
         const context = await this.ensureReady();
         this.assertAcceptingSessions();
         claim?.assert();
-        this.store?.createThread({ ...input, id, model: this.resolveModelName() });
+        this.store?.createThread({
+          ...input,
+          id,
+          model: this.resolveModelName(),
+          ...(this.workspace === undefined ? {} : { workspace: this.workspace }),
+        });
         return this.buildSession(context, id, [], undefined, claim);
       } catch (error) {
         claim?.release();
@@ -333,7 +342,12 @@ export class ConversationEngine {
         const context = await this.ensureReady();
         this.assertAcceptingSessions();
         claim?.assert();
-        this.store.forkSnapshot(snapshot, { ...input, id, model: this.resolveModelName() });
+        this.store.forkSnapshot(snapshot, {
+          ...input,
+          id,
+          model: this.resolveModelName(),
+          ...(this.workspace === undefined ? {} : { workspace: this.workspace }),
+        });
         created = true;
         this.recoverUncoveredToolExecutionContext(id);
         const state = this.store.loadSessionState(id);

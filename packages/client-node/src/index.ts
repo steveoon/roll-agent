@@ -104,6 +104,7 @@ const JSON_RPC_ERROR_CODES = {
 const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
   RUNTIME_METHODS.modelConfigGet,
   RUNTIME_METHODS.threadList,
+  RUNTIME_METHODS.threadBrowse,
   RUNTIME_METHODS.threadSnapshot,
   RUNTIME_METHODS.threadCapabilities,
   RUNTIME_METHODS.operationGet,
@@ -995,6 +996,13 @@ export class RollNodeClient {
     input: RuntimeMethodInputForVersion<"1.5", "operation.result.get">,
   ): Promise<RuntimeClientMethodResult<"operation.result.get">> {
     return this.request(RUNTIME_METHODS.operationResultGet, input);
+  }
+
+  /** Optional Protocol 1.6 browsing; older Runtime hosts may return method unavailable. */
+  browseThreads(
+    input: RuntimeMethodInputForVersion<"1.6", "thread.browse"> = {},
+  ): Promise<RuntimeClientMethodResult<"thread.browse">> {
+    return this.request(RUNTIME_METHODS.threadBrowse, input);
   }
 
   private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {

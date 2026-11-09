@@ -216,6 +216,7 @@ export const RUNTIME_METHODS = {
   initialize: "initialize",
   clientCapabilitiesSet: "client.capabilities.set",
   threadList: "thread.list",
+  threadBrowse: "thread.browse",
   threadCreate: "thread.create",
   threadOpen: "thread.open",
   threadSnapshot: "thread.snapshot",
@@ -1269,6 +1270,53 @@ export const threadListResultSchema = z
   .strict()
   .readonly();
 
+/** Host-normalized identity; Runtime persists it without interpreting paths. */
+export const threadWorkspaceSchema = z.string().min(1).max(4096);
+
+/** Shared host metadata stays outside frozen thread summaries and legacy list responses. */
+export const sessionOccupancySchema = z
+  .object({
+    status: z.enum(["available", "occupied", "unknown"]),
+    owner: z
+      .object({
+        kind: z.string().min(1).max(64),
+        label: z.string().min(1).max(200),
+        workspace: threadWorkspaceSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .readonly();
+export type SessionOccupancy = z.infer<typeof sessionOccupancySchema>;
+
+export const threadBrowseParamsSchema = z
+  .object({
+    workspace: threadWorkspaceSchema.nullable().optional(),
+    cursor: z.string().regex(/^\d+$/u).optional(),
+    limit: pageSizeSchema,
+  })
+  .strict()
+  .readonly();
+export const threadBrowseResultSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            thread: threadSummarySchema,
+            workspace: threadWorkspaceSchema.nullable(),
+            occupancy: sessionOccupancySchema,
+          })
+          .strict()
+          .readonly(),
+      )
+      .max(500),
+    nextCursor: z.string().regex(/^\d+$/u).nullable(),
+  })
+  .strict()
+  .readonly();
+
 export const threadCreateParamsSchema = z
   .object({
     ...requestFields,
@@ -2266,6 +2314,11 @@ export const runtimeMethodSchemasV15 = {
 } as const;
 export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
+  // Optional read-only host extension; legacy list payloads and the handshake stay frozen.
+  [RUNTIME_METHODS.threadBrowse]: {
+    params: threadBrowseParamsSchema,
+    result: threadBrowseResultSchema,
+  },
   [RUNTIME_METHODS.reasoningTextSubscribe]: {
     params: z.object({}).strict().readonly(),
     result: z.object({ subscribed: z.boolean() }).strict().readonly(),

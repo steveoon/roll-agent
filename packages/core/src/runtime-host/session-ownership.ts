@@ -15,7 +15,7 @@ export const ROLL_SESSION_OCCUPANCY_CAPABILITY = {
   hostInjection: "all-roll-writable-thread-stores",
   protocol: "THREAD_BUSY/session_occupied",
   expectedLibraryEnvironment: "ROLL_EXPECTED_SESSION_LIBRARY",
-  primarySchemaVersion: 11,
+  primarySchemaVersion: 12,
   legacyWriters: "unverified-sequential-only",
 } as const;
 

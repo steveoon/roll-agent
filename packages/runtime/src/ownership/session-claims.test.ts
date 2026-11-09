@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, linkSync, symlinkSync, readFileSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  linkSync,
+  symlinkSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { SessionClaims, SessionOccupiedError } from "./session-claims.ts";
+import { SessionClaims, SessionOccupiedError, inspectSessionOccupancy } from "./session-claims.ts";
 import type { SessionOwnershipHost } from "../host-contracts/session-ownership.ts";
 import {
   ThreadStore,
@@ -231,6 +239,89 @@ test("coordinated startup and read-only replay never prune a live sibling; owned
     readOnly.close();
     second.close();
     first.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("occupancy inspection is advisory and never reaps claims or creates files", () => {
+  const dir = directory();
+  const path = join(dir, "threads.db");
+  const owner = new SessionClaims(path, host("desktop"));
+  const hold = owner.acquire("thread");
+  const before = readdirSync(dir).sort();
+  try {
+    const alive = host("reader");
+    assert.deepEqual(owner.inspect("thread"), {
+      status: "occupied",
+      owner: { kind: "test", label: "desktop" },
+    });
+    assert.deepEqual(inspectSessionOccupancy(path, "thread", alive), owner.inspect("thread"));
+    assert.deepEqual(
+      inspectSessionOccupancy(
+        path,
+        "thread",
+        host("reader", () => "unknown"),
+      ),
+      {
+        status: "unknown",
+        owner: { kind: "test", label: "desktop" },
+      },
+    );
+    assert.deepEqual(
+      inspectSessionOccupancy(
+        path,
+        "thread",
+        host("reader", () => "dead"),
+      ),
+      {
+        status: "available",
+      },
+    );
+    // A dead report only affects the advisory view; it never deletes the stored claim.
+    hold.assert();
+    assert.deepEqual(owner.inspect("thread"), {
+      status: "occupied",
+      owner: { kind: "test", label: "desktop" },
+    });
+    assert.deepEqual(readdirSync(dir).sort(), before);
+  } finally {
+    hold.release();
+    owner.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readonly occupancy inspection handles missing and malformed sidecars without writing", () => {
+  const dir = directory();
+  const path = join(dir, "threads.db");
+  try {
+    assert.deepEqual(inspectSessionOccupancy(path, "thread", host("reader")), {
+      status: "available",
+    });
+    assert.deepEqual(readdirSync(dir), []);
+    const sidecar = `${path}.occupancy.sqlite`;
+    writeFileSync(sidecar, "not a SQLite database");
+    assert.deepEqual(inspectSessionOccupancy(path, "thread", host("reader")), {
+      status: "unknown",
+    });
+    assert.equal(readFileSync(sidecar, "utf8"), "not a SQLite database");
+    assert.deepEqual(readdirSync(dir), ["threads.db.occupancy.sqlite"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("maintenance occupancy blocks browsing availability and remains intact", () => {
+  const dir = directory();
+  const path = join(dir, "threads.db");
+  const claims = new SessionClaims(path, host("maintenance"));
+  const gate = claims.maintenance();
+  try {
+    assert.equal(inspectSessionOccupancy(path, "thread", host("reader")).status, "occupied");
+    gate.assert();
+  } finally {
+    gate.release();
+    claims.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

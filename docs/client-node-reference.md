@@ -77,6 +77,7 @@ interface RuntimeClientTransport {
 | 方法 | 返回 | 说明 |
 |---|---|---|
 | `request(method, input)` | 方法对应 result | 校验 params/result 并发送 JSON-RPC 请求 |
+| `browseThreads(input?)` | Thread 浏览分页 | 调用可选的 1.6 `thread.browse`；包含项目归属和安全占用信息 |
 | `onEvent(listener)` | 取消订阅函数 | 订阅已通过 Schema 校验的 Runtime 事件 |
 | `createEventRecovery(options?)` | `RuntimeEventRecoveryManager` | 创建当前连接唯一的 1.3 durable event 恢复管理器 |
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |

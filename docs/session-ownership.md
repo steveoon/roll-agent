@@ -19,7 +19,7 @@ and reloads persisted state, rather than reusing a detached session.
 ## Storage and lifecycle
 
 Claims live in `<canonical SQLite file>.occupancy.sqlite`. The primary database
-stays at schema 11. Symlink aliases resolve to the same SQLite file and sidecar;
+uses schema 12, including nullable workspace attribution. Symlink aliases resolve to the same SQLite file and sidecar;
 writable hardlink aliases and dangling file symlinks are rejected because their
 journal identity is ambiguous. Same thread IDs in different libraries are
 independent. This supports cooperative processes on one machine and local
@@ -96,8 +96,9 @@ with `quick_check` and the original schema version, and only then runs transacti
 migration. It returns `backupPath` and the resulting preflight. Failure before
 verification leaves history unmigrated. Old clients do not honor the gate: the
 explicit confirmation means those clients have been stopped, not that they were
-automatically detected. Users may keep supported schema-11 old CLI versions for
-**unverified sequential use only**.
+automatically detected. Schema-11 old CLI/Desktop Runtime versions reject a migrated
+schema-12 library, even for read-only access. Upgrade all clients sharing the library
+before migration; updating an external CLI does not update Desktop's bundled Runtime.
 
 ## Retention and attachment boundaries
 

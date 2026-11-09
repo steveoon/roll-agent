@@ -229,6 +229,7 @@ Interaction 链路必须分开以下身份：
 | `initialize` | 握手 | 版本列表、客户端信息 | 版本、实例、features、limits |
 | `client.capabilities.set` | `"1.4"` / `"1.3"` / `"1.2"` 握手扩展 | `revision`, `serverRequestMethods` | revision 与 Runtime registry 交集 |
 | `thread.list` | 只读 | `cursor?`, `limit?` | Thread 分页 |
+| `thread.browse` | 1.6 可选只读 | `workspace?`, `cursor?`, `limit?` | Thread 分页及项目归属、占用状态 |
 | `thread.create` | mutation | `requestId`, `title?` | `ThreadSummary` |
 | `thread.open` | 附着/恢复 | `threadId` | `ThreadSnapshot` |
 | `thread.snapshot` | 只读 | 两个独立 before sequence、`limit?` | `ThreadSnapshot` |
@@ -256,6 +257,18 @@ mutation 幂等缓存，也不应被客户端自动重试。`turn.start` 的输�
 ```json
 { "text": "", "attachments": ["00000000-0000-4000-8000-0000000000a1"] }
 ```
+
+## 项目会话浏览
+
+`thread.browse` 是可选的 Protocol 1.6 扩展；旧宿主可能返回 method not found，初始化 features
+与 `thread.list` 的已有响应格式保持不变。`workspace` 省略表示全部项目，`null` 只选未分类会话，
+字符串精确匹配宿主已规范化的工作区身份；`limit` 为 1..500，默认 100，`cursor` 是十进制分页位置。
+
+每项返回 `{ thread: ThreadSummary, workspace: string | null, occupancy }`，其中工作区身份最多
+4096 字符。`occupancy.status` 为 `available`、`occupied` 或 `unknown`，可选的 `owner` 只含
+`kind`、`label` 和 `workspace`，不暴露 PID、进程身份令牌或凭证。浏览不获取占用、不迁移旧库、
+不清理死亡进程记录。探活失败或占用账本不可读时返回 `unknown`。状态仅作展示，客户端在用户选择
+恢复后仍须通过 `thread.open` 原子获取占用；读取历史快照使用 `thread.snapshot`。
 
 ## 模型配置应用
 
