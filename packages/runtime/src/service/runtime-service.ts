@@ -40,6 +40,9 @@ import {
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
+  type RuntimeModelConfigFailure,
+  type RuntimeModelConfigIdentity,
+  type RuntimeModelConfigStatus,
   type LatestRuntimeMethodParams,
   type LatestRuntimeMethodResult,
   type RuntimeMethodParams,
@@ -123,6 +126,18 @@ export interface RuntimeServiceEngine {
   resumeSession(threadId: string): Promise<RuntimeServiceSession>;
 }
 
+/** The host rereads its bound source and applies a model without replacing the engine. */
+export interface RuntimeModelConfigHost {
+  readonly initial: RuntimeModelConfigIdentity;
+  reload():
+    | {
+        readonly status: "applied";
+        readonly model: RuntimeModelConfigIdentity;
+        readonly reasoning?: ReasoningPresentation["kind"];
+      }
+    | { readonly status: "failed"; readonly reason: RuntimeModelConfigFailure };
+}
+
 export interface RuntimeServiceOptions {
   readonly serverName?: string;
   readonly serverVersion?: string;
@@ -131,6 +146,7 @@ export interface RuntimeServiceOptions {
   readonly idempotencyCacheEntries?: number;
   /** Accept only source-classified deltas of this kind. Text requires a separate local subscription. */
   readonly providerReasoning?: ReasoningPresentation["kind"];
+  readonly modelConfig?: RuntimeModelConfigHost;
   /**
    * Optional host-controlled projection. Raw model reasoning is never sent to public clients.
    * Supplying this enables the `reasoning-summary` capability.
@@ -234,6 +250,7 @@ export class RuntimeServiceError extends Error {
 }
 
 type MutationRuntimeMethod =
+  | typeof RUNTIME_METHODS.modelConfigReload
   | typeof RUNTIME_METHODS.threadCreate
   | typeof RUNTIME_METHODS.threadRename
   | typeof RUNTIME_METHODS.threadDelete
@@ -565,7 +582,10 @@ export class RuntimeService {
   private readonly reasoningSummaryProjector:
     | RuntimeServiceOptions["reasoningSummaryProjector"]
     | undefined;
-  private readonly providerReasoning: RuntimeServiceOptions["providerReasoning"];
+  private providerReasoning: RuntimeServiceOptions["providerReasoning"];
+  private readonly modelConfig: RuntimeModelConfigHost | undefined;
+  private modelConfigStatus: RuntimeModelConfigStatus | undefined;
+  private modelConfigTurnFailed = false;
   private reasoningTextSubscription:
     | { deliver: (event: RuntimeEventEnvelopeV16) => void }
     | undefined;
@@ -602,6 +622,18 @@ export class RuntimeService {
     this.mutationRequests = new MutationRequestCache(this.idempotencyCacheEntries);
     this.reasoningSummaryProjector = options.reasoningSummaryProjector;
     this.providerReasoning = options.providerReasoning;
+    this.modelConfig = options.modelConfig;
+    if (options.modelConfig !== undefined) {
+      this.modelConfigStatus = {
+        status: "applied",
+        revision: 0,
+        active: {
+          ...options.modelConfig.initial,
+          revision: 0,
+          reasoning: this.providerReasoning ?? null,
+        },
+      };
+    }
     this.attachmentStore = options.attachmentStore;
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
@@ -955,6 +987,77 @@ export class RuntimeService {
     };
   }
 
+  getModelConfig(): RuntimeModelConfigStatus {
+    this.assertOpen();
+    if (this.modelConfigStatus === undefined) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前 Runtime 没有可重新加载的模型配置来源",
+      );
+    }
+    return this.modelConfigStatus;
+  }
+
+  reloadModelConfig(
+    params: LatestRuntimeMethodParams<"runtime.modelConfig.reload">,
+  ): Promise<RuntimeModelConfigStatus> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.modelConfigReload,
+      params,
+      () => {
+        const { active, revision } = this.getModelConfig();
+        this.modelConfigStatus = { status: "pending", active, revision: revision + 1 };
+        this.applyPendingModelConfig();
+        return this.getModelConfig();
+      },
+    );
+  }
+
+  private applyPendingModelConfig(): void {
+    const host = this.modelConfig;
+    const pending = this.modelConfigStatus;
+    if (this.closing || host === undefined || pending?.status !== "pending") return;
+    if (this.modelConfigTurnFailed) {
+      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
+      return;
+    }
+    if (this.activeTurns.size > 0 || this.turnJobs.size > 0) return;
+
+    try {
+      const result = host.reload();
+      if (result.status === "failed") {
+        this.modelConfigStatus = { ...pending, status: "failed", reason: result.reason };
+        return;
+      }
+      this.providerReasoning = result.reasoning;
+      this.modelConfigStatus = {
+        status: "applied",
+        revision: pending.revision,
+        active: {
+          ...result.model,
+          revision: pending.revision,
+          reasoning: result.reasoning ?? null,
+        },
+      };
+    } catch {
+      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
+    }
+  }
+
+  private assertModelConfigReady(): void {
+    const status = this.modelConfigStatus?.status;
+    if (status === "pending" || status === "failed") {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        status === "pending"
+          ? "模型配置待应用，请等待当前轮次结束"
+          : "模型配置应用失败，请重试应用",
+        { retryable: true, details: { modelConfigStatus: status } },
+      );
+    }
+  }
+
   async startTurn(
     params: LatestRuntimeMethodParams<"turn.start">,
   ): Promise<LatestRuntimeMethodResult<"turn.start">> {
@@ -987,6 +1090,7 @@ export class RuntimeService {
             { retryable: true },
           );
         }
+        this.assertModelConfigReady();
         const session = await this.requireSession(params.threadId);
         const ownerAfterOpen = this.findTurnOwner(params.turnId, params.threadId);
         if (ownerAfterOpen !== undefined) {
@@ -1006,6 +1110,7 @@ export class RuntimeService {
           );
         }
         this.assertThreadOpen(params.threadId);
+        this.assertModelConfigReady();
         const attachments = this.resolveTurnAttachments(params);
         const state: ActiveTurnState = {
           ownership: this.ownership.get(params.threadId),
@@ -1031,8 +1136,12 @@ export class RuntimeService {
         job.then(
           () => {
             if (this.turnJobs.get(params.threadId) === job) this.turnJobs.delete(params.threadId);
+            this.applyPendingModelConfig();
           },
-          () => undefined,
+          () => {
+            this.modelConfigTurnFailed = true;
+            this.applyPendingModelConfig();
+          },
         ); // Failed projection remains a failed close barrier; never release it.
 
         return { accepted: true, turnId: params.turnId };

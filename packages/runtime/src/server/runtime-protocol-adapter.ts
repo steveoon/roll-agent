@@ -350,6 +350,13 @@ export class RuntimeProtocolAdapter {
     }
 
     switch (request.method) {
+      case RUNTIME_METHODS.modelConfigGet:
+        runtimeMethodSchemas[RUNTIME_METHODS.modelConfigGet].params.parse(request.params);
+        return this.service.getModelConfig();
+      case RUNTIME_METHODS.modelConfigReload:
+        return this.service.reloadModelConfig(
+          runtimeMethodSchemas[RUNTIME_METHODS.modelConfigReload].params.parse(request.params),
+        );
       case RUNTIME_METHODS.reasoningTextSubscribe:
         runtimeMethodSchemas[RUNTIME_METHODS.reasoningTextSubscribe].params.parse(request.params);
         this.unsubscribeReasoningText ??= this.service.subscribeReasoningText((event) =>

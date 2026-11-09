@@ -237,6 +237,8 @@ Interaction 链路必须分开以下身份：
 | `thread.delete` | mutation | `requestId`, `threadId` | `{ deleted: true }` |
 | `thread.detach` | mutation | `requestId`, `threadId` | `{ detached: boolean }` |
 | `thread.capabilities` | 只读 | `threadId` | 安全 Capability manifest |
+| `runtime.modelConfig.get` | 1.6 可选只读 | `{}` | 模型配置应用状态 |
+| `runtime.modelConfig.reload` | 1.6 可选 mutation | `requestId` | 模型配置应用状态 |
 | `turn.start` | mutation | `requestId`, `threadId`, `turnId`, 文本输入；1.4 可加 `attachments` | 立即返回 `accepted` |
 | `turn.cancel` | mutation | `requestId`, `threadId`, `turnId` | `{ cancelling: boolean }` |
 | `approval.respond` | `"1.0"` mutation | `requestId`, IDs, decision | `{ resolved: true }` |
@@ -254,6 +256,32 @@ mutation 幂等缓存，也不应被客户端自动重试。`turn.start` 的输�
 ```json
 { "text": "", "attachments": ["00000000-0000-4000-8000-0000000000a1"] }
 ```
+
+## 模型配置应用
+
+绑定了配置文件的 `roll runtime serve --stdio` 支持原地更新模型。协商 1.6 后先调用
+`runtime.modelConfig.get` 探测。旧服务可能返回 method not found，未绑定配置文件的宿主返回
+`CAPABILITY_UNAVAILABLE`。现有初始化字段保持兼容。
+
+设置保存到磁盘后，客户端用新 `requestId` 调用 `runtime.modelConfig.reload`。Runtime 只重读启动时
+绑定的配置来源，支持 `llm`、`runtime.provider`、`runtime.model`、`runtime.thinkingLevel` 的更新。
+客户端应按配置来源定位受影响的 Runtime。如果新增项目配置导致有效来源切换，应走宿主的安全重连流程。
+响应含 `status`、`revision` 和 `active: { revision, provider, model, reasoning }`。版本从零开始，在当前
+`runtimeInstanceId` 内递增。客户端可用只读方法查询最新状态，重放同一个 `requestId` 会得到原响应。
+
+- `applied` 表示已切换。模型初始化不发送推理请求。
+- `pending` 表示当前 Engine 还有活动轮次，包括等待审批或用户输入。轮次继续使用原模型，全部结束后
+  Runtime 重读最新配置并切换。客户端可在终止事件后查询，若仍待应用可短间隔重试查询。
+- `failed` 附固定原因 `invalid-config`、`restart-required` 或 `apply-failed`。
+  `active` 表示最近一次确认应用的模型。更改历史库或其他启动设置需要重新连接。
+
+待应用或应用失败时，新 `turn.start` 会被拒绝，并返回 `CAPABILITY_UNAVAILABLE` 和
+`details.modelConfigStatus`。此时客户端保留输入，确认状态为 `applied` 后用新的请求 ID 重试。
+已有轮次、会话占用、历史、附件和后台资源继续沿用当前 Runtime。应用请求无需传配置路径、模型选项或凭证。
+
+`active.reasoning` 为当前模型的 `summary`、`text` 或 `null`。初始化的 features 描述握手时模型的能力。
+应用新模型后，客户端按查询结果刷新显示。需要展示本地 reasoning text 时，仍须显式调用
+`reasoning.text.subscribe`，关闭 thinking 的模型拒绝该订阅。已授予同一连接的订阅沿用原有生命周期。
 
 ## Snapshot
 
@@ -693,7 +721,8 @@ Runtime 收到 Client 的 `id: null` Error 时同样会拒绝全部未决 Server
 
 - 进入 mutation 幂等缓存的方法：`thread.create`、`thread.rename`、`thread.delete`、
   `thread.detach`、`turn.start`、`turn.cancel`（全部版本）；`approval.respond`（仅 `"1.0"`）；
-  `attachment.stage`、`attachment.chunk`、`attachment.commit`、`attachment.release`（仅 `"1.4"`）。
+  `attachment.stage`、`attachment.chunk`、`attachment.commit`、`attachment.release`（`"1.4"` 起）；
+  `runtime.modelConfig.reload`（`"1.6"` 可选扩展）。
   上述 mutation 都携带 UUID `requestId`；
 - 同一 `runtimeInstanceId` 内，最近 `limits.idempotencyCacheEntries` 个已完成 mutation
   会缓存其成功或失败结果；相同 `requestId` + 相同参数在该窗口内返回同一结果；
