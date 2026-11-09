@@ -89,6 +89,7 @@ import {
   type ThreadStoreInstance,
 } from "../../runtime-host/engine-factory.ts";
 import { runJsonTurn } from "../../runtime-host/json-turn.ts";
+import { createRuntimeModelConfig } from "../../runtime-host/runtime-model-config.ts";
 import { createChatGptCatalog } from "../../runtime-host/chatgpt-catalog.ts";
 
 export {
@@ -176,6 +177,7 @@ async function runChatOnboardingFlow(provider: string, model: string): Promise<b
 export async function runServer(
   config: RollConfig,
   configContext?: RuntimeConfigContext,
+  readBoundConfig?: () => RollConfig,
 ): Promise<void> {
   captureSessionLibraryBinding();
   const llmStatus = resolveChatLlmReadiness(config);
@@ -229,7 +231,7 @@ export async function runServer(
       store,
       surface: CHAT_ENGINE_SURFACES.server,
       ...(configContext === undefined ? {} : { configContext }),
-      ...(display ? { resolveReasoningPresentation } : {}),
+      ...(display || readBoundConfig !== undefined ? { resolveReasoningPresentation } : {}),
       shellEnv: chatCliScope.env,
       ...(providerOptions ? { providerOptions } : {}),
       ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
@@ -241,6 +243,16 @@ export async function runServer(
       serverVersion: "1.0",
       runtimeVersion: getCurrentVersion(),
       ...(display ? { providerReasoning: display.kind } : {}),
+      ...(readBoundConfig === undefined
+        ? {}
+        : {
+            modelConfig: createRuntimeModelConfig(
+              config,
+              { provider, model: modelName },
+              readBoundConfig,
+              activeEngine,
+            ),
+          }),
       attachmentStore: new AttachmentStore({
         dir: join(config.runtime.threadsDir, "attachments"),
       }),

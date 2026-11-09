@@ -102,6 +102,7 @@ const JSON_RPC_ERROR_CODES = {
 } as const;
 
 const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
+  RUNTIME_METHODS.modelConfigGet,
   RUNTIME_METHODS.threadList,
   RUNTIME_METHODS.threadSnapshot,
   RUNTIME_METHODS.threadCapabilities,
