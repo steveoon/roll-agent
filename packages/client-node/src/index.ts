@@ -103,6 +103,8 @@ const JSON_RPC_ERROR_CODES = {
 
 const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
   RUNTIME_METHODS.modelConfigGet,
+  RUNTIME_METHODS.modelsList,
+  RUNTIME_METHODS.threadModelGet,
   RUNTIME_METHODS.threadList,
   RUNTIME_METHODS.threadBrowse,
   RUNTIME_METHODS.threadSnapshot,
@@ -1003,6 +1005,23 @@ export class RollNodeClient {
     input: RuntimeMethodInputForVersion<"1.6", "thread.browse"> = {},
   ): Promise<RuntimeClientMethodResult<"thread.browse">> {
     return this.request(RUNTIME_METHODS.threadBrowse, input);
+  }
+
+  /** Configured candidates only; this optional method does not probe public model catalogs. */
+  listModels(): Promise<RuntimeClientMethodResult<"runtime.models.list">> {
+    return this.request(RUNTIME_METHODS.modelsList, {});
+  }
+
+  getThreadModel(
+    input: RuntimeMethodInputForVersion<"1.6", "thread.model.get">,
+  ): Promise<RuntimeClientMethodResult<"thread.model.get">> {
+    return this.request(RUNTIME_METHODS.threadModelGet, input);
+  }
+
+  setThreadModel(
+    input: RuntimeMethodInputForVersion<"1.6", "thread.model.set">,
+  ): Promise<RuntimeClientMethodResult<"thread.model.set">> {
+    return this.request(RUNTIME_METHODS.threadModelSet, input);
   }
 
   private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {

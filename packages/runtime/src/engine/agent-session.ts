@@ -245,6 +245,9 @@ export interface AgentSessionOptions {
   ) => ReasoningPresentation | undefined;
   /** @internal Synchronous engine admission before accepting input or starting compaction. */
   readonly onBeforeTurn?: () => void;
+  /** Execution admission is separate from ownership checks so failed models remain repairable. */
+  readonly onBeforeModelUse?: () => void;
+  readonly onCloseRequested?: () => void;
   readonly modelRecovery?: ModelTurnRecovery;
   readonly sources: readonly AgentToolSource[];
   readonly maxSteps: number;
@@ -740,6 +743,8 @@ export class AgentSession {
   private readonly turnTimeoutMs: number | undefined;
   private readonly onClose: (() => void) | undefined;
   private readonly onBeforeTurn: AgentSessionOptions["onBeforeTurn"];
+  private readonly onBeforeModelUse: AgentSessionOptions["onBeforeModelUse"];
+  private readonly onCloseRequested: AgentSessionOptions["onCloseRequested"];
   private providerOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputReasoning:
@@ -851,6 +856,8 @@ export class AgentSession {
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.onClose = options.onClose;
     this.onBeforeTurn = options.onBeforeTurn;
+    this.onBeforeModelUse = options.onBeforeModelUse;
+    this.onCloseRequested = options.onCloseRequested;
     this.providerOptions = options.providerOptions;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
@@ -1292,6 +1299,7 @@ export class AgentSession {
       throw new Error("session already has an active turn");
     }
     this.onBeforeTurn?.();
+    this.onBeforeModelUse?.();
     const normalizedInput = normalizeSessionSendInput(input);
 
     const queue = new AsyncEventQueue<SessionEvent>();
@@ -1329,7 +1337,7 @@ export class AgentSession {
       throw new Error("session already has an active turn");
     }
     this.onBeforeTurn?.();
-
+    this.onBeforeModelUse?.();
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
     const activeTurn = createActiveTurn();
@@ -3883,6 +3891,7 @@ export class AgentSession {
       return this.closePromise;
     }
     this.closed = true;
+    this.onCloseRequested?.();
     const activeTurn = this.activeTurn;
     if (activeTurn) {
       this.captureCancellationActivity(activeTurn);

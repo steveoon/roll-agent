@@ -88,6 +88,7 @@ import {
   CHAT_ENGINE_SURFACES,
   chatHostModeForSurface,
   createChatEngine,
+  createRuntimeChatEngine,
   loadRuntime,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
@@ -238,11 +239,11 @@ export async function runServer(
   const display = resolveReasoningPresentation(model, providerOptions);
   const store = createOwnedThreadStore(runtime, config.runtime.threadsDir, "runtime");
   const chatCliScope = createChatCliScope();
-  let engine: ReturnType<typeof createChatEngine> | undefined;
+  let engine: ReturnType<typeof createRuntimeChatEngine> | undefined;
   let signalScope: ChatEngineSignalScope | undefined;
   try {
     backfillScheduledThreads(config, runtime, store);
-    engine = createChatEngine({
+    engine = createRuntimeChatEngine({
       runtime,
       config,
       model,

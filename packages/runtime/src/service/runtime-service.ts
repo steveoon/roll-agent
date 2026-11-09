@@ -57,6 +57,7 @@ import {
   type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
+import { ThreadModelError, type ThreadModelEngine } from "../engine/thread-model-engine.ts";
 import type { SessionAttachment } from "../engine/session-attachments.ts";
 import { AttachmentStore, type AttachmentStoreFailure } from "./attachment-store.ts";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
@@ -122,7 +123,20 @@ export type RuntimeServiceSession = Pick<
     >
   >;
 
-export interface RuntimeServiceEngine {
+export interface RuntimeServiceEngine extends Partial<
+  Pick<
+    ThreadModelEngine,
+    | "getModelCatalog"
+    | "getThreadModel"
+    | "setThreadModel"
+    | "setModelBusyCheck"
+    | "settleThreadModel"
+    | "failThreadModelSettlement"
+    | "assertThreadModelReady"
+    | "closeModelSelections"
+    | "hasThreadReasoning"
+  >
+> {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
   resumeSession(threadId: string): Promise<RuntimeServiceSession>;
 }
@@ -239,6 +253,7 @@ export class RuntimeServiceError extends Error {
 }
 
 type MutationRuntimeMethod =
+  | typeof RUNTIME_METHODS.threadModelSet
   | typeof RUNTIME_METHODS.modelConfigReload
   | typeof RUNTIME_METHODS.threadCreate
   | typeof RUNTIME_METHODS.threadRename
@@ -599,6 +614,7 @@ export class RuntimeService {
     options: RuntimeServiceOptions = {},
   ) {
     this.engine = engine;
+    engine.setModelBusyCheck?.((id) => this.activeTurns.has(id) || this.turnJobs.has(id));
     this.store = store;
     this.serverName = options.serverName ?? "roll-runtime";
     this.serverVersion = options.serverVersion ?? "1.0";
@@ -709,7 +725,12 @@ export class RuntimeService {
     listener: (event: RuntimeEventEnvelopeV16) => void,
   ): (() => void) | undefined {
     this.assertOpen();
-    if (this.providerReasoning !== "text" || this.reasoningTextSubscription) return undefined;
+    if (
+      (this.providerReasoning !== "text" && !this.engine.hasThreadReasoning?.("text")) ||
+      this.reasoningTextSubscription
+    ) {
+      return undefined;
+    }
     const subscription = { deliver: listener };
     this.reasoningTextSubscription = subscription;
     return () => {
@@ -1014,6 +1035,88 @@ export class RuntimeService {
     return this.modelConfigController.getStatus();
   }
 
+  listModels(): LatestRuntimeMethodResult<"runtime.models.list"> {
+    this.assertOpen();
+    if (!this.engine.getModelCatalog) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前宿主不支持会话模型选择",
+      );
+    }
+    return this.engine.getModelCatalog();
+  }
+
+  getThreadModel(
+    params: LatestRuntimeMethodParams<"thread.model.get">,
+  ): LatestRuntimeMethodResult<"thread.model.get"> {
+    this.assertOpen();
+    this.requireThread(params.threadId);
+    if (!this.engine.getThreadModel) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前宿主不支持会话模型选择",
+      );
+    }
+    try {
+      return this.engine.getThreadModel(params.threadId);
+    } catch (error) {
+      if (!(error instanceof ThreadModelError)) throw error;
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前对话尚未打开或正在关闭，请先打开对话",
+        { retryable: true },
+      );
+    }
+  }
+
+  setThreadModel(
+    params: LatestRuntimeMethodParams<"thread.model.set">,
+  ): Promise<LatestRuntimeMethodResult<"thread.model.set">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.threadModelSet,
+      params,
+      async () => {
+        this.assertThreadOpen(params.threadId);
+        if (this.requireThread(params.threadId).origin.kind === "scheduled") {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.invalidParams,
+            "定时执行会话是只读记录",
+          );
+        }
+        if (!this.engine.setThreadModel) {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前宿主不支持会话模型选择",
+          );
+        }
+        // A delayed mutation must not undo detach by implicitly reacquiring the session.
+        const session = this.sessions.get(params.threadId);
+        if (session === undefined) {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前对话尚未打开或正在关闭，请先打开对话",
+            { retryable: true },
+          );
+        }
+        session.assertWritable?.();
+        this.ownership.get(params.threadId)?.assert();
+        try {
+          return await this.engine.setThreadModel(params);
+        } catch (error) {
+          if (!(error instanceof ThreadModelError)) throw error;
+          throw new RuntimeServiceError(
+            error.reason === "unavailable"
+              ? RUNTIME_ERROR_CODES.capabilityUnavailable
+              : RUNTIME_ERROR_CODES.invalidParams,
+            error.message,
+            { retryable: true, details: { modelSelection: error.reason } },
+          );
+        }
+      },
+    );
+  }
+
   reloadModelConfig(
     params: LatestRuntimeMethodParams<"runtime.modelConfig.reload">,
   ): Promise<RuntimeModelConfigStatus> {
@@ -1098,6 +1201,16 @@ export class RuntimeService {
         }
         this.assertThreadOpen(params.threadId);
         this.assertModelConfigReady();
+        try {
+          this.engine.assertThreadModelReady?.(params.threadId);
+        } catch (error) {
+          if (!(error instanceof ThreadModelError)) throw error;
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前对话的模型尚未应用，请选择可用模型或跟随默认设置",
+            { retryable: true },
+          );
+        }
         const attachments = this.resolveTurnAttachments(params);
         const state: ActiveTurnState = {
           ownership: this.ownership.get(params.threadId),
@@ -1124,9 +1237,13 @@ export class RuntimeService {
           () => {
             if (this.turnJobs.get(params.threadId) === job) this.turnJobs.delete(params.threadId);
             this.applyPendingModelConfig();
+            this.engine.settleThreadModel?.(params.threadId).catch(() => {
+              this.engine.failThreadModelSettlement?.(params.threadId);
+            });
           },
           () => {
             this.modelConfigController?.fail();
+            this.engine.failThreadModelSettlement?.(params.threadId);
           },
         ); // Failed projection remains a failed close barrier; never release it.
 
@@ -1520,6 +1637,7 @@ export class RuntimeService {
   close(): Promise<void> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closing = true;
+    this.engine.closeModelSelections?.();
     this.modelConfigController?.close();
     this.setUserInputAvailable(false);
     for (const turn of this.activeTurns.values()) turn.session.cancel();
@@ -1726,8 +1844,10 @@ export class RuntimeService {
   }
 
   private createTurnReasoningDisplay(state: ActiveTurnState): TurnReasoningDisplay | undefined {
-    const kind = this.providerReasoning;
-    const legacy = this.reasoningSummaryProjector;
+    const kind = this.engine.getThreadModel
+      ? (this.engine.getThreadModel(state.threadId).active?.reasoning ?? undefined)
+      : this.providerReasoning;
+    const legacy = this.engine.getThreadModel ? undefined : this.reasoningSummaryProjector;
     if (kind === undefined && !legacy) return undefined;
     const subscription = this.reasoningTextSubscription;
     if (kind === "text" && !subscription) return undefined;

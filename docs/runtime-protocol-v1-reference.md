@@ -83,6 +83,35 @@ Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同
 `limits.maxFrameBytes` 表示 Runtime 接收 Client 出站帧的上限；初始化后的 Client 出站上限
 仍取本地预算与该值的较小值，不能把 17 MiB 入站要求解释为同等的出站额度。
 
+
+## 会话内模型选择（可选扩展）
+
+| 方法 | 参数 | 返回 |
+|---|---|---|
+| `runtime.models.list` | `{}` | `{configRevision, defaultModel, items}`，仅安全的配置模型标识和可用性 |
+| `thread.model.get` | `{threadId}` | 已打开会话的 `{threadId, revision, configRevision, selection, status, active, reason?}` |
+| `thread.model.set` | `{requestId, threadId, expectedRevision, configRevision, selection}` | 同 get；接受后可能为 pending |
+
+`selection` 是 `{mode:"default"}` 或 `{mode:"explicit",provider,model}`。会话选择仅存在于内存，
+detach、关闭和 Runtime 重启后丢弃，不写配置或会话数据库。App 可自行保存标识，重开后读取
+最新候选与 revision，再显式恢复。CLI 不自动继承。此功能没有新增数据库迁移。
+
+`revision` 为当前会话实例的不透明 UUID，选择/重载后变化；`configRevision` 为已加载配置快照标识。
+过期 revision、未知候选或无效配置快照返回 `INVALID_PARAMS`，不可用宿主/会话返回
+`CAPABILITY_UNAVAILABLE`；scheduled 记录不能修改。get 和 set 均不自动打开会话；set 必须在
+显式打开且仍可写的会话上调用，detach 后迟到的首次请求不会重新占用会话。set 遵守现有
+requestId 幂等契约；重复请求返回原始应答，当前状态用 get 查询。
+
+`status` 是 `applied | pending | failed`。`active` 为 `{provider,model,reasoning,contextWindow?}`，
+尚未建立时为 null；applied 必须非空。reasoning 为 summary/text/null。失败 reason 仅为
+model-unavailable、prepare-failed、apply-failed、config-changed、settlement-failed。
+已有轮次保持原模型，结算后应用 pending；准备/应用失败阻止下一轮，可通过有效选择恢复。
+关闭、过期准备或投影失败不能绕过门禁。默认重载保留并验证当前实例内的显式选择。
+
+这些是可选的 1.6 方法，不能仅按 Wire 版本假定可用；旧宿主可能返回 method-not-found 或
+CAPABILITY_UNAVAILABLE。客户端使用 get 查询应用结果，无新增选择事件。切换后的推理类型
+以 active.reasoning 为准，握手能力保持既有含义；文本订阅仍需显式启用，可在选择文本模型后重新申请。
+
 ## 初始化
 
 客户端必须首先且仅调用一次 `initialize`：

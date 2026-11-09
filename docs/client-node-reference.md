@@ -78,6 +78,9 @@ interface RuntimeClientTransport {
 |---|---|---|
 | `request(method, input)` | 方法对应 result | 校验 params/result 并发送 JSON-RPC 请求 |
 | `browseThreads(input?)` | Thread 浏览分页 | 调用可选的 1.6 `thread.browse`；包含项目归属和安全占用信息 |
+| `listModels()` | 模型目录 | 当前配置候选、默认值和 configRevision；不返回凭证 |
+| `getThreadModel({threadId})` | 会话模型状态 | 读取已打开会话的内存选择及 active 模型 |
+| `setThreadModel(input)` | 会话模型状态 | 按 expectedRevision/configRevision 选择，仅当前实例有效 |
 | `onEvent(listener)` | 取消订阅函数 | 订阅已通过 Schema 校验的 Runtime 事件 |
 | `createEventRecovery(options?)` | `RuntimeEventRecoveryManager` | 创建当前连接唯一的 1.3 durable event 恢复管理器 |
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |
@@ -89,6 +92,30 @@ interface RuntimeClientTransport {
 
 `onExit()` 的晚订阅者仍会在 microtask 中收到已经发生的退出结果。正常显式
 `shutdown()` 也会触发 `onExit()`；不能仅凭 callback 被调用就显示为异常。
+
+## 选择当前会话的模型
+
+```ts
+await client.request("thread.open", { threadId });
+const catalog = await client.listModels();
+const current = await client.getThreadModel({ threadId });
+const result = await client.setThreadModel({
+  requestId: crypto.randomUUID(),
+  threadId,
+  expectedRevision: current.revision,
+  configRevision: catalog.configRevision,
+  selection: { mode: "explicit", provider: selected.provider, model: selected.model },
+});
+// 清除内存覆盖：使用最新 revision，再发送 selection: { mode: "default" }。
+```
+
+selected 必须是目录中 available 的项。result 为 pending 时，使用 getThreadModel 查询至
+applied/failed；不要将请求已接受视为切换已完成。重复 requestId 返回原始应答。
+选择不持久化，detach/关闭/Runtime 重启后使用配置默认值。App 可自行保存 provider/model，
+下次打开后按上述步骤显式恢复；必须重新校验候选并获取新 revision，不能重放旧请求。
+get/set 均不会自动打开会话；detach 后迟到的首次 set 返回 CAPABILITY_UNAVAILABLE，
+不会取得会话占用。当前生效模型以 get 的 active/status 为准，历史列表中的 model 仅为历史标签。
+旧宿主不一定支持这三个可选 1.6 方法，应处理 method-not-found/CAPABILITY_UNAVAILABLE。
 
 ## Runtime → Client Server Request
 

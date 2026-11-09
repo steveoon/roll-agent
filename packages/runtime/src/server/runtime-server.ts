@@ -158,7 +158,7 @@ const LEGACY_METHODS = new Set<string>(Object.values(RpcMethod));
  * redacted persistence projection rather than the original in-memory protocol result.
  */
 export class RuntimeServer {
-  private readonly engine: ConversationEngine;
+  private readonly engine: Pick<ConversationEngine, "createSession" | "resumeSession">;
   private readonly connection: JsonRpcConnection;
   private readonly authorizeRawToolEvidence:
     | RuntimeServerOptions["authorizeRawToolEvidence"]
@@ -171,7 +171,7 @@ export class RuntimeServer {
   private abortPromise: Promise<void> | undefined;
 
   constructor(
-    engine: ConversationEngine,
+    engine: Pick<ConversationEngine, "createSession" | "resumeSession">,
     connection: JsonRpcConnection,
     options: RuntimeServerOptions = {},
   ) {

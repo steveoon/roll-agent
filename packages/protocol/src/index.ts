@@ -227,6 +227,9 @@ export const RUNTIME_METHODS = {
   threadCapabilities: "thread.capabilities",
   modelConfigGet: "runtime.modelConfig.get",
   modelConfigReload: "runtime.modelConfig.reload",
+  modelsList: "runtime.models.list",
+  threadModelGet: "thread.model.get",
+  threadModelSet: "thread.model.set",
   turnStart: "turn.start",
   turnCancel: "turn.cancel",
   approvalRespond: "approval.respond",
@@ -1253,6 +1256,92 @@ export type RuntimeModelConfigStatus = z.infer<typeof runtimeModelConfigStatusSc
 export type RuntimeModelConfigIdentity = Readonly<z.infer<typeof runtimeModelConfigIdentitySchema>>;
 export type RuntimeModelConfigFailure = z.infer<typeof runtimeModelConfigFailureSchema>;
 const threadRequestFields = { threadId: threadIdSchema } as const;
+
+const threadModelIdentitySchema = z
+  .object({
+    provider: z.string().min(1).max(128),
+    model: z.string().min(1).max(512),
+  })
+  .strict();
+export const threadModelSelectionSchema = z
+  .discriminatedUnion("mode", [
+    z.object({ mode: z.literal("default") }).strict(),
+    threadModelIdentitySchema.extend({ mode: z.literal("explicit") }).strict(),
+  ])
+  .readonly();
+export type ThreadModelSelection = z.infer<typeof threadModelSelectionSchema>;
+const threadModelRevisionSchema = z.string().uuid();
+const threadModelConfigRevisionSchema = z.string().min(1).max(128);
+export const runtimeModelCatalogSchema = z
+  .object({
+    configRevision: threadModelConfigRevisionSchema,
+    defaultModel: threadModelIdentitySchema.readonly(),
+    items: z
+      .array(
+        threadModelIdentitySchema
+          .extend({
+            available: z.boolean(),
+            reason: z.enum(["unsupported-provider", "unconfigured-provider"]).optional(),
+          })
+          .strict()
+          .readonly(),
+      )
+      .max(2048)
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+export type RuntimeModelCatalog = z.infer<typeof runtimeModelCatalogSchema>;
+const activeThreadModelSchema = threadModelIdentitySchema
+  .extend({
+    reasoning: z.enum(["summary", "text"]).nullable(),
+    contextWindow: z.number().int().positive().optional(),
+  })
+  .strict()
+  .readonly();
+const threadModelStatusFields = {
+  threadId: threadIdSchema,
+  revision: threadModelRevisionSchema,
+  selection: threadModelSelectionSchema,
+  configRevision: threadModelConfigRevisionSchema,
+  active: activeThreadModelSchema.nullable(),
+};
+export const threadModelStatusSchema = z
+  .discriminatedUnion("status", [
+    z
+      .object({
+        ...threadModelStatusFields,
+        active: activeThreadModelSchema,
+        status: z.literal("applied"),
+      })
+      .strict(),
+    z.object({ ...threadModelStatusFields, status: z.literal("pending") }).strict(),
+    z
+      .object({
+        ...threadModelStatusFields,
+        status: z.literal("failed"),
+        reason: z.enum([
+          "model-unavailable",
+          "prepare-failed",
+          "apply-failed",
+          "config-changed",
+          "settlement-failed",
+        ]),
+      })
+      .strict(),
+  ])
+  .readonly();
+export type ThreadModelStatus = z.infer<typeof threadModelStatusSchema>;
+export const threadModelSetParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    expectedRevision: threadModelRevisionSchema,
+    configRevision: threadModelConfigRevisionSchema,
+    selection: threadModelSelectionSchema,
+  })
+  .strict()
+  .readonly();
 
 export const threadListParamsSchema = z
   .object({
@@ -2314,6 +2403,18 @@ export const runtimeMethodSchemasV15 = {
 } as const;
 export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
+  [RUNTIME_METHODS.modelsList]: {
+    params: z.object({}).strict().readonly(),
+    result: runtimeModelCatalogSchema,
+  },
+  [RUNTIME_METHODS.threadModelGet]: {
+    params: z.object(threadRequestFields).strict().readonly(),
+    result: threadModelStatusSchema,
+  },
+  [RUNTIME_METHODS.threadModelSet]: {
+    params: threadModelSetParamsSchema,
+    result: threadModelStatusSchema,
+  },
   // Optional read-only host extension; legacy list payloads and the handshake stay frozen.
   [RUNTIME_METHODS.threadBrowse]: {
     params: threadBrowseParamsSchema,

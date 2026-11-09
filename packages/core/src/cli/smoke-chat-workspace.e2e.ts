@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { RollNodeClient } from "@roll-agent/client-node";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -38,6 +40,239 @@ const requestSchema = z.object({
 });
 const completedSchema = z.object({ status: z.literal("completed"), sessionId: z.string() });
 const listedSchema = z.array(z.object({ id: z.string(), workspace: z.string().optional() }));
+
+test(
+  "real stdio thread model isolation includes MCP Sampling, reload, reopen and CLI continuation",
+  { timeout: 90_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const configured = {
+      ...f.config,
+      llm: {
+        ...f.config.llm,
+        providers: {
+          qwen: {
+            ...f.config.llm.providers.qwen,
+            models: ["qwen3.7-plus", "qwen3.7-flash", "qwen3.8-flash"],
+          },
+        },
+      },
+    };
+    f.save(configured);
+    const initialBytes = readFileSync(f.configPath);
+    const agent = join(f.root, "sampling-agent");
+    mkdirSync(agent);
+    const require = createRequire(import.meta.url);
+    const moduleUrl = (name: string) => JSON.stringify(pathToFileURL(require.resolve(name)).href);
+    const entry = join(agent, "server.mjs");
+    writeFileSync(
+      entry,
+      `
+const {Server} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/index.js")});
+const {StdioServerTransport} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/stdio.js")});
+const {ListToolsRequestSchema,CallToolRequestSchema} = await import(${moduleUrl("@modelcontextprotocol/sdk/types.js")});
+const server=new Server({name:"sampling-fixture",version:"1"},{capabilities:{tools:{}}});
+server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:[{name:"sample",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}));
+server.setRequestHandler(CallToolRequestSchema,async()=>{
+ const result=await server.createMessage({messages:[{role:"user",content:{type:"text",text:"SAMPLING_EVIDENCE"}}],maxTokens:64});
+ return {content:[{type:"text",text:JSON.stringify(result)}]};
+});
+await server.connect(new StdioServerTransport());
+`,
+    );
+    const agents = join(f.source, "agents");
+    mkdirSync(agents, { recursive: true });
+    writeFileSync(
+      join(agents, "agents.json"),
+      JSON.stringify({
+        agents: [
+          {
+            skill: {
+              name: "sampling-fixture",
+              description: "Local sampling evidence",
+              metadata: {},
+            },
+            transport: { type: "stdio", command: process.execPath, args: [entry] },
+            runtime: { ownership: "on-demand" },
+            installPath: agent,
+            registeredAt: new Date(0).toISOString(),
+            status: "idle",
+            source: { type: "local-path", path: agent },
+          },
+        ],
+      }),
+    );
+    const connectRuntime = async () => {
+      const child = f.startNode(f.cli, [
+        "runtime",
+        "serve",
+        "--stdio",
+        "--config",
+        f.configPath,
+        "--config-workspace",
+        f.source,
+      ]);
+      const client = await RollNodeClient.connect({
+        transport: {
+          stdin: child.child.stdin,
+          stdout: child.child.stdout,
+          onExit: (listener) => {
+            child.child.once("exit", listener);
+          },
+          close: () => {
+            child.child.stdin.end();
+          },
+        },
+      });
+      return { child, client };
+    };
+    const { child, client } = await connectRuntime();
+    const completed = new Set<string>();
+    const off = client.onEvent((event) => {
+      if (event.turnId && event.event.type === "turn.completed") completed.add(event.turnId);
+    });
+    const turn = async (threadId: string, text: string) => {
+      const turnId = randomUUID();
+      await client.request("turn.start", {
+        requestId: randomUUID(),
+        threadId,
+        turnId,
+        input: { text },
+      });
+      await f.wait(child, () => completed.has(turnId), `completed ${text}`);
+    };
+    let a = "";
+    try {
+      const catalog = await client.listModels();
+      assert.equal(catalog.items.length, 3);
+      assert.doesNotMatch(JSON.stringify(catalog), /fixture-a|baseUrl|apiKey/u);
+      a = (await client.request("thread.create", { requestId: randomUUID(), title: "A" })).thread
+        .id;
+      const b = (await client.request("thread.create", { requestId: randomUUID(), title: "B" }))
+        .thread.id;
+      const params = {
+        requestId: randomUUID(),
+        threadId: a,
+        expectedRevision: (await client.getThreadModel({ threadId: a })).revision,
+        configRevision: catalog.configRevision,
+        selection: { mode: "explicit", provider: "qwen", model: "qwen3.7-flash" } as const,
+      };
+      const database = new DatabaseSync(join(f.history, "threads.db"));
+      const stored = () => database.prepare("SELECT * FROM threads ORDER BY id").all();
+      const beforeSelection = stored();
+      const selected = await client.setThreadModel(params);
+      assert.deepEqual(stored(), beforeSelection, "model selection must not write thread metadata");
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 12);
+      assert.equal(
+        database
+          .prepare("PRAGMA table_info(threads)")
+          .all()
+          .some((row) => String(row.name).startsWith("model_selection")),
+        false,
+      );
+      database.close();
+      assert.equal(selected.status, "applied");
+      assert.deepEqual(await client.setThreadModel(params), selected);
+      await assert.rejects(client.setThreadModel({ ...params, selection: { mode: "default" } }));
+      await assert.rejects(
+        client.setThreadModel({ ...params, requestId: randomUUID(), configRevision: "stale" }),
+      );
+      await turn(a, "CALL_SAMPLING_A");
+      await turn(b, "CALL_SAMPLING_B");
+      const sampling = f.requests.filter(
+        (request) =>
+          JSON.stringify(request.messages).includes("SAMPLING_EVIDENCE") && request.stream !== true,
+      );
+      assert.deepEqual(
+        sampling.map((request) => request.model),
+        ["qwen3.7-flash", "qwen3.7-plus"],
+      );
+      assert.deepEqual(readFileSync(f.configPath), initialBytes);
+      await client.request("thread.detach", { requestId: randomUUID(), threadId: a });
+      await assert.rejects(client.getThreadModel({ threadId: a }), /尚未打开|关闭/u);
+      await assert.rejects(
+        client.setThreadModel({ ...params, requestId: randomUUID() }),
+        /尚未打开|关闭/u,
+      );
+      await assert.rejects(client.getThreadModel({ threadId: a }), /尚未打开|关闭/u);
+      assert.equal(
+        (await client.browseThreads()).items.find((item) => item.thread.id === a)?.occupancy.status,
+        "available",
+      );
+      const peer = await f.run(["CLI after rejected late selection", "--session", a, "--json"]);
+      assert.equal(peer.status, 0, peer.stderr);
+      await client.request("thread.open", { threadId: a });
+      assert.equal((await client.getThreadModel({ threadId: a })).active?.model, "qwen3.7-plus");
+      await assert.rejects(client.setThreadModel({ ...params, requestId: randomUUID() }));
+      // A third-party app can deliberately restore its own saved choice after opening.
+      await client.setThreadModel({
+        ...params,
+        requestId: randomUUID(),
+        expectedRevision: (await client.getThreadModel({ threadId: a })).revision,
+      });
+      f.save({ ...configured, llm: { ...configured.llm, defaultModel: "qwen3.8-flash" } });
+      await client.request("runtime.modelConfig.reload", { requestId: randomUUID() });
+      for (let i = 0; i < 100; i++) {
+        if ((await client.request("runtime.modelConfig.get", {})).status !== "pending") break;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.equal((await client.getThreadModel({ threadId: a })).active?.model, "qwen3.7-flash");
+      assert.equal((await client.getThreadModel({ threadId: b })).active?.model, "qwen3.8-flash");
+      await turn(a, "after default reload");
+      const latest = await client.listModels();
+      const status = await client.getThreadModel({ threadId: a });
+      assert.equal(
+        (
+          await client.setThreadModel({
+            requestId: randomUUID(),
+            threadId: a,
+            expectedRevision: status.revision,
+            configRevision: latest.configRevision,
+            selection: { mode: "default" },
+          })
+        ).active?.model,
+        "qwen3.8-flash",
+      );
+      await client.setThreadModel({
+        requestId: randomUUID(),
+        threadId: a,
+        expectedRevision: (await client.getThreadModel({ threadId: a })).revision,
+        configRevision: latest.configRevision,
+        selection: params.selection,
+      });
+    } finally {
+      off();
+      await client.shutdown();
+    }
+    const restarted = await connectRuntime();
+    try {
+      await restarted.client.request("thread.open", { threadId: a });
+      const fresh = await restarted.client.getThreadModel({ threadId: a });
+      assert.deepEqual(fresh.selection, { mode: "default" });
+      assert.equal(fresh.active?.model, "qwen3.8-flash");
+    } finally {
+      await restarted.client.shutdown();
+    }
+    const continued = await f.run(["CLI continuation", "--session", a, "--json"]);
+    assert.equal(continued.status, 0, continued.stderr);
+    assert.equal(f.requests.at(-1)?.model, "qwen3.8-flash");
+    assert.match(JSON.stringify(f.requests.at(-1)?.messages), /CALL_SAMPLING_A/u);
+    const temporary = await f.run([
+      "CLI temporary override",
+      "--session",
+      a,
+      "--model",
+      "qwen3.7-flash",
+      "--json",
+    ]);
+    assert.equal(temporary.status, 0, temporary.stderr);
+    assert.equal(f.requests.at(-1)?.model, "qwen3.7-flash");
+    const freshCli = await f.run(["CLI default again", "--session", a, "--json"]);
+    assert.equal(freshCli.status, 0, freshCli.stderr);
+    assert.equal(f.requests.at(-1)?.model, "qwen3.8-flash");
+    assert.deepEqual(f.failures, []);
+  },
+);
 
 async function fixture(t: TestContext) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "roll chat workspace-")));
@@ -107,6 +342,8 @@ globalThis.fetch = (input, options) => {
         );
         const toolResult = body.messages.some((message) => message.role === "tool");
         const createSchedule = prompt.includes("CREATE_SCHEDULE") && !toolResult;
+        const sampleTool = body.tools?.find((tool) => tool.function.name.endsWith("sample"));
+        const callSampling = prompt.includes("CALL_SAMPLING") && !toolResult;
         if (createSchedule) {
           assert.ok(scheduleTool, "interactive chat must offer schedule creation");
         }
@@ -132,7 +369,21 @@ globalThis.fetch = (input, options) => {
                 },
               ],
             }
-          : { content: `workspace-reply-${String(requests.length)}` };
+          : callSampling
+            ? {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "sampling-proof",
+                    type: "function",
+                    function: {
+                      name: sampleTool?.function.name,
+                      arguments: "{}",
+                    },
+                  },
+                ],
+              }
+            : { content: `workspace-reply-${String(requests.length)}` };
         const frame = {
           id: "workspace-fixture",
           object: "chat.completion.chunk",
@@ -149,7 +400,7 @@ globalThis.fetch = (input, options) => {
                 {
                   index: 0,
                   delta: {},
-                  finish_reason: createSchedule ? "tool_calls" : "stop",
+                  finish_reason: createSchedule || callSampling ? "tool_calls" : "stop",
                 },
               ],
             },
