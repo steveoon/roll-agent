@@ -15,6 +15,8 @@ export function createChatFastModeControl(options: {
   getEnabled(): boolean;
   prepareEnable(): Promise<void>;
   apply(enabled: boolean): void;
+  /** Validate that asynchronous preparation still belongs to the selected configuration. */
+  guard?: () => () => void;
 }): ChatFastModeControl {
   let revision = 0;
   let requestedEnabled: boolean | undefined;
@@ -26,8 +28,10 @@ export function createChatFastModeControl(options: {
       const requestedRevision = ++revision;
       requestedEnabled = enabled;
       try {
+        const assertCurrent = options.guard?.();
         if (enabled) await options.prepareEnable();
         if (requestedRevision !== revision) return false;
+        assertCurrent?.();
         options.apply(enabled);
         return true;
       } catch (error) {

@@ -216,6 +216,7 @@ export const RUNTIME_METHODS = {
   initialize: "initialize",
   clientCapabilitiesSet: "client.capabilities.set",
   threadList: "thread.list",
+  threadBrowse: "thread.browse",
   threadCreate: "thread.create",
   threadOpen: "thread.open",
   threadSnapshot: "thread.snapshot",
@@ -226,6 +227,9 @@ export const RUNTIME_METHODS = {
   threadCapabilities: "thread.capabilities",
   modelConfigGet: "runtime.modelConfig.get",
   modelConfigReload: "runtime.modelConfig.reload",
+  modelsList: "runtime.models.list",
+  threadModelGet: "thread.model.get",
+  threadModelSet: "thread.model.set",
   turnStart: "turn.start",
   turnCancel: "turn.cancel",
   approvalRespond: "approval.respond",
@@ -1253,6 +1257,92 @@ export type RuntimeModelConfigIdentity = Readonly<z.infer<typeof runtimeModelCon
 export type RuntimeModelConfigFailure = z.infer<typeof runtimeModelConfigFailureSchema>;
 const threadRequestFields = { threadId: threadIdSchema } as const;
 
+const threadModelIdentitySchema = z
+  .object({
+    provider: z.string().min(1).max(128),
+    model: z.string().min(1).max(512),
+  })
+  .strict();
+export const threadModelSelectionSchema = z
+  .discriminatedUnion("mode", [
+    z.object({ mode: z.literal("default") }).strict(),
+    threadModelIdentitySchema.extend({ mode: z.literal("explicit") }).strict(),
+  ])
+  .readonly();
+export type ThreadModelSelection = z.infer<typeof threadModelSelectionSchema>;
+const threadModelRevisionSchema = z.string().uuid();
+const threadModelConfigRevisionSchema = z.string().min(1).max(128);
+export const runtimeModelCatalogSchema = z
+  .object({
+    configRevision: threadModelConfigRevisionSchema,
+    defaultModel: threadModelIdentitySchema.readonly(),
+    items: z
+      .array(
+        threadModelIdentitySchema
+          .extend({
+            available: z.boolean(),
+            reason: z.enum(["unsupported-provider", "unconfigured-provider"]).optional(),
+          })
+          .strict()
+          .readonly(),
+      )
+      .max(2048)
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+export type RuntimeModelCatalog = z.infer<typeof runtimeModelCatalogSchema>;
+const activeThreadModelSchema = threadModelIdentitySchema
+  .extend({
+    reasoning: z.enum(["summary", "text"]).nullable(),
+    contextWindow: z.number().int().positive().optional(),
+  })
+  .strict()
+  .readonly();
+const threadModelStatusFields = {
+  threadId: threadIdSchema,
+  revision: threadModelRevisionSchema,
+  selection: threadModelSelectionSchema,
+  configRevision: threadModelConfigRevisionSchema,
+  active: activeThreadModelSchema.nullable(),
+};
+export const threadModelStatusSchema = z
+  .discriminatedUnion("status", [
+    z
+      .object({
+        ...threadModelStatusFields,
+        active: activeThreadModelSchema,
+        status: z.literal("applied"),
+      })
+      .strict(),
+    z.object({ ...threadModelStatusFields, status: z.literal("pending") }).strict(),
+    z
+      .object({
+        ...threadModelStatusFields,
+        status: z.literal("failed"),
+        reason: z.enum([
+          "model-unavailable",
+          "prepare-failed",
+          "apply-failed",
+          "config-changed",
+          "settlement-failed",
+        ]),
+      })
+      .strict(),
+  ])
+  .readonly();
+export type ThreadModelStatus = z.infer<typeof threadModelStatusSchema>;
+export const threadModelSetParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    expectedRevision: threadModelRevisionSchema,
+    configRevision: threadModelConfigRevisionSchema,
+    selection: threadModelSelectionSchema,
+  })
+  .strict()
+  .readonly();
+
 export const threadListParamsSchema = z
   .object({
     cursor: z.string().regex(/^\d+$/u).optional(),
@@ -1264,6 +1354,53 @@ export const threadListParamsSchema = z
 export const threadListResultSchema = z
   .object({
     items: z.array(threadSummarySchema),
+    nextCursor: z.string().regex(/^\d+$/u).nullable(),
+  })
+  .strict()
+  .readonly();
+
+/** Host-normalized identity; Runtime persists it without interpreting paths. */
+export const threadWorkspaceSchema = z.string().min(1).max(4096);
+
+/** Shared host metadata stays outside frozen thread summaries and legacy list responses. */
+export const sessionOccupancySchema = z
+  .object({
+    status: z.enum(["available", "occupied", "unknown"]),
+    owner: z
+      .object({
+        kind: z.string().min(1).max(64),
+        label: z.string().min(1).max(200),
+        workspace: threadWorkspaceSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .readonly();
+export type SessionOccupancy = z.infer<typeof sessionOccupancySchema>;
+
+export const threadBrowseParamsSchema = z
+  .object({
+    workspace: threadWorkspaceSchema.nullable().optional(),
+    cursor: z.string().regex(/^\d+$/u).optional(),
+    limit: pageSizeSchema,
+  })
+  .strict()
+  .readonly();
+export const threadBrowseResultSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            thread: threadSummarySchema,
+            workspace: threadWorkspaceSchema.nullable(),
+            occupancy: sessionOccupancySchema,
+          })
+          .strict()
+          .readonly(),
+      )
+      .max(500),
     nextCursor: z.string().regex(/^\d+$/u).nullable(),
   })
   .strict()
@@ -2266,6 +2403,23 @@ export const runtimeMethodSchemasV15 = {
 } as const;
 export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
+  [RUNTIME_METHODS.modelsList]: {
+    params: z.object({}).strict().readonly(),
+    result: runtimeModelCatalogSchema,
+  },
+  [RUNTIME_METHODS.threadModelGet]: {
+    params: z.object(threadRequestFields).strict().readonly(),
+    result: threadModelStatusSchema,
+  },
+  [RUNTIME_METHODS.threadModelSet]: {
+    params: threadModelSetParamsSchema,
+    result: threadModelStatusSchema,
+  },
+  // Optional read-only host extension; legacy list payloads and the handshake stay frozen.
+  [RUNTIME_METHODS.threadBrowse]: {
+    params: threadBrowseParamsSchema,
+    result: threadBrowseResultSchema,
+  },
   [RUNTIME_METHODS.reasoningTextSubscribe]: {
     params: z.object({}).strict().readonly(),
     result: z.object({ subscribed: z.boolean() }).strict().readonly(),

@@ -83,6 +83,35 @@ Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同
 `limits.maxFrameBytes` 表示 Runtime 接收 Client 出站帧的上限；初始化后的 Client 出站上限
 仍取本地预算与该值的较小值，不能把 17 MiB 入站要求解释为同等的出站额度。
 
+
+## 会话内模型选择（可选扩展）
+
+| 方法 | 参数 | 返回 |
+|---|---|---|
+| `runtime.models.list` | `{}` | `{configRevision, defaultModel, items}`，仅安全的配置模型标识和可用性 |
+| `thread.model.get` | `{threadId}` | 已打开会话的 `{threadId, revision, configRevision, selection, status, active, reason?}` |
+| `thread.model.set` | `{requestId, threadId, expectedRevision, configRevision, selection}` | 同 get；接受后可能为 pending |
+
+`selection` 是 `{mode:"default"}` 或 `{mode:"explicit",provider,model}`。会话选择仅存在于内存，
+detach、关闭和 Runtime 重启后丢弃，不写配置或会话数据库。App 可自行保存标识，重开后读取
+最新候选与 revision，再显式恢复。CLI 不自动继承。此功能没有新增数据库迁移。
+
+`revision` 为当前会话实例的不透明 UUID，选择/重载后变化；`configRevision` 为已加载配置快照标识。
+过期 revision、未知候选或无效配置快照返回 `INVALID_PARAMS`，不可用宿主/会话返回
+`CAPABILITY_UNAVAILABLE`；scheduled 记录不能修改。get 和 set 均不自动打开会话；set 必须在
+显式打开且仍可写的会话上调用，detach 后迟到的首次请求不会重新占用会话。set 遵守现有
+requestId 幂等契约；重复请求返回原始应答，当前状态用 get 查询。
+
+`status` 是 `applied | pending | failed`。`active` 为 `{provider,model,reasoning,contextWindow?}`，
+尚未建立时为 null；applied 必须非空。reasoning 为 summary/text/null。失败 reason 仅为
+model-unavailable、prepare-failed、apply-failed、config-changed、settlement-failed。
+已有轮次保持原模型，结算后应用 pending；准备/应用失败阻止下一轮，可通过有效选择恢复。
+关闭、过期准备或投影失败不能绕过门禁。默认重载保留并验证当前实例内的显式选择。
+
+这些是可选的 1.6 方法，不能仅按 Wire 版本假定可用；旧宿主可能返回 method-not-found 或
+CAPABILITY_UNAVAILABLE。客户端使用 get 查询应用结果，无新增选择事件。切换后的推理类型
+以 active.reasoning 为准，握手能力保持既有含义；文本订阅仍需显式启用，可在选择文本模型后重新申请。
+
 ## 初始化
 
 客户端必须首先且仅调用一次 `initialize`：
@@ -229,6 +258,7 @@ Interaction 链路必须分开以下身份：
 | `initialize` | 握手 | 版本列表、客户端信息 | 版本、实例、features、limits |
 | `client.capabilities.set` | `"1.4"` / `"1.3"` / `"1.2"` 握手扩展 | `revision`, `serverRequestMethods` | revision 与 Runtime registry 交集 |
 | `thread.list` | 只读 | `cursor?`, `limit?` | Thread 分页 |
+| `thread.browse` | 1.6 可选只读 | `workspace?`, `cursor?`, `limit?` | Thread 分页及项目归属、占用状态 |
 | `thread.create` | mutation | `requestId`, `title?` | `ThreadSummary` |
 | `thread.open` | 附着/恢复 | `threadId` | `ThreadSnapshot` |
 | `thread.snapshot` | 只读 | 两个独立 before sequence、`limit?` | `ThreadSnapshot` |
@@ -256,6 +286,18 @@ mutation 幂等缓存，也不应被客户端自动重试。`turn.start` 的输�
 ```json
 { "text": "", "attachments": ["00000000-0000-4000-8000-0000000000a1"] }
 ```
+
+## 项目会话浏览
+
+`thread.browse` 是可选的 Protocol 1.6 扩展；旧宿主可能返回 method not found，初始化 features
+与 `thread.list` 的已有响应格式保持不变。`workspace` 省略表示全部项目，`null` 只选未分类会话，
+字符串精确匹配宿主已规范化的工作区身份；`limit` 为 1..500，默认 100，`cursor` 是十进制分页位置。
+
+每项返回 `{ thread: ThreadSummary, workspace: string | null, occupancy }`，其中工作区身份最多
+4096 字符。`occupancy.status` 为 `available`、`occupied` 或 `unknown`，可选的 `owner` 只含
+`kind`、`label` 和 `workspace`，不暴露 PID、进程身份令牌或凭证。浏览不获取占用、不迁移旧库、
+不清理死亡进程记录。探活失败或占用账本不可读时返回 `unknown`。状态仅作展示，客户端在用户选择
+恢复后仍须通过 `thread.open` 原子获取占用；读取历史快照使用 `thread.snapshot`。
 
 ## 模型配置应用
 

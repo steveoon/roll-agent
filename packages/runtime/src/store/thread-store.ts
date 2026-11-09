@@ -2,6 +2,7 @@ import {
   SessionClaims,
   SessionOccupiedError,
   canonicalSessionDatabasePath,
+  inspectSessionOccupancy,
   type SessionClaim,
 } from "../ownership/session-claims.ts";
 import type { SessionOwnershipHost } from "../host-contracts/session-ownership.ts";
@@ -36,6 +37,8 @@ import {
   type RuntimeDurableEventV16,
   type RuntimeEventCursor,
   type RuntimeEventId,
+  type SessionOccupancy,
+  threadWorkspaceSchema,
 } from "@roll-agent/protocol";
 import {
   parsePersistedToolExecutionRecord,
@@ -92,8 +95,8 @@ import {
 } from "./turn-input.ts";
 import type { ExplicitSkillCheckpointV1 } from "../engine/explicit-skill-context.ts";
 
-// V11 introduces plain task-summary checkpoints. Older readers must refuse them.
-export const THREAD_STORE_SCHEMA_VERSION = 11;
+// V12 adds optional workspace attribution; model selection remains process-local.
+export const THREAD_STORE_SCHEMA_VERSION = 12;
 const SCHEMA_VERSION = THREAD_STORE_SCHEMA_VERSION;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
@@ -186,6 +189,7 @@ export interface ThreadRecord {
   readonly updatedAt: string;
   readonly origin: ThreadOrigin;
   readonly derivedFrom?: ThreadDerivedFrom;
+  readonly workspace?: string;
 }
 
 export interface CreateThreadInput {
@@ -194,16 +198,20 @@ export interface CreateThreadInput {
   readonly model?: string;
   readonly origin?: ThreadOrigin;
   readonly derivedFrom?: ThreadDerivedFrom;
+  readonly workspace?: string;
 }
 
 export interface ListThreadsOptions {
   readonly origin?: ThreadOrigin["kind"];
+  /** Undefined selects all workspaces; null selects unclassified history. */
+  readonly workspace?: string | null;
 }
 
 export interface ForkThreadSnapshotInput {
   readonly id?: string;
   readonly title?: string;
   readonly model?: string;
+  readonly workspace?: string;
 }
 
 export interface ThreadSnapshot {
@@ -240,6 +248,7 @@ interface ThreadRow {
   readonly updated_at: string;
   readonly origin_json?: string | null;
   readonly derived_from_json?: string | null;
+  readonly workspace?: string | null;
 }
 
 interface ForeignKeyRow {
@@ -480,6 +489,7 @@ function toRecord(row: ThreadRow): ThreadRecord {
     ...(row.derived_from_json
       ? { derivedFrom: threadDerivedFromSchema.parse(JSON.parse(row.derived_from_json)) }
       : {}),
+    ...(row.workspace == null ? {} : { workspace: threadWorkspaceSchema.parse(row.workspace) }),
   };
 }
 
@@ -559,10 +569,14 @@ export interface ThreadStoreOptions {
   readonly now?: () => Date;
   readonly readOnly?: boolean;
   readonly ownership?: SessionOwnershipHost;
+  /** Advisory liveness probe for read-only browsing; does not grant write ownership. */
+  readonly ownershipProbe?: Pick<SessionOwnershipHost, "probe">;
 }
 
 export class ThreadStore {
   private readonly db: DatabaseSync;
+  private readonly databasePath: string;
+  private readonly ownershipProbe: Pick<SessionOwnershipHost, "probe">;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
   private readonly claims: SessionClaims | undefined;
@@ -572,6 +586,8 @@ export class ThreadStore {
     this.now = options.now ?? (() => new Date());
     this.readOnly = options.readOnly ?? false;
     const resolved = expandTilde(dir);
+    this.databasePath = resolve(resolved, "threads.db");
+    this.ownershipProbe = options.ownershipProbe ?? options.ownership ?? { probe: () => "unknown" };
     this.claims = undefined;
     if (options.readOnly) {
       this.db = new DatabaseSync(resolve(resolved, "threads.db"), { readOnly: true });
@@ -673,6 +689,12 @@ export class ThreadStore {
           if (!columns.some((existing) => existing.name === column)) {
             this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} TEXT`);
           }
+        }
+      }
+      if (versionRow.user_version < 12) {
+        const columns = this.db.prepare("PRAGMA table_info(threads)").all();
+        if (!columns.some((column) => column.name === "workspace")) {
+          this.db.exec("ALTER TABLE threads ADD COLUMN workspace TEXT");
         }
       }
       if (!messagesHaveThreadDeleteCascade(this.db)) {
@@ -1036,11 +1058,13 @@ export class ThreadStore {
       input.derivedFrom === undefined
         ? undefined
         : threadDerivedFromSchema.parse(input.derivedFrom);
+    const workspace =
+      input.workspace === undefined ? null : threadWorkspaceSchema.parse(input.workspace);
     this.db.exec("SAVEPOINT create_thread");
     try {
       this.db
         .prepare(
-          "INSERT INTO threads (id, title, model, created_at, updated_at, origin_json, derived_from_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO threads (id, title, model, created_at, updated_at, origin_json, derived_from_json, workspace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           id,
@@ -1050,6 +1074,7 @@ export class ThreadStore {
           now,
           JSON.stringify(origin),
           derivedFrom === undefined ? null : JSON.stringify(derivedFrom),
+          workspace,
         );
       this.db
         .prepare("INSERT INTO thread_transcript_state (thread_id, completeness) VALUES (?, ?)")
@@ -1084,13 +1109,25 @@ export class ThreadStore {
     return row ? toRecord(row) : undefined;
   }
 
+  /** Advisory status only; writable resume must still acquire its atomic session claim. */
+  inspectSessionOccupancy(id: string): SessionOccupancy {
+    return (
+      this.claims?.inspect(id) ??
+      inspectSessionOccupancy(this.databasePath, id, this.ownershipProbe)
+    );
+  }
+
   listThreads(options: ListThreadsOptions = {}): ThreadRecord[] {
     const rows = this.db
       .prepare("SELECT * FROM threads ORDER BY updated_at DESC, rowid DESC")
       .all() as unknown as ThreadRow[];
     return rows
       .map(toRecord)
-      .filter((record) => options.origin === undefined || record.origin.kind === options.origin);
+      .filter(
+        (record) =>
+          (options.origin === undefined || record.origin.kind === options.origin) &&
+          (options.workspace === undefined || (record.workspace ?? null) === options.workspace),
+      );
   }
 
   /** Backfill only legacy rows; an explicit source is immutable, including interactive. */
@@ -1278,6 +1315,7 @@ export class ThreadStore {
             : { title: snapshot.thread.title }
           : { title: input.title }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
         origin: { kind: "interactive" },
         derivedFrom: {
           threadId: snapshot.thread.id,

@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } f
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
+import { sessionOccupancySchema, type SessionOccupancy } from "@roll-agent/protocol";
 import type { SessionOwnershipHost } from "../host-contracts/session-ownership.ts";
 
 export const SESSION_OCCUPANCY_CAPABILITY = {
@@ -35,6 +36,56 @@ function safeOwner(claim: Claim | undefined): z.infer<typeof ownerSchema> | unde
   }
 }
 const MAINTENANCE = ""; // Valid thread IDs are nonempty; reserved for the library gate.
+
+function inspectClaims(
+  db: DatabaseSync,
+  threadId: string,
+  host: Pick<SessionOwnershipHost, "probe">,
+): SessionOccupancy {
+  const rows = db
+    .prepare("SELECT * FROM claims WHERE thread_id IN (?, ?) ORDER BY thread_id")
+    .all(MAINTENANCE, threadId);
+  for (const row of rows) {
+    const claim = claimSchema.parse(row);
+    let liveness: ReturnType<SessionOwnershipHost["probe"]> = "unknown";
+    try {
+      liveness = host.probe(claim.identity);
+    } catch {
+      // An inconclusive process probe does not establish availability.
+    }
+    if (liveness === "dead") continue;
+    const status = liveness === "alive" ? "occupied" : "unknown";
+    const owner = safeOwner(claim);
+    const projection = sessionOccupancySchema.safeParse({
+      status,
+      ...(owner === undefined ? {} : { owner }),
+    });
+    return projection.success ? projection.data : { status };
+  }
+  return { status: "available" };
+}
+
+/** Advisory only: opens an existing sidecar read-only and never creates or reaps claims. */
+export function inspectSessionOccupancy(
+  databasePath: string,
+  threadId: string,
+  host: Pick<SessionOwnershipHost, "probe">,
+): SessionOccupancy {
+  let db: DatabaseSync | undefined;
+  try {
+    const canonical = canonicalSessionDatabasePath(databasePath);
+    const sidecar = `${canonical}.occupancy.sqlite`;
+    if (statSync(sidecar, { throwIfNoEntry: false }) === undefined) {
+      return { status: "available" };
+    }
+    db = new DatabaseSync(sidecar, { readOnly: true });
+    return inspectClaims(db, threadId, host);
+  } catch {
+    return { status: "unknown" };
+  } finally {
+    db?.close();
+  }
+}
 
 export class SessionOccupiedError extends Error {
   readonly details: {
@@ -123,6 +174,16 @@ export class SessionClaims {
   private read(threadId: string): Claim | undefined {
     const row = this.db.prepare("SELECT * FROM claims WHERE thread_id = ?").get(threadId);
     return row === undefined ? undefined : claimSchema.parse(row);
+  }
+
+  /** A listing never acquires ownership, deletes dead claims or renews a claim. */
+  inspect(threadId: string): SessionOccupancy {
+    try {
+      this.checkOpen();
+      return inspectClaims(this.db, threadId, this.host);
+    } catch {
+      return { status: "unknown" };
+    }
   }
 
   private checkOpen(): void {

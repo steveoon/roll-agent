@@ -68,6 +68,13 @@ export interface EngineModelSwitch extends Omit<SessionModelSwitch, "contextWind
 }
 
 export interface ConversationEngineOptions {
+  readonly onBeforeModelUse?: AgentSessionOptions["onBeforeModelUse"];
+  readonly onSessionCloseRequested?: AgentSessionOptions["onCloseRequested"];
+  readonly onSessionClosed?: () => void;
+  /** Used by a one-conversation owner; the host must be idempotently disposable. */
+  readonly disposeHostOnSessionClose?: boolean;
+  /** Host-resolved workspace identity; Runtime never discovers product paths. */
+  readonly workspace?: string;
   readonly settings: RuntimeSettings;
   readonly provider: string;
   readonly modelName: string;
@@ -194,6 +201,11 @@ function resolveWorkspaceInstructionsSource(
 }
 
 export class ConversationEngine {
+  private readonly lifecycle: Pick<
+    ConversationEngineOptions,
+    "onBeforeModelUse" | "onSessionCloseRequested" | "onSessionClosed" | "disposeHostOnSessionClose"
+  >;
+  private readonly workspace: string | undefined;
   private readonly settings: RuntimeSettings;
   private readonly agentHost: AgentHost | undefined;
   private readonly store: ThreadStore | undefined;
@@ -244,6 +256,15 @@ export class ConversationEngine {
   private closing = false;
 
   constructor(options: ConversationEngineOptions) {
+    this.lifecycle = {
+      ...(options.onBeforeModelUse ? { onBeforeModelUse: options.onBeforeModelUse } : {}),
+      ...(options.onSessionCloseRequested
+        ? { onSessionCloseRequested: options.onSessionCloseRequested }
+        : {}),
+      ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
+      ...(options.disposeHostOnSessionClose ? { disposeHostOnSessionClose: true } : {}),
+    };
+    this.workspace = options.workspace;
     if (!options.model) throw new Error("ConversationEngine requires a model supplied by its host");
     if (options.agentHost !== undefined && options.sources !== undefined) {
       throw new Error("ConversationEngine accepts either sources or agentHost, not both");
@@ -288,7 +309,12 @@ export class ConversationEngine {
         const context = await this.ensureReady();
         this.assertAcceptingSessions();
         claim?.assert();
-        this.store?.createThread({ ...input, id, model: this.resolveModelName() });
+        this.store?.createThread({
+          ...input,
+          id,
+          model: this.resolveModelName(),
+          ...(this.workspace === undefined ? {} : { workspace: this.workspace }),
+        });
         return this.buildSession(context, id, [], undefined, claim);
       } catch (error) {
         claim?.release();
@@ -333,7 +359,12 @@ export class ConversationEngine {
         const context = await this.ensureReady();
         this.assertAcceptingSessions();
         claim?.assert();
-        this.store.forkSnapshot(snapshot, { ...input, id, model: this.resolveModelName() });
+        this.store.forkSnapshot(snapshot, {
+          ...input,
+          id,
+          model: this.resolveModelName(),
+          ...(this.workspace === undefined ? {} : { workspace: this.workspace }),
+        });
         created = true;
         this.recoverUncoveredToolExecutionContext(id);
         const state = this.store.loadSessionState(id);
@@ -471,6 +502,12 @@ export class ConversationEngine {
     const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,
+      ...(this.lifecycle.onBeforeModelUse
+        ? { onBeforeModelUse: this.lifecycle.onBeforeModelUse }
+        : {}),
+      ...(this.lifecycle.onSessionCloseRequested
+        ? { onCloseRequested: this.lifecycle.onSessionCloseRequested }
+        : {}),
       model: this.activeModel(context),
       ...(this.resolveReasoningPresentation
         ? { resolveReasoningPresentation: this.resolveReasoningPresentation }
@@ -570,8 +607,12 @@ export class ConversationEngine {
         if (this.liveSessions.get(id) === session) {
           this.liveSessions.delete(id);
         }
+        this.lifecycle.onSessionClosed?.();
       },
     });
+    if (this.lifecycle.disposeHostOnSessionClose) {
+      session.addCloseBarrier(() => this.agentHost?.dispose() ?? Promise.resolve());
+    }
     this.liveSessions.set(id, session);
     if (claim !== undefined) this.sessionClaims.set(id, claim);
     return session;
@@ -602,7 +643,10 @@ export class ConversationEngine {
     }
   }
 
-  switchModel(input: EngineModelSwitch): ContextWindowResolution | undefined {
+  switchModel(
+    input: EngineModelSwitch,
+    options: { readonly persistHistoryLabel?: boolean } = {},
+  ): ContextWindowResolution | undefined {
     this.assertAcceptingSessions();
     this.assertModelUpdateIdle();
     this.switchingProviderName = input.provider;
@@ -643,7 +687,7 @@ export class ConversationEngine {
       this.structuredOutputReasoning = input.structuredOutputReasoning;
       for (const id of this.liveSessions.keys()) {
         this.sessionClaims.get(id)?.assert();
-        this.store?.updateModel(id, input.modelName);
+        if (options.persistHistoryLabel !== false) this.store?.updateModel(id, input.modelName);
       }
       return resolution;
     } finally {

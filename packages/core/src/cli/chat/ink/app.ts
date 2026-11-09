@@ -1,3 +1,4 @@
+import type { ChatConfigurationControl, ChatOperationLifecycle } from "../configuration-control.ts";
 import { ConnectionNotice } from "./connection-notice.ts";
 import { runFastModeCommand, type ChatFastModeControl } from "../fast-mode.ts";
 import type { ChatNotice } from "../notice.ts";
@@ -57,7 +58,10 @@ import type { TranscriptHistorySource } from "./transcript-history.ts";
 import { useTranscriptHistory } from "./use-transcript-history.ts";
 
 export interface ChatSessionSwitching {
-  readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
+  readonly loadItems: (
+    currentSessionId: string,
+    allProjects?: boolean,
+  ) => readonly SessionPickerItem[];
   readonly resume: (threadId: string) => Promise<AgentSession>;
   readonly onRetired: (threadId: string) => void;
 }
@@ -99,6 +103,9 @@ export interface ChatModelSwitching {
 }
 
 export interface ChatAppProps {
+  readonly configuration?: ChatConfigurationControl;
+  readonly operationLifecycle?: ChatOperationLifecycle;
+  readonly viewConversation?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
@@ -163,7 +170,7 @@ function errorText(error: unknown): string {
 
 interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly picker: SessionPickerState | undefined;
-  readonly onOpenPicker: () => boolean;
+  readonly onOpenPicker: (allProjects?: boolean) => boolean;
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
   readonly onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => void;
@@ -187,6 +194,10 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const [activeThinkingLevel, setActiveThinkingLevel] = useState<ThinkingLevel>(
     props.initialThinkingLevel ?? "medium",
   );
+  const modelChanged = useCallback((model: string, thinkingLevel: ThinkingLevel) => {
+    setActiveModel(model);
+    setActiveThinkingLevel(thinkingLevel);
+  }, []);
   const changeThinking = useCallback(
     (level: ThinkingLevel) => {
       // Preserve both states when the provider rejects the requested effort.
@@ -214,13 +225,16 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       });
   }, [activeSession, sessionSwitching]);
 
-  const openPicker = useCallback((): boolean => {
-    if (sessionSwitching === undefined) {
-      return false;
-    }
-    setPicker({ items: sessionSwitching.loadItems(activeSession.id), busy: false });
-    return true;
-  }, [sessionSwitching, activeSession]);
+  const openPicker = useCallback(
+    (allProjects = false): boolean => {
+      if (sessionSwitching === undefined) {
+        return false;
+      }
+      setPicker({ items: sessionSwitching.loadItems(activeSession.id, allProjects), busy: false });
+      return true;
+    },
+    [sessionSwitching, activeSession],
+  );
 
   const cancelPicker = useCallback(() => {
     setPicker(undefined);
@@ -277,15 +291,15 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.connection ? { connection: props.connection } : {}),
     ...(props.fastMode ? { fastMode: props.fastMode } : {}),
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    ...(props.configuration ? { configuration: props.configuration } : {}),
+    ...(props.operationLifecycle ? { operationLifecycle: props.operationLifecycle } : {}),
+    ...(props.viewConversation ? { viewConversation: props.viewConversation } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
-    onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => {
-      setActiveModel(model);
-      setActiveThinkingLevel(thinkingLevel);
-    },
+    onModelChanged: modelChanged,
     onScheduleContinue: (next: AgentSession) => {
       retiringRef.current = activeSession;
       setSessionHistory(props.historySource ? undefined : messagesToHistory(next.getMessages()));
@@ -331,6 +345,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     commitHistory,
   } = useSession(session, {
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    ...(props.operationLifecycle ? { operationLifecycle: props.operationLifecycle } : {}),
     onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
@@ -343,6 +358,19 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+  useEffect(
+    () =>
+      props.configuration?.subscribe((snapshot) => {
+        setModel(snapshot.model, session.getContextWindow(), snapshot.thinkingLevel);
+        props.onModelChanged(snapshot.model, snapshot.thinkingLevel);
+        commitHistory(
+          { kind: "notice", id: randomUUID(), tone: "info", text: snapshot.text },
+          true,
+        );
+      }),
+    [props.configuration, setModel, commitHistory, props.onModelChanged],
+  );
+
   const displayHistory = useMemo(
     () => [...archivedHistory.items, ...state.history],
     [archivedHistory.items, state.history],
@@ -809,8 +837,32 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       });
       return;
     }
+    if (name === "/status" || name === "/reload") {
+      if (!props.configuration) notice("当前入口没有可重新加载的配置来源");
+      else if (name === "/status") notice(props.configuration.snapshot().text, "info");
+      else {
+        try {
+          props.configuration.reload();
+        } catch (error) {
+          notice(errorText(error));
+        }
+      }
+      return;
+    }
+    if (name === "/view") {
+      try {
+        notice(props.viewConversation?.(parts[1] ?? "") ?? "当前入口不支持只读查看", "info");
+      } catch (error) {
+        notice(errorText(error));
+      }
+      return;
+    }
     if (name === "/resume") {
-      if (!props.onOpenPicker()) {
+      if (arg !== "" && arg !== "all") {
+        notice("用法: /resume [all]");
+        return;
+      }
+      if (!props.onOpenPicker(arg === "all")) {
         commitHistory({ kind: "notice", id: randomUUID(), text: "当前界面不支持会话切换" });
       }
       return;

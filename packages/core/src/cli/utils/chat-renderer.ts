@@ -27,6 +27,7 @@ import type { ChatUserInputPrompt, ChatUserInputResult } from "./user-input-prom
 type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
 
 export interface ChatApprover {
+  getContextWindow?(): number | undefined;
   approve(approvalId: string): void;
   reject(approvalId: string, reason?: string): void;
   resolveUserInput?(
@@ -429,7 +430,9 @@ export class ChatRenderer {
           computeUsageParts(
             event.totalUsage,
             event.sessionUsage,
-            this.contextWindow,
+            responder.getContextWindow === undefined
+              ? this.contextWindow
+              : responder.getContextWindow(),
             event.contextInputTokens,
           ),
         );

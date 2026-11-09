@@ -272,6 +272,117 @@ test("a model reload failure during turn admission prevents execution after sess
   }
 });
 
+test("async model preparation blocks admission until the host commits and updates reasoning", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  let resolvePreparation: (() => void) | undefined;
+  const preparation = new Promise<void>((resolve) => {
+    resolvePreparation = resolve;
+  });
+  const service = new RuntimeService(fixture.engine, store, {
+    providerReasoning: "text",
+    modelConfig: {
+      initial: { provider: "original", model: "original-model" },
+      async reload(signal) {
+        await preparation;
+        signal?.throwIfAborted();
+        return {
+          status: "applied",
+          model: { provider: "next", model: "next-model" },
+          reasoning: "summary",
+        };
+      },
+    },
+  });
+  try {
+    await service.createThread({ requestId: requestIdSchema.parse(IDS.requestCreate) });
+    assert.equal(
+      (await service.reloadModelConfig({ requestId: requestIdSchema.parse(IDS.requestCacheFirst) }))
+        .status,
+      "pending",
+    );
+    await assert.rejects(
+      service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "must wait for preparation" },
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeServiceError && error.rollCode === "CAPABILITY_UNAVAILABLE",
+    );
+    assert.equal(fixture.sendCount(), 0);
+    resolvePreparation?.();
+    await nextTick();
+    assert.deepEqual(service.getModelConfig().active, {
+      provider: "next",
+      model: "next-model",
+      revision: 1,
+      reasoning: "summary",
+    });
+    assert.equal(
+      service.subscribeReasoningText(() => {}),
+      undefined,
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestSecondTurn,
+        threadId: IDS.thread,
+        turnId: IDS.secondTurn,
+        input: { text: "prepared" },
+      }),
+    );
+    await nextTick();
+    assert.equal(fixture.sendCount(), 1);
+  } finally {
+    resolvePreparation?.();
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("closing a service aborts prepared model application before a late host commit", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  let resolvePreparation: (() => void) | undefined;
+  const preparation = new Promise<void>((resolve) => {
+    resolvePreparation = resolve;
+  });
+  let committed = false;
+  const service = new RuntimeService(fixture.engine, store, {
+    modelConfig: {
+      initial: { provider: "original", model: "original-model" },
+      async reload(signal) {
+        await preparation;
+        signal?.throwIfAborted();
+        committed = true;
+        return { status: "applied", model: { provider: "next", model: "next-model" } };
+      },
+    },
+  });
+  try {
+    assert.equal(
+      (await service.reloadModelConfig({ requestId: requestIdSchema.parse(IDS.requestCacheFirst) }))
+        .status,
+      "pending",
+    );
+    await service.close();
+    resolvePreparation?.();
+    await nextTick();
+    assert.equal(committed, false);
+  } finally {
+    resolvePreparation?.();
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function execution(): ToolExecutionRecord {
   return createToolExecutionRecord({
     id: IDS.operation,

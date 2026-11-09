@@ -1,3 +1,4 @@
+import type { ChatConfigurationControl, ChatOperationLifecycle } from "../configuration-control.ts";
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import type { ChatFastModeControl } from "../fast-mode.ts";
 import { createElement as h } from "react";
@@ -24,16 +25,26 @@ export interface InkReplThreadSummary {
   readonly id: string;
   readonly title: string | undefined;
   readonly updatedAt: string;
+  readonly workspace?: string;
 }
 
 export interface InkReplStore extends Partial<TranscriptHistoryStore> {
   updateTitle(threadId: string, title: string): void;
   countMessages(threadId: string): number;
   deleteThread(threadId: string, options?: { readonly onlyIfEmpty?: boolean }): void;
-  listThreads(options?: { readonly origin?: "interactive" }): readonly InkReplThreadSummary[];
+  listThreads(options?: {
+    readonly origin?: "interactive";
+    readonly workspace?: string | null;
+  }): readonly InkReplThreadSummary[];
 }
 
 export interface RunInkReplOptions {
+  readonly configuration?: ChatConfigurationControl;
+  readonly operationLifecycle?: ChatOperationLifecycle;
+  readonly viewConversation?: (threadId: string) => string;
+  readonly workspace?: string;
+  readonly allProjects?: boolean;
+  readonly occupancyLabel?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
@@ -76,12 +87,21 @@ export async function runInkRepl(
     resumeSession === undefined
       ? undefined
       : {
-          loadItems: (currentSessionId: string) =>
-            buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
-              currentSessionId,
-              countMessages: (threadId: string) => store.countMessages(threadId),
-              now: new Date(),
-            }),
+          loadItems: (currentSessionId: string, allProjects = false) =>
+            buildSessionPickerItems(
+              store.listThreads({
+                origin: "interactive",
+                ...(allProjects || options.allProjects || options.workspace === undefined
+                  ? {}
+                  : { workspace: options.workspace }),
+              }),
+              {
+                currentSessionId,
+                countMessages: (threadId: string) => store.countMessages(threadId),
+                now: new Date(),
+                ...(options.occupancyLabel ? { occupancyLabel: options.occupancyLabel } : {}),
+              },
+            ),
           resume: async (threadId: string) => {
             const next = await resumeSession(threadId);
             active = next;
@@ -168,6 +188,9 @@ export async function runInkRepl(
         ...(options.connection ? { connection: options.connection } : {}),
         ...(options.fastMode ? { fastMode: options.fastMode } : {}),
         ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
+        ...(options.configuration ? { configuration: options.configuration } : {}),
+        ...(options.operationLifecycle ? { operationLifecycle: options.operationLifecycle } : {}),
+        ...(options.viewConversation ? { viewConversation: options.viewConversation } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),
       {

@@ -14,6 +14,7 @@ export interface BuildSessionPickerItemsOptions {
   readonly currentSessionId: string;
   readonly countMessages: (threadId: string) => number;
   readonly now: Date;
+  readonly occupancyLabel?: (threadId: string) => string;
 }
 
 const UNTITLED = "（无标题）";
@@ -50,7 +51,11 @@ export function buildSessionPickerItems(
     .filter((thread) => thread.id !== options.currentSessionId)
     .map((thread) => {
       const relative = formatRelativeTime(thread.updatedAt, options.now);
-      const parts = [relative, `${String(options.countMessages(thread.id))} 条消息`];
+      const parts = [
+        relative,
+        `${String(options.countMessages(thread.id))} 条消息`,
+        options.occupancyLabel?.(thread.id) ?? "",
+      ];
       return {
         id: thread.id,
         title: thread.title ?? UNTITLED,

@@ -1137,6 +1137,31 @@ function replFakeSession(id: string): {
   return { session, sent: () => sent, isClosed: () => closed };
 }
 
+test("basic REPL consumes model commands locally and continues accepting messages", async () => {
+  const f = replFakeSession("model-command");
+  const input = new PassThrough();
+  const done = runRepl(
+    f.session,
+    { countMessages: () => 1 } as unknown as Parameters<typeof runRepl>[1],
+    false,
+    {
+      input,
+      output: sink(),
+    },
+  );
+  try {
+    for (const line of ["/model", "/model test/other", "ordinary message"]) {
+      input.write(`${line}\n`);
+      await delay(20);
+    }
+    input.write("exit\n");
+    await done;
+    assert.deepEqual(f.sent(), ["ordinary message"]);
+  } finally {
+    input.end();
+  }
+});
+
 test("chat Fast CLI flag distinguishes absence from explicit disabling", async () => {
   const args =
     typeof chatCommand.args === "function" ? await chatCommand.args() : await chatCommand.args;
