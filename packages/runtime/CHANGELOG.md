@@ -1,5 +1,16 @@
 # @roll-agent/runtime
 
+## 1.4.0
+
+### Minor Changes
+
+- [#311](https://github.com/steveoon/roll-agent/pull/311) [`f68ffa7`](https://github.com/steveoon/roll-agent/commit/f68ffa7db015305127346161de9dd33ed4dd8b56) Thanks [@steveoon](https://github.com/steveoon)! - Add optional model configuration reload to the local Runtime protocol. A client can apply model and provider changes from the Runtime's bound configuration without reopening conversations. Active turns finish on their original model. The Runtime applies the latest configuration after those turns settle and exposes the application status to clients.
+
+### Patch Changes
+
+- Updated dependencies [[`f68ffa7`](https://github.com/steveoon/roll-agent/commit/f68ffa7db015305127346161de9dd33ed4dd8b56)]:
+  - @roll-agent/protocol@0.12.0
+
 ## 1.3.0
 
 ### Minor Changes
