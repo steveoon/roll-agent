@@ -72,6 +72,7 @@ jobs:
           packages/core/src/ui/schedule-controller.test.ts
           packages/runtime/src/scheduler/host-context.test.ts
           packages/runtime/src/store/thread-store-initialization.test.ts
+          packages/runtime/src/service/runtime-service.test.ts
           packages/runtime/src/scheduler/schedule-calendar.test.ts
           packages/runtime/src/scheduler/schedule-extend.test.ts
           packages/runtime/src/scheduler/schedule-rounds.test.ts
@@ -81,6 +82,7 @@ jobs:
         run: >
           node --experimental-strip-types --experimental-sqlite --test
           packages/core/src/cli/smoke-runtime-config.e2e.ts
+          packages/core/src/cli/smoke-reasoning-display.e2e.ts
 
       - name: Targeted shell tests
         # PowerShell-heavy files share a runner; bound contention without relaxing test deadlines.

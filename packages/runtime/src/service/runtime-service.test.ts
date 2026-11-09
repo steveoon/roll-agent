@@ -79,6 +79,199 @@ function nextTick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+for (const ending of ["approve", "cancel"] as const) {
+  test(`model reload waits for approval and applies the newest request after ${ending}`, async () => {
+    const dir = tempDir();
+    const store = new ThreadStore(dir);
+    const fixture = createFixture(store);
+    let reloads = 0;
+    const service = new RuntimeService(fixture.engine, store, {
+      modelConfig: {
+        initial: { provider: "original", model: "original-model" },
+        reload: () => {
+          reloads++;
+          return { status: "applied", model: { provider: "next", model: "next-model" } };
+        },
+      },
+    });
+    try {
+      await service.createThread({ requestId: requestIdSchema.parse(IDS.requestCreate) });
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "wait for approval" },
+        }),
+      );
+      await nextTick();
+      assert.equal(
+        service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 })
+          .pendingApprovals.length,
+        1,
+      );
+      const first = await service.reloadModelConfig({
+        requestId: requestIdSchema.parse(IDS.requestCacheFirst),
+      });
+      const last = await service.reloadModelConfig({
+        requestId: requestIdSchema.parse(IDS.requestCacheSecond),
+      });
+      assert.equal(first.status, "pending");
+      assert.equal(last.revision, 2);
+      assert.equal(reloads, 0);
+      assert.deepEqual(
+        await service.reloadModelConfig({
+          requestId: requestIdSchema.parse(IDS.requestCacheFirst),
+        }),
+        first,
+      );
+      if (ending === "approve") {
+        await service.respondApproval(
+          runtimeMethodSchemas["approval.respond"].params.parse({
+            requestId: IDS.requestApprove,
+            threadId: IDS.thread,
+            turnId: IDS.firstTurn,
+            approvalId: IDS.approval,
+            decision: "approve",
+          }),
+        );
+      } else {
+        await service.cancelTurn(
+          runtimeMethodSchemas["turn.cancel"].params.parse({
+            requestId: IDS.requestCancel,
+            threadId: IDS.thread,
+            turnId: IDS.firstTurn,
+          }),
+        );
+      }
+      await nextTick();
+      assert.equal(reloads, 1);
+      assert.deepEqual(service.getModelConfig(), {
+        status: "applied",
+        revision: 2,
+        active: { provider: "next", model: "next-model", revision: 2, reasoning: null },
+      });
+      assert.equal(fixture.sendCount(), 1);
+    } finally {
+      fixture.session.cancel();
+      await service.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("model reload failures are redacted and a fresh request can recover", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  let reloads = 0;
+  const service = new RuntimeService(fixture.engine, store, {
+    modelConfig: {
+      initial: { provider: "original", model: "original-model" },
+      reload: () => {
+        reloads++;
+        if (reloads === 1) throw new Error("private-provider-credential-sentinel");
+        return { status: "applied", model: { provider: "next", model: "next-model" } };
+      },
+    },
+  });
+  try {
+    await service.createThread({ requestId: requestIdSchema.parse(IDS.requestCreate) });
+    const failed = await service.reloadModelConfig({
+      requestId: requestIdSchema.parse(IDS.requestCacheFirst),
+    });
+    assert.deepEqual(failed, {
+      status: "failed",
+      reason: "apply-failed",
+      revision: 1,
+      active: { provider: "original", model: "original-model", revision: 0, reasoning: null },
+    });
+    await assert.rejects(
+      service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "must wait" },
+        }),
+      ),
+      (error: unknown) => error instanceof RuntimeServiceError && error.retryable,
+    );
+    assert.equal(fixture.sendCount(), 0);
+    assert.deepEqual(
+      await service.reloadModelConfig({ requestId: requestIdSchema.parse(IDS.requestCacheFirst) }),
+      failed,
+    );
+    assert.equal(reloads, 1);
+    assert.equal(
+      (
+        await service.reloadModelConfig({
+          requestId: requestIdSchema.parse(IDS.requestCacheSecond),
+        })
+      ).status,
+      "applied",
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestSecondTurn,
+        threadId: IDS.thread,
+        turnId: IDS.secondTurn,
+        input: { text: "recovered" },
+      }),
+    );
+    await nextTick();
+    assert.equal(fixture.sendCount(), 1);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a model reload failure during turn admission prevents execution after session lookup", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  const service = new RuntimeService(fixture.engine, store, {
+    modelConfig: {
+      initial: { provider: "original", model: "original-model" },
+      reload: () => ({ status: "failed", reason: "invalid-config" }),
+    },
+  });
+  try {
+    await service.createThread({ requestId: requestIdSchema.parse(IDS.requestCreate) });
+    const starting = service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "must not execute on the old model" },
+      }),
+    );
+    const rejection = assert.rejects(
+      starting,
+      (error: unknown) =>
+        error instanceof RuntimeServiceError && error.rollCode === "CAPABILITY_UNAVAILABLE",
+    );
+    assert.equal(
+      (
+        await service.reloadModelConfig({
+          requestId: requestIdSchema.parse(IDS.requestCacheFirst),
+        })
+      ).status,
+      "failed",
+    );
+    await rejection;
+    await nextTick();
+    assert.equal(fixture.sendCount(), 0);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function execution(): ToolExecutionRecord {
   return createToolExecutionRecord({
     id: IDS.operation,

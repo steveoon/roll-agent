@@ -536,6 +536,31 @@ test("runtime method registry exposes the complete v1 surface", () => {
   );
 });
 
+test("model reload is a strict optional 1.6 extension", () => {
+  for (const method of [RUNTIME_METHODS.modelConfigGet, RUNTIME_METHODS.modelConfigReload]) {
+    assert.equal(isRuntimeMethodAvailable("1.5", method), false);
+    assert.equal(isRuntimeMethodAvailable("1.6", method), true);
+  }
+  const reload = runtimeMethodSchemas[RUNTIME_METHODS.modelConfigReload];
+  assert.deepEqual(reload.params.parse({ requestId: IDS.turn }), { requestId: IDS.turn });
+  assert.throws(() => reload.params.parse({ requestId: IDS.turn, configPath: "/private/config" }));
+  const active = { provider: "qwen", model: "qwen3.7-plus", revision: 0, reasoning: null };
+  assert.deepEqual(reload.result.parse({ status: "pending", revision: 1, active }), {
+    status: "pending",
+    revision: 1,
+    active,
+  });
+  assert.throws(() => reload.result.parse({ status: "failed", revision: 1, active }));
+  assert.throws(() =>
+    reload.result.parse({
+      status: "failed",
+      revision: 1,
+      active,
+      reason: "sensitive raw error",
+    }),
+  );
+});
+
 test("runtime event envelope is ordered by runtime instance and sequence", () => {
   const input = {
     protocolVersion: RUNTIME_PROTOCOL_VERSION,

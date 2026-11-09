@@ -224,6 +224,8 @@ export const RUNTIME_METHODS = {
   threadDelete: "thread.delete",
   threadDetach: "thread.detach",
   threadCapabilities: "thread.capabilities",
+  modelConfigGet: "runtime.modelConfig.get",
+  modelConfigReload: "runtime.modelConfig.reload",
   turnStart: "turn.start",
   turnCancel: "turn.cancel",
   approvalRespond: "approval.respond",
@@ -1214,6 +1216,41 @@ export const threadSnapshotSchema = threadSnapshotV16Schema;
 
 const pageSizeSchema = z.number().int().min(1).max(500).default(100);
 const requestFields = { requestId: requestIdSchema } as const;
+
+const modelConfigRevisionSchema = z.int().nonnegative();
+const runtimeModelConfigIdentitySchema = z
+  .object({ provider: z.string().min(1), model: z.string().min(1) })
+  .strict();
+const runtimeModelConfigFields = {
+  revision: modelConfigRevisionSchema,
+  active: runtimeModelConfigIdentitySchema
+    .extend({
+      revision: modelConfigRevisionSchema,
+      reasoning: z.enum(["summary", "text"]).nullable(),
+    })
+    .readonly(),
+};
+const runtimeModelConfigFailureSchema = z.enum([
+  "invalid-config",
+  "restart-required",
+  "apply-failed",
+]);
+export const runtimeModelConfigStatusSchema = z
+  .discriminatedUnion("status", [
+    z.object({ ...runtimeModelConfigFields, status: z.literal("applied") }).strict(),
+    z.object({ ...runtimeModelConfigFields, status: z.literal("pending") }).strict(),
+    z
+      .object({
+        ...runtimeModelConfigFields,
+        status: z.literal("failed"),
+        reason: runtimeModelConfigFailureSchema,
+      })
+      .strict(),
+  ])
+  .readonly();
+export type RuntimeModelConfigStatus = z.infer<typeof runtimeModelConfigStatusSchema>;
+export type RuntimeModelConfigIdentity = Readonly<z.infer<typeof runtimeModelConfigIdentitySchema>>;
+export type RuntimeModelConfigFailure = z.infer<typeof runtimeModelConfigFailureSchema>;
 const threadRequestFields = { threadId: threadIdSchema } as const;
 
 export const threadListParamsSchema = z
@@ -2245,6 +2282,15 @@ export const runtimeMethodSchemasV16 = {
   [RUNTIME_METHODS.threadSnapshot]: {
     params: threadSnapshotParamsV13Schema,
     result: threadSnapshotV16Schema,
+  },
+  // Optional host extension. Discover support by calling get; the 1.6 handshake stays unchanged.
+  [RUNTIME_METHODS.modelConfigGet]: {
+    params: z.object({}).strict().readonly(),
+    result: runtimeModelConfigStatusSchema,
+  },
+  [RUNTIME_METHODS.modelConfigReload]: {
+    params: z.object(requestFields).strict().readonly(),
+    result: runtimeModelConfigStatusSchema,
   },
 } as const;
 export const runtimeMethodSchemas = runtimeMethodSchemasV16;

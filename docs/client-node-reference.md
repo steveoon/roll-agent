@@ -295,12 +295,17 @@ Replay notification 只恢复安全事件投影，不能重新触发 Approval、
 
 客户端只会重试同时满足以下条件的请求：
 
-1. 方法属于 `thread.list`、`thread.snapshot`、`thread.capabilities` 或 `operation.get`；
+1. 方法属于 `thread.list`、`thread.snapshot`、`thread.capabilities`、`operation.get`、
+   `operation.result.get`、`approval.preview` 或 `runtime.modelConfig.get`；
 2. 服务端返回 `RollRpcError` 且 `data.retryable === true`；
 3. 尚未达到 `maxReadRetries`。
 
 `thread.open` 会附着/恢复 Session，不自动重试。Mutation 和 `turn.start` 等副作用请求也
 不会自动重试。
+
+本地 1.6 客户端可用 `client.request("runtime.modelConfig.get", {})` 探测模型热更新能力。
+保存后调用 `client.request("runtime.modelConfig.reload", { requestId })`，并用只读方法查询
+待应用请求的最终状态。能力探测和状态语义见 [Runtime Protocol 参考](runtime-protocol-v1-reference.md#模型配置应用)。
 
 ## `outcome unknown`
 

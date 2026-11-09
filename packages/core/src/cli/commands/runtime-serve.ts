@@ -1,4 +1,6 @@
 import { defineCommand } from "citty";
+import { resolve } from "node:path";
+import { loadConfig } from "../../config/loader.ts";
 import { loadRuntimeConfig, resolveRuntimeConfigContext } from "../../config/runtime-context.ts";
 import { log } from "../utils/output.ts";
 import { runServer } from "./chat.ts";
@@ -28,7 +30,15 @@ export default defineCommand({
         ? {}
         : { configWorkspace: args["config-workspace"] }),
     };
-    const { config } = loadRuntimeConfig(options);
-    await runServer(config, resolveRuntimeConfigContext(options));
+    const { config, configPath } = loadRuntimeConfig(options);
+    const context = resolveRuntimeConfigContext(options);
+    const boundPath = configPath === undefined ? undefined : resolve(configPath);
+    const readBoundConfig =
+      context !== undefined
+        ? () => loadRuntimeConfig(context).config
+        : boundPath === undefined
+          ? undefined
+          : () => loadConfig({ configPath: boundPath }).config;
+    await runServer(config, context, readBoundConfig);
   },
 });

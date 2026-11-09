@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdtempSync,
   mkdirSync,
@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { RollNodeClient } from "@roll-agent/client-node";
+import { RollNodeClient, RollRpcError } from "@roll-agent/client-node";
 import { ScheduleStore, createIntervalTrigger } from "@roll-agent/runtime";
 import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-binding.ts";
 import { encodeScheduleHostContext } from "../scheduler-host/config-context.ts";
@@ -455,6 +455,297 @@ const reader=createInterface({input:process.stdin});reader.on('line',line=>{cons
       provider.closeAllConnections();
       await new Promise<void>((resolve) => provider.close(() => resolve()));
       rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "real stdio reloads the latest bound model in place after the active turn",
+  { timeout: 60_000 },
+  async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "roll model reload-")));
+    const source = join(root, "source");
+    const task = join(root, "task");
+    const home = join(root, "home");
+    for (const directory of [source, task, home]) mkdirSync(directory);
+    const secretDir = join(home, ".roll-agent");
+    mkdirSync(secretDir);
+    const secrets = join(secretDir, "secrets.env");
+    writeFileSync(secrets, "FIXTURE_DEEPSEEK_KEY=fixture-b\n");
+    const configPath = join(source, "roll.config.yaml");
+    const preload = join(root, "local-only.mjs");
+    writeFileSync(
+      preload,
+      `const original = globalThis.fetch;
+globalThis.fetch = (input, options) => {
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url);
+  if (url.hostname !== "127.0.0.1") throw new Error("External network blocked");
+  return original(input, options);
+};`,
+    );
+    const requests: Array<{
+      model: string;
+      path: string;
+      authorization: string | undefined;
+      messages: unknown;
+    }> = [];
+    const terminal = new Map<string, string>();
+    const reasoningText: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const provider = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const body = z
+          .object({ model: z.string(), messages: z.array(z.unknown()) })
+          .parse(JSON.parse(Buffer.concat(chunks).toString()));
+        requests.push({
+          model: body.model,
+          path: request.url ?? "",
+          authorization: request.headers.authorization,
+          messages: body.messages,
+        });
+        const send = () => {
+          const frame = {
+            id: "fixture",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: body.model,
+          };
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              ...(body.model === "deepseek-chat"
+                ? [
+                    {
+                      ...frame,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: { reasoning_content: "classified reasoning after reload" },
+                          finish_reason: null,
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              {
+                ...frame,
+                choices: [
+                  { index: 0, delta: { content: `reply from ${body.model}` }, finish_reason: null },
+                ],
+              },
+              { ...frame, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+            ]
+              .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+              .join("") + "data: [DONE]\n\n",
+          );
+        };
+        if (requests.length === 1) releaseFirst = send;
+        else send();
+      });
+    });
+    provider.listen(0, "127.0.0.1");
+    await once(provider, "listening");
+    const address = provider.address();
+    assert.ok(address && typeof address !== "string");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const config = {
+      llm: {
+        defaultProvider: "qwen",
+        defaultModel: "qwen3.7-plus",
+        providers: {
+          qwen: { apiKey: "fixture-a", baseUrl: `${baseUrl}/a` },
+          deepseek: { apiKey: "${" + "FIXTURE_DEEPSEEK_KEY}", baseUrl: `${baseUrl}/b` },
+        },
+      },
+      agents: { dataDir: "./agents" },
+      runtime: { threadsDir: "./history", thinkingLevel: "off" },
+      chat: { instructions: "off" },
+    };
+    const save = (updated: unknown) => writeFileSync(configPath, JSON.stringify(updated));
+    const alternate = {
+      ...config,
+      runtime: { ...config.runtime, thinkingLevel: "medium" },
+      llm: { ...config.llm, defaultProvider: "deepseek", defaultModel: "deepseek-chat" },
+    };
+    save(config);
+    writeFileSync(
+      join(task, "roll.config.yaml"),
+      JSON.stringify({
+        ...config,
+        llm: { ...config.llm, defaultModel: "wrong-model" },
+      }),
+    );
+    let client: RollNodeClient | undefined;
+    let runtimeLog = "";
+    try {
+      const stdio = await RollNodeClient.start({
+        cwd: task,
+        command: process.execPath,
+        args: [
+          resolve(import.meta.dirname, "index.ts"),
+          "runtime",
+          "serve",
+          "--stdio",
+          "--config",
+          configPath,
+          "--config-workspace",
+          source,
+        ],
+        env: {
+          HOME: home,
+          USERPROFILE: home,
+          PATH: process.env.PATH ?? "",
+          NODE_OPTIONS: `--experimental-strip-types --experimental-sqlite --import=${pathToFileURL(preload).href}`,
+          NO_PROXY: "127.0.0.1",
+          TEMP: root,
+          TMP: root,
+          ...(process.env.SystemRoot === undefined ? {} : { SystemRoot: process.env.SystemRoot }),
+        },
+        onStderr: (line) => {
+          runtimeLog += `${line}\n`;
+        },
+        requestTimeoutMs: 15_000,
+      });
+      client = stdio;
+      const instance = stdio.getInitializationResult().runtimeInstanceId;
+      stdio.onEvent(({ turnId, event }) => {
+        if (event.type === "reasoning.text.delta") reasoningText.push(event.delta);
+        if (
+          turnId !== undefined &&
+          (event.type === "turn.completed" || event.type === "turn.failed")
+        ) {
+          terminal.set(turnId, event.type);
+        }
+      });
+      const create = () => stdio.request("thread.create", { requestId: randomUUID() });
+      const { thread } = await create();
+      const { thread: other } = await create();
+      const bytes = Buffer.from("staged before model reload");
+      const { attachmentId } = await stdio.request("attachment.stage", {
+        requestId: randomUUID(),
+        threadId: thread.id,
+        fileName: "fixture.txt",
+        mediaType: "text/plain",
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        source: "chunks",
+      });
+      const get = () => stdio.request("runtime.modelConfig.get", {});
+      const reload = (requestId = randomUUID()) =>
+        stdio.request("runtime.modelConfig.reload", { requestId });
+      const start = (threadId: string, turnId: string, text: string) =>
+        stdio.request("turn.start", { threadId, turnId, requestId: randomUUID(), input: { text } });
+      const blocked = (status: string) => (error: unknown) =>
+        error instanceof RollRpcError &&
+        z.object({ modelConfigStatus: z.literal(status) }).safeParse(error.data?.details).success;
+
+      assert.deepEqual(await get(), {
+        status: "applied",
+        revision: 0,
+        active: { revision: 0, provider: "qwen", model: "qwen3.7-plus", reasoning: null },
+      });
+      assert.equal(stdio.getInitializationResult().features.includes("reasoning-summary"), false);
+      assert.deepEqual(await stdio.request("reasoning.text.subscribe", {}), { subscribed: false });
+      const first = randomUUID();
+      await start(thread.id, first, "message before reload");
+      await until(() => releaseFirst !== undefined, "first provider request");
+      save(alternate);
+      const firstReload = randomUUID();
+      const pending = await reload(firstReload);
+      assert.equal(pending.status, "pending");
+      assert.equal(pending.active.provider, "qwen");
+      assert.deepEqual(await reload(firstReload), pending);
+      await assert.rejects(start(other.id, randomUUID(), "should wait"), blocked("pending"));
+
+      // The final save rotates the API key and endpoint with the same model name.
+      // The queued update must reread the source after the last turn, without a model probe.
+      const latest = {
+        ...alternate,
+        llm: {
+          ...alternate.llm,
+          providers: {
+            ...alternate.llm.providers,
+            deepseek: { ...alternate.llm.providers.deepseek, baseUrl: `${baseUrl}/c` },
+          },
+        },
+      };
+      save(latest);
+      writeFileSync(secrets, "FIXTURE_DEEPSEEK_KEY=fixture-c\n");
+      assert.equal(requests.length, 1);
+      releaseFirst?.();
+      await until(() => terminal.has(first), "first turn terminal");
+      assert.equal(terminal.get(first), "turn.completed");
+      assert.deepEqual(await get(), {
+        status: "applied",
+        revision: 1,
+        active: { revision: 1, provider: "deepseek", model: "deepseek-chat", reasoning: "text" },
+      });
+      assert.equal(requests.length, 1);
+      assert.equal(stdio.getInitializationResult().runtimeInstanceId, instance);
+      assert.deepEqual(await stdio.request("reasoning.text.subscribe", {}), { subscribed: true });
+      assert.deepEqual(
+        await stdio.request("attachment.chunk", {
+          requestId: randomUUID(),
+          threadId: thread.id,
+          attachmentId,
+          sequence: 0,
+          dataBase64: bytes.toString("base64"),
+        }),
+        { receivedBytes: bytes.length, nextSequence: 1 },
+      );
+      const second = randomUUID();
+      await start(thread.id, second, "message after reload");
+      await until(() => terminal.has(second), "second turn terminal");
+      assert.equal(terminal.get(second), "turn.completed");
+      assert.equal(reasoningText.join(""), "classified reasoning after reload");
+      assert.deepEqual(
+        requests.map(({ model, path, authorization }) => ({ model, path, authorization })),
+        [
+          { model: "qwen3.7-plus", path: "/a/chat/completions", authorization: "Bearer fixture-a" },
+          {
+            model: "deepseek-chat",
+            path: "/c/chat/completions",
+            authorization: "Bearer fixture-c",
+          },
+        ],
+      );
+      assert.match(JSON.stringify(requests[1]?.messages), /message before reload/);
+      assert.match(JSON.stringify(requests[1]?.messages), /reply from qwen3\.7-plus/);
+
+      writeFileSync(configPath, "{");
+      assert.deepEqual(await reload(), {
+        status: "failed",
+        revision: 2,
+        active: { revision: 1, provider: "deepseek", model: "deepseek-chat", reasoning: "text" },
+        reason: "invalid-config",
+      });
+      await assert.rejects(
+        start(thread.id, randomUUID(), "invalid configuration"),
+        blocked("failed"),
+      );
+      save({ ...latest, runtime: { threadsDir: "./different-library" } });
+      const rejected = await reload();
+      assert.equal(rejected.status === "failed" && rejected.reason, "restart-required");
+      assert.equal(existsSync(join(source, "different-library")), false);
+      save(config);
+      assert.deepEqual(await reload(), {
+        status: "applied",
+        revision: 4,
+        active: { revision: 4, provider: "qwen", model: "qwen3.7-plus", reasoning: null },
+      });
+      assert.equal(requests.length, 2);
+    } catch (error) {
+      throw new Error(`${String(error)}\n${runtimeLog}`, { cause: error });
+    } finally {
+      provider.closeAllConnections();
+      try {
+        await client?.shutdown();
+      } finally {
+        await new Promise<void>((resolve) => provider.close(() => resolve()));
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   },
 );
