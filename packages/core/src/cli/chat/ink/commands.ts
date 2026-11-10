@@ -70,7 +70,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { kind: "command", name: "/resume", description: "查看本项目对话和旧会话，可将旧会话归入本项目" },
   { kind: "command", name: "/view", description: "只读查看会话：/view <session-id>" },
   { kind: "command", name: "/status", description: "查看项目、配置来源和有效模型" },
-  { kind: "command", name: "/reload", description: "重新加载所选配置中的模型设置" },
   { kind: "command", name: "/schedule", description: "查看定时任务及历次执行记录" },
   { kind: "command", name: "/help", description: "列出可用命令" },
   { kind: "command", name: "/exit", description: "退出对话" },

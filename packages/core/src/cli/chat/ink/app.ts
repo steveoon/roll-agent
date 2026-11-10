@@ -1,4 +1,3 @@
-import type { ChatConfigurationControl, ChatOperationLifecycle } from "../configuration-control.ts";
 import { ConnectionNotice } from "./connection-notice.ts";
 import { runFastModeCommand, type ChatFastModeControl } from "../fast-mode.ts";
 import type { ChatNotice } from "../notice.ts";
@@ -103,8 +102,7 @@ export interface ChatModelSwitching {
 }
 
 export interface ChatAppProps {
-  readonly configuration?: ChatConfigurationControl;
-  readonly operationLifecycle?: ChatOperationLifecycle;
+  readonly getStatus?: () => string;
   readonly viewConversation?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
@@ -299,8 +297,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.connection ? { connection: props.connection } : {}),
     ...(props.fastMode ? { fastMode: props.fastMode } : {}),
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
-    ...(props.configuration ? { configuration: props.configuration } : {}),
-    ...(props.operationLifecycle ? { operationLifecycle: props.operationLifecycle } : {}),
+    ...(props.getStatus ? { getStatus: props.getStatus } : {}),
     ...(props.viewConversation ? { viewConversation: props.viewConversation } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
@@ -353,7 +350,6 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     commitHistory,
   } = useSession(session, {
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
-    ...(props.operationLifecycle ? { operationLifecycle: props.operationLifecycle } : {}),
     onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
@@ -366,19 +362,6 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
-  useEffect(
-    () =>
-      props.configuration?.subscribe((snapshot) => {
-        setModel(snapshot.model, session.getContextWindow(), snapshot.thinkingLevel);
-        props.onModelChanged(snapshot.model, snapshot.thinkingLevel);
-        commitHistory(
-          { kind: "notice", id: randomUUID(), tone: "info", text: snapshot.text },
-          true,
-        );
-      }),
-    [props.configuration, setModel, commitHistory, props.onModelChanged],
-  );
-
   const displayHistory = useMemo(
     () => [...archivedHistory.items, ...state.history],
     [archivedHistory.items, state.history],
@@ -845,16 +828,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       });
       return;
     }
-    if (name === "/status" || name === "/reload") {
-      if (!props.configuration) notice("当前入口没有可重新加载的配置来源");
-      else if (name === "/status") notice(props.configuration.snapshot().text, "info");
-      else {
-        try {
-          props.configuration.reload();
-        } catch (error) {
-          notice(errorText(error));
-        }
-      }
+    if (name === "/status") {
+      notice(props.getStatus?.() ?? "当前入口没有状态信息", "info");
       return;
     }
     if (name === "/view") {

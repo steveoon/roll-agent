@@ -1,5 +1,7 @@
 # Roll Chat Workspace Experience Implementation Plan
 
+> 2026-11-10 调整：本文保留原实施记录。普通 `roll chat` 的 `/reload` 已移除，当前行为见 [设计](../chat-workspace-experience-design.md)；第三方 Runtime 配置重载接口保留。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Give normal CLI chat bound configuration/reload, project-scoped history, and safe cross-client browsing.

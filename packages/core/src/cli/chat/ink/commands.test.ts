@@ -13,17 +13,7 @@ test("filterCommands 前缀命中优先，子串命中兜底", () => {
   );
   assert.deepEqual(
     filterCommands("/e").map((c) => c.name),
-    [
-      "/effort",
-      "/exit",
-      "/reconnect",
-      "/model",
-      "/resume",
-      "/view",
-      "/reload",
-      "/schedule",
-      "/help",
-    ],
+    ["/effort", "/exit", "/reconnect", "/model", "/resume", "/view", "/schedule", "/help"],
   );
   assert.deepEqual(
     filterCommands("/ex").map((c) => c.name),
@@ -40,6 +30,8 @@ test("filterCommands ignores args after the command and is case-insensitive", ()
 
 test("filterCommands returns [] for an unknown command", () => {
   assert.deepEqual(filterCommands("/nope"), []);
+  assert.deepEqual(filterCommands("/reload"), []);
+  assert.ok(!SLASH_COMMANDS.some((command) => command.name === "/reload"));
 });
 
 const SKILLS = [

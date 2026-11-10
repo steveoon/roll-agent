@@ -264,7 +264,7 @@ chat:
 
 `--last`、`--list` 和 `/resume` 默认仅选择当前项目；`--all-projects`、`/resume all` 查看全部历史。
 `--view <id>` 只读查看占用中的会话。普通 chat 支持 `--config` / `--config-workspace`，
-并通过 `/status` / `/reload` 查看和应用所选文件的模型配置；新定时任务继承配置绑定。
+通过 `/status` 查看配置来源和当前有效模型；修改配置文件后重启并续聊，新定时任务继承配置绑定。
 会话库 schema 12 的备份迁移与旧客户端升级要求见 [终端项目会话指南](docs/how-to-use-chat-workspaces.md)。
 
 ### `roll chat` 工作区工程约定（AGENTS.md / CLAUDE.md）

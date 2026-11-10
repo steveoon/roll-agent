@@ -2838,60 +2838,61 @@ test("ChatApp does not retire/delete a session whose cleanup failed", async () =
   }
 });
 
-test("reload completion preserves a draft typed during asynchronous application", async () => {
-  const fake = switchableFakeSession("reload-draft");
-  type Snapshot = import("../configuration-control.ts").ChatConfigurationSnapshot;
-  let listener: ((value: Snapshot) => void) | undefined;
-  let subscriptions = 0;
-  let unsubscriptions = 0;
-  const snapshot: Snapshot = {
-    text: "模型配置等待应用",
-    model: "test-model",
-    thinkingLevel: "medium",
-  };
+test("status reads the active model without subscribing to configuration changes", async () => {
+  const fake = switchableFakeSession("status");
+  let activeModel = "test-model";
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: fake.session,
+      model: activeModel,
+      onUserSubmit: () => {},
+      onExit: () => {},
+      getStatus: () =>
+        `项目：/project\n配置：/settings/roll.config.yaml\n有效模型：test/${activeModel}`,
+    }),
+  );
+  try {
+    await delay(30);
+    stdin.write("/status");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.match(lastFrame() ?? "", /有效模型：test\/test-model/u));
+    activeModel = "selected-model";
+    stdin.write("/status");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.match(lastFrame() ?? "", /有效模型：test\/selected-model/u));
+    assert.deepEqual(fake.sent(), []);
+  } finally {
+    unmount();
+  }
+});
+
+test("removed reload command stays local and leaves the next message usable", async () => {
+  const fake = switchableFakeSession("no-reload");
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
       session: fake.session,
       model: "test-model",
       onUserSubmit: () => {},
       onExit: () => {},
-      configuration: {
-        snapshot: () => snapshot,
-        reload: () => {
-          listener?.(snapshot);
-          return snapshot;
-        },
-        subscribe: (next) => {
-          subscriptions++;
-          listener = next;
-          return () => {
-            unsubscriptions++;
-            listener = undefined;
-          };
-        },
-      },
     }),
   );
-  await delay(30);
-  stdin.write("/reload");
-  await delay(20);
-  stdin.write("\r");
-  await delay(30);
-  stdin.write("keep-my-draft");
-  await delay(30);
-  listener?.({ ...snapshot, text: "模型配置已应用", model: "new-model" });
-  await waitFor(() => {
-    assert.match(lastFrame() ?? "", /keep-my-draft/u);
-    assert.match(lastFrame() ?? "", /模型配置已应用/u);
-  });
-  assert.deepEqual(fake.sent(), []);
-  assert.equal(
-    subscriptions,
-    1,
-    "model display changes must not replace the configuration subscription",
-  );
-  unmount();
-  assert.equal(unsubscriptions, 1);
+  try {
+    await delay(30);
+    stdin.write("/reload");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.match(lastFrame() ?? "", /未知命令 \/reload/u));
+    assert.deepEqual(fake.sent(), []);
+    stdin.write("\u0015");
+    stdin.write("continue-after-removal");
+    await delay(20);
+    stdin.write("\r");
+    await waitFor(() => assert.deepEqual(fake.sent(), ["continue-after-removal"]));
+  } finally {
+    unmount();
+  }
 });
 
 test("resume all forwards explicit global scope to the session picker", async () => {

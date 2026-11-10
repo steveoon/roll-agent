@@ -907,16 +907,13 @@ test(
 );
 
 test(
-  "basic REPL reload changes the actual endpoint/model and recovers from invalid or deleted bound source",
+  "ordinary CLI keeps startup config after file edits and applies changes on restart with history",
   { timeout: 90_000 },
   async (t) => {
     const f = await fixture(t);
     const child = f.startChat(["--screen-mode", "inline"]);
     await f.wait(child, () => child.output.stdout.includes("› "), "initial REPL prompt");
-    await f.line(child, "before-reload-marker");
-    assert.equal(f.requests.length, 1);
-    assert.equal(f.requests[0]?.model, "qwen3.7-plus");
-    assert.match(f.requests[0]?.path ?? "", /^\/a\//u);
+    await f.line(child, "before-config-edit-marker");
     const alternate = {
       ...f.config,
       llm: {
@@ -931,60 +928,42 @@ test(
       },
     };
     f.save(alternate);
+    await f.line(child, "/status");
+    assert.match(child.output.stderr, /有效模型：qwen\/qwen3\.7-plus/u);
     await f.line(child, "/reload");
-    await f.wait(
-      child,
-      () =>
-        child.output.stderr.includes("qwen/qwen3.7-turbo") &&
-        child.output.stderr.includes("修订 1"),
-      "model reload application",
-    );
-    await f.line(child, "after-reload-marker");
-    assert.equal(f.requests.length, 2);
-    assert.equal(f.requests[1]?.model, "qwen3.7-turbo");
-    assert.equal(f.requests[1]?.authorization, "Bearer fixture-b");
-    assert.match(f.requests[1]?.path ?? "", /^\/b\//u);
-    assert.match(JSON.stringify(f.requests[1]?.messages), /before-reload-marker/u);
+    assert.match(child.output.stderr, /未知命令 \/reload/u);
+    await f.line(child, "after-config-edit-marker");
     writeFileSync(f.configPath, "runtime: [not-valid");
-    await f.line(child, "/reload");
-    await f.wait(
-      child,
-      () => child.output.stderr.includes("配置读取或模型解析失败"),
-      "invalid source refusal",
-    );
-    await f.line(child, "blocked-invalid-marker");
-    assert.equal(f.requests.length, 2);
+    await f.line(child, "after-invalid-config-marker");
     unlinkSync(f.configPath);
-    writeFileSync(join(f.a, "roll.config.yaml"), JSON.stringify(f.config));
-    await f.line(child, "/reload");
-    await f.line(child, "blocked-missing-marker");
-    assert.equal(
-      f.requests.length,
-      2,
-      "deleted bound source must not discover the project fallback",
-    );
+    await f.line(child, "after-deleted-config-marker");
+    assert.equal(f.requests.length, 4, "slash commands must not call the model");
+    for (const request of f.requests) {
+      assert.equal(request.model, "qwen3.7-plus");
+      assert.equal(request.authorization, "Bearer fixture-a");
+      assert.match(request.path, /^\/a\//u);
+    }
+    assert.match(JSON.stringify(f.requests[3]?.messages), /before-config-edit-marker/u);
+    assert.doesNotMatch(JSON.stringify(f.requests[3]?.messages), /\/reload/u);
+    await exitRollChat(child, "startup config chat");
     f.save(alternate);
-    await f.line(child, "/reload");
-    await f.wait(
-      child,
-      () => child.output.stderr.includes("修订 4"),
-      "repaired source application",
-    );
-    await f.line(child, "after-recovery-marker");
-    assert.equal(f.requests.length, 3);
-    assert.match(JSON.stringify(f.requests[2]?.messages), /before-reload-marker/u);
-    assert.match(JSON.stringify(f.requests[2]?.messages), /after-reload-marker/u);
-    assert.doesNotMatch(
-      JSON.stringify(f.requests[2]?.messages),
-      /blocked-(invalid|missing)-marker/u,
-    );
-    await exitRollChat(child, "reload REPL");
+    const restarted = f.startChat(["--screen-mode", "inline", "--last"]);
+    await f.wait(restarted, () => restarted.output.stdout.includes("› "), "resumed REPL prompt");
+    await f.line(restarted, "/status");
+    assert.match(restarted.output.stderr, /有效模型：qwen\/qwen3\.7-turbo/u);
+    await f.line(restarted, "after-restart-marker");
+    assert.equal(f.requests.length, 5);
+    assert.equal(f.requests[4]?.model, "qwen3.7-turbo");
+    assert.equal(f.requests[4]?.authorization, "Bearer fixture-b");
+    assert.match(f.requests[4]?.path ?? "", /^\/b\//u);
+    assert.match(JSON.stringify(f.requests[4]?.messages), /after-deleted-config-marker/u);
+    await exitRollChat(restarted, "resumed updated-config chat");
     const store = new ThreadStore(f.history, { readOnly: true });
     try {
       assert.equal(store.listThreads({ workspace: f.a }).length, 1);
       assert.match(
         JSON.stringify(store.getMessages(store.listThreads()[0]?.id ?? "")),
-        /after-recovery-marker/u,
+        /after-restart-marker/u,
       );
     } finally {
       store.close();
@@ -1055,5 +1034,63 @@ test(
     } finally {
       store.close();
     }
+  },
+);
+
+test(
+  "legacy chat server retains third-party model config reload and executes the updated model",
+  { timeout: 60_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const child = f.startChat(["--server"]);
+    const client = await RollNodeClient.connect({
+      transport: {
+        stdin: child.child.stdin,
+        stdout: child.child.stdout,
+        onExit: (listener) => child.child.once("exit", listener),
+        close: () => child.child.stdin.end(),
+      },
+    });
+    try {
+      assert.equal(
+        (await client.request("runtime.modelConfig.get", {})).active.model,
+        "qwen3.7-plus",
+      );
+      f.save({
+        ...f.config,
+        llm: { ...f.config.llm, defaultModel: "qwen3.7-turbo" },
+      });
+      await client.request("runtime.modelConfig.reload", { requestId: randomUUID() });
+      let status = await client.request("runtime.modelConfig.get", {});
+      for (let attempt = 0; status.status === "pending" && attempt < 100; attempt++) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        status = await client.request("runtime.modelConfig.get", {});
+      }
+      assert.equal(status.status, "applied");
+      assert.equal(status.active.model, "qwen3.7-turbo");
+      const { thread } = await client.request("thread.create", { requestId: randomUUID() });
+      let completed = false;
+      const off = client.onEvent((event) => {
+        if (event.event.type === "turn.completed") completed = true;
+      });
+      try {
+        await client.request("turn.start", {
+          requestId: randomUUID(),
+          threadId: thread.id,
+          turnId: randomUUID(),
+          input: { text: "legacy-server-reload-marker" },
+        });
+        await f.wait(child, () => completed, "legacy server model execution");
+      } finally {
+        off();
+      }
+      assert.equal(f.requests.length, 1);
+      assert.equal(f.requests[0]?.model, "qwen3.7-turbo");
+      assert.match(JSON.stringify(f.requests[0]?.messages), /legacy-server-reload-marker/u);
+      assert.deepEqual(f.failures, []);
+    } finally {
+      client.close();
+    }
+    assert.equal((await waitForSpawnedRollExit(child, "legacy server reload")).code, 0);
   },
 );

@@ -176,30 +176,3 @@ test("stale toggle completion cannot clear the target of a newer pending toggle"
   assert.equal(control.getEnabled(), false);
   assert.equal(control.getRequestedEnabled(), false);
 });
-
-test("Fast asynchronous preparation refuses a stale configuration before applying", async () => {
-  let revision = 0;
-  let release: (() => void) | undefined;
-  let applied = false;
-  const control = createChatFastModeControl({
-    getEnabled: () => false,
-    guard: () => {
-      const captured = revision;
-      return () => {
-        if (captured !== revision) throw new Error("configuration changed");
-      };
-    },
-    prepareEnable: () =>
-      new Promise<void>((resolve) => {
-        release = resolve;
-      }),
-    apply: () => {
-      applied = true;
-    },
-  });
-  const pending = control.setEnabled(true);
-  revision++;
-  release?.();
-  await assert.rejects(pending, /configuration changed/u);
-  assert.equal(applied, false);
-});

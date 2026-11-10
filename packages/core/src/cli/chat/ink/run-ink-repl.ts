@@ -1,4 +1,3 @@
-import type { ChatConfigurationControl, ChatOperationLifecycle } from "../configuration-control.ts";
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import type { ChatFastModeControl } from "../fast-mode.ts";
 import { createElement as h } from "react";
@@ -42,8 +41,7 @@ export interface InkReplStore extends Partial<TranscriptHistoryStore> {
 }
 
 export interface RunInkReplOptions {
-  readonly configuration?: ChatConfigurationControl;
-  readonly operationLifecycle?: ChatOperationLifecycle;
+  readonly getStatus?: () => string;
   readonly viewConversation?: (threadId: string) => string;
   readonly workspace?: string;
   readonly allProjects?: boolean;
@@ -188,8 +186,7 @@ export async function runInkRepl(
         ...(options.connection ? { connection: options.connection } : {}),
         ...(options.fastMode ? { fastMode: options.fastMode } : {}),
         ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
-        ...(options.configuration ? { configuration: options.configuration } : {}),
-        ...(options.operationLifecycle ? { operationLifecycle: options.operationLifecycle } : {}),
+        ...(options.getStatus ? { getStatus: options.getStatus } : {}),
         ...(options.viewConversation ? { viewConversation: options.viewConversation } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),

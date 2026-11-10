@@ -90,7 +90,12 @@ jobs:
           packages/core/src/runtime-host/workspace-identity.test.ts
           packages/core/src/runtime-host/chat-config-binding.test.ts
           packages/core/src/runtime-host/thread-model-host.test.ts
-          packages/core/src/cli/chat/configuration-control.test.ts
+          packages/core/src/cli/chat/ink/commands.test.ts
+          packages/core/src/cli/chat/ink/session-picker.test.ts
+          packages/core/src/cli/chat/session-picker-format.test.ts
+          packages/core/src/cli/chat/fast-mode.test.ts
+          packages/core/src/cli/chat/model-switch.test.ts
+          packages/core/src/cli/commands/chat.test.ts
           packages/runtime/src/engine/conversation-workspace.test.ts
           packages/runtime/src/engine/thread-model-engine.test.ts
           packages/runtime/src/service/model-config-controller.test.ts
