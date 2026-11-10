@@ -213,7 +213,15 @@ test("real chat --list leaves v5 scheduler and foreign v6 threads byte-for-byte 
     const cli = new URL("../cli/index.ts", import.meta.url).pathname;
     const output = execFileSync(
       process.execPath,
-      ["--experimental-strip-types", "--experimental-sqlite", cli, "chat", "--list", "--json"],
+      [
+        "--experimental-strip-types",
+        "--experimental-sqlite",
+        cli,
+        "chat",
+        "--list",
+        "--all-projects",
+        "--json",
+      ],
       { cwd: f.root, encoding: "utf8", timeout: 30_000 },
     );
     assert.match(output, /正常对话/u);

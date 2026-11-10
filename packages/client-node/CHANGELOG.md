@@ -1,5 +1,22 @@
 # @roll-agent/client-node
 
+## 0.9.0
+
+### Minor Changes
+
+- [#313](https://github.com/steveoon/roll-agent/pull/313) [`84d80f9`](https://github.com/steveoon/roll-agent/commit/84d80f9d8c2a245915cabc7bba13e0256a21ac22) Thanks [@steveoon](https://github.com/steveoon)! - Persist optional workspace attribution in conversation history schema 12 and expose project filtering and advisory occupancy through the optional Protocol 1.6 `thread.browse` method and Node `browseThreads()` helper. Existing thread summaries and list payloads remain unchanged. Read-only inspection does not acquire ownership, migrate history or reap claims; writable sessions still require atomic ownership.
+  
+  Existing libraries require the existing explicit, verified-backup migration. Upgrade every CLI and Desktop bundled Runtime sharing the library before migration: schema-11 clients cannot open schema 12. Legacy conversations remain unclassified.
+
+- [#313](https://github.com/steveoon/roll-agent/pull/313) [`d6b1a23`](https://github.com/steveoon/roll-agent/commit/d6b1a23a7f16019ef81b48be29f81de275bce9b2) Thanks [@steveoon](https://github.com/steveoon)! - Expose optional Protocol 1.6 model catalog and per-conversation get/set APIs through client-node. Selections are process-local, isolated from other conversations including MCP Sampling, and discarded on detach or restart. Clients decide whether to save and explicitly restore a choice. Selection does not modify configuration or history metadata and adds no database migration; CLI model selection and scheduler engine behavior remain unchanged.
+  
+  Reject model mutations for detached conversations without reopening or reacquiring them. Coordinate model preparation with opening, configuration reload and shutdown, report default-model application failures accurately, and build new sessions exclusively from the current model parameters.
+
+### Patch Changes
+
+- Updated dependencies [[`84d80f9`](https://github.com/steveoon/roll-agent/commit/84d80f9d8c2a245915cabc7bba13e0256a21ac22), [`d6b1a23`](https://github.com/steveoon/roll-agent/commit/d6b1a23a7f16019ef81b48be29f81de275bce9b2)]:
+  - @roll-agent/protocol@0.13.0
+
 ## 0.8.0
 
 ### Minor Changes

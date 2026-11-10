@@ -350,6 +350,17 @@ export class RuntimeProtocolAdapter {
     }
 
     switch (request.method) {
+      case RUNTIME_METHODS.modelsList:
+        runtimeMethodSchemas[RUNTIME_METHODS.modelsList].params.parse(request.params);
+        return this.service.listModels();
+      case RUNTIME_METHODS.threadModelGet:
+        return this.service.getThreadModel(
+          runtimeMethodSchemas[RUNTIME_METHODS.threadModelGet].params.parse(request.params),
+        );
+      case RUNTIME_METHODS.threadModelSet:
+        return this.service.setThreadModel(
+          runtimeMethodSchemas[RUNTIME_METHODS.threadModelSet].params.parse(request.params),
+        );
       case RUNTIME_METHODS.modelConfigGet:
         runtimeMethodSchemas[RUNTIME_METHODS.modelConfigGet].params.parse(request.params);
         return this.service.getModelConfig();
@@ -366,6 +377,10 @@ export class RuntimeProtocolAdapter {
       case RUNTIME_METHODS.threadList:
         return this.service.listThreads(
           runtimeMethodSchemas[RUNTIME_METHODS.threadList].params.parse(request.params),
+        );
+      case RUNTIME_METHODS.threadBrowse:
+        return this.service.browseThreads(
+          runtimeMethodSchemas[RUNTIME_METHODS.threadBrowse].params.parse(request.params),
         );
       case RUNTIME_METHODS.threadCreate:
         return this.service.createThread(

@@ -13,7 +13,17 @@ test("filterCommands 前缀命中优先，子串命中兜底", () => {
   );
   assert.deepEqual(
     filterCommands("/e").map((c) => c.name),
-    ["/effort", "/exit", "/reconnect", "/model", "/resume", "/schedule", "/help"],
+    [
+      "/effort",
+      "/exit",
+      "/reconnect",
+      "/model",
+      "/resume",
+      "/view",
+      "/reload",
+      "/schedule",
+      "/help",
+    ],
   );
   assert.deepEqual(
     filterCommands("/ex").map((c) => c.name),

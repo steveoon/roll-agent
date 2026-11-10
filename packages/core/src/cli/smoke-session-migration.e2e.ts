@@ -62,13 +62,15 @@ function fixture(t: TestContext, version = 10) {
   return { root, dir, id, databasePath, run };
 }
 
-test("old-library CLI error points to migration; unconfirmed migration never writes", (t) => {
+test("old-library CLI listing stays read-only; unconfirmed migration never writes", (t) => {
   const f = fixture(t);
-  const listed = f.run("chat", "--list", "--json");
-  assert.equal(listed.status, 1, listed.stderr);
-  assert.match(listed.stderr, /roll runtime migrate/u);
   const before = readFileSync(f.databasePath);
   const files = readdirSync(f.dir);
+  const listed = f.run("chat", "--list", "--all-projects", "--json");
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /existing history/u);
+  assert.deepEqual(readFileSync(f.databasePath), before);
+  assert.deepEqual(readdirSync(f.dir), files);
   const refused = f.run("runtime", "migrate", "--json");
   assert.equal(refused.status, 1, refused.stderr);
   assert.match(refused.stderr, /--confirm-stopped-clients/u);
@@ -99,7 +101,7 @@ test("confirmed CLI migration backs up history, enables chat listing and is repe
     backup.close();
   }
   assert.equal(inspectThreadLibrary(f.dir).status, "current");
-  const listed = f.run("chat", "--list", "--json");
+  const listed = f.run("chat", "--list", "--all-projects", "--json");
   assert.equal(listed.status, 0, listed.stderr);
   assert.match(listed.stdout, /existing history/u);
   const files = readdirSync(f.dir);

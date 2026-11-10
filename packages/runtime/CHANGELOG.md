@@ -1,5 +1,34 @@
 # @roll-agent/runtime
 
+## 1.6.0
+
+### Minor Changes
+
+- [#315](https://github.com/steveoon/roll-agent/pull/315) [`b6d8afe`](https://github.com/steveoon/roll-agent/commit/b6d8afe6896a42c859e09f91eb08b9e86be6ccf7) Thanks [@steveoon](https://github.com/steveoon)! - Add optional backed-up migration on writable startup for Runtime embedders with an ownership host. Set `ThreadStoreOptions.migrateOnOpen` and read the resulting `migrationBackupPath`; the default explicit migration behavior is unchanged. Automatic migration holds the library gate and a primary SQLite write transaction from before backup through schema commit, rolls back failures, and avoids global retention sweeps. Read-only operations never migrate, and unsupported future schemas remain rejected.
+  
+  Remove incomplete/unverified backups and the current attempt's backup after a successful rollback, preventing failed automatic retries from accumulating full database copies. Preserve existing backups and retain the recovery copy when rollback cannot be verified; cleanup failures report both errors and the retained path.
+
+## 1.5.0
+
+### Minor Changes
+
+- [#313](https://github.com/steveoon/roll-agent/pull/313) [`1284751`](https://github.com/steveoon/roll-agent/commit/128475161e87afd66238c1f795d8866ad344c146) Thanks [@steveoon](https://github.com/steveoon)! - Make terminal chat history project-scoped: `roll chat --last`, `--list` and `/resume` select the current Git worktree or non-Git directory; explicit all-projects browsing includes unclassified legacy history. Add read-only history views and occupancy labels without taking over another client's session.
+  
+  Normal chat accepts explicit configuration sources/resource workspaces, binds new scheduled tasks to the selected source, and supports `/status` and `/reload` in both terminal interfaces. Onboarding reads and writes the selected source, and an unbound default-config session reports reload unavailable while remaining usable. A shared Runtime controller waits for admitted turns and maintenance to settle, blocks admission while updates are pending or failed, preserves active state on failure, and validates ChatGPT model capabilities before application.
+
+- [#313](https://github.com/steveoon/roll-agent/pull/313) [`84d80f9`](https://github.com/steveoon/roll-agent/commit/84d80f9d8c2a245915cabc7bba13e0256a21ac22) Thanks [@steveoon](https://github.com/steveoon)! - Persist optional workspace attribution in conversation history schema 12 and expose project filtering and advisory occupancy through the optional Protocol 1.6 `thread.browse` method and Node `browseThreads()` helper. Existing thread summaries and list payloads remain unchanged. Read-only inspection does not acquire ownership, migrate history or reap claims; writable sessions still require atomic ownership.
+  
+  Existing libraries require the existing explicit, verified-backup migration. Upgrade every CLI and Desktop bundled Runtime sharing the library before migration: schema-11 clients cannot open schema 12. Legacy conversations remain unclassified.
+
+- [#313](https://github.com/steveoon/roll-agent/pull/313) [`d6b1a23`](https://github.com/steveoon/roll-agent/commit/d6b1a23a7f16019ef81b48be29f81de275bce9b2) Thanks [@steveoon](https://github.com/steveoon)! - Expose optional Protocol 1.6 model catalog and per-conversation get/set APIs through client-node. Selections are process-local, isolated from other conversations including MCP Sampling, and discarded on detach or restart. Clients decide whether to save and explicitly restore a choice. Selection does not modify configuration or history metadata and adds no database migration; CLI model selection and scheduler engine behavior remain unchanged.
+  
+  Reject model mutations for detached conversations without reopening or reacquiring them. Coordinate model preparation with opening, configuration reload and shutdown, report default-model application failures accurately, and build new sessions exclusively from the current model parameters.
+
+### Patch Changes
+
+- Updated dependencies [[`84d80f9`](https://github.com/steveoon/roll-agent/commit/84d80f9d8c2a245915cabc7bba13e0256a21ac22), [`d6b1a23`](https://github.com/steveoon/roll-agent/commit/d6b1a23a7f16019ef81b48be29f81de275bce9b2)]:
+  - @roll-agent/protocol@0.13.0
+
 ## 1.4.0
 
 ### Minor Changes

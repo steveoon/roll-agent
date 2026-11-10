@@ -1,3 +1,4 @@
+import { ModelConfigController, type RuntimeModelConfigHost } from "./model-config-controller.ts";
 import type { SessionClaim } from "../ownership/session-claims.ts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
@@ -40,8 +41,6 @@ import {
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
-  type RuntimeModelConfigFailure,
-  type RuntimeModelConfigIdentity,
   type RuntimeModelConfigStatus,
   type LatestRuntimeMethodParams,
   type LatestRuntimeMethodResult,
@@ -58,6 +57,7 @@ import {
   type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
+import { ThreadModelError, type ThreadModelEngine } from "../engine/thread-model-engine.ts";
 import type { SessionAttachment } from "../engine/session-attachments.ts";
 import { AttachmentStore, type AttachmentStoreFailure } from "./attachment-store.ts";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
@@ -78,6 +78,8 @@ import {
   type SequencedToolExecutionRecord,
   type ThreadRecord,
 } from "../store/thread-store.ts";
+
+export type { RuntimeModelConfigHost } from "./model-config-controller.ts";
 
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1_024 * 1_024;
 const DEFAULT_MAX_PAGE_SIZE = 500;
@@ -121,21 +123,22 @@ export type RuntimeServiceSession = Pick<
     >
   >;
 
-export interface RuntimeServiceEngine {
+export interface RuntimeServiceEngine extends Partial<
+  Pick<
+    ThreadModelEngine,
+    | "getModelCatalog"
+    | "getThreadModel"
+    | "setThreadModel"
+    | "setModelBusyCheck"
+    | "settleThreadModel"
+    | "failThreadModelSettlement"
+    | "assertThreadModelReady"
+    | "closeModelSelections"
+    | "hasThreadReasoning"
+  >
+> {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
   resumeSession(threadId: string): Promise<RuntimeServiceSession>;
-}
-
-/** The host rereads its bound source and applies a model without replacing the engine. */
-export interface RuntimeModelConfigHost {
-  readonly initial: RuntimeModelConfigIdentity;
-  reload():
-    | {
-        readonly status: "applied";
-        readonly model: RuntimeModelConfigIdentity;
-        readonly reasoning?: ReasoningPresentation["kind"];
-      }
-    | { readonly status: "failed"; readonly reason: RuntimeModelConfigFailure };
 }
 
 export interface RuntimeServiceOptions {
@@ -250,6 +253,7 @@ export class RuntimeServiceError extends Error {
 }
 
 type MutationRuntimeMethod =
+  | typeof RUNTIME_METHODS.threadModelSet
   | typeof RUNTIME_METHODS.modelConfigReload
   | typeof RUNTIME_METHODS.threadCreate
   | typeof RUNTIME_METHODS.threadRename
@@ -583,9 +587,7 @@ export class RuntimeService {
     | RuntimeServiceOptions["reasoningSummaryProjector"]
     | undefined;
   private providerReasoning: RuntimeServiceOptions["providerReasoning"];
-  private readonly modelConfig: RuntimeModelConfigHost | undefined;
-  private modelConfigStatus: RuntimeModelConfigStatus | undefined;
-  private modelConfigTurnFailed = false;
+  private readonly modelConfigController: ModelConfigController | undefined;
   private reasoningTextSubscription:
     | { deliver: (event: RuntimeEventEnvelopeV16) => void }
     | undefined;
@@ -612,6 +614,7 @@ export class RuntimeService {
     options: RuntimeServiceOptions = {},
   ) {
     this.engine = engine;
+    engine.setModelBusyCheck?.((id) => this.activeTurns.has(id) || this.turnJobs.has(id));
     this.store = store;
     this.serverName = options.serverName ?? "roll-runtime";
     this.serverVersion = options.serverVersion ?? "1.0";
@@ -622,18 +625,19 @@ export class RuntimeService {
     this.mutationRequests = new MutationRequestCache(this.idempotencyCacheEntries);
     this.reasoningSummaryProjector = options.reasoningSummaryProjector;
     this.providerReasoning = options.providerReasoning;
-    this.modelConfig = options.modelConfig;
-    if (options.modelConfig !== undefined) {
-      this.modelConfigStatus = {
-        status: "applied",
-        revision: 0,
-        active: {
-          ...options.modelConfig.initial,
-          revision: 0,
-          reasoning: this.providerReasoning ?? null,
-        },
-      };
-    }
+    this.modelConfigController =
+      options.modelConfig === undefined
+        ? undefined
+        : new ModelConfigController({
+            host: options.modelConfig,
+            isBusy: () => this.activeTurns.size > 0 || this.turnJobs.size > 0,
+            ...(this.providerReasoning === undefined
+              ? {}
+              : { initialReasoning: this.providerReasoning }),
+            onApplied: (result) => {
+              this.providerReasoning = result.reasoning;
+            },
+          });
     this.attachmentStore = options.attachmentStore;
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
@@ -721,7 +725,12 @@ export class RuntimeService {
     listener: (event: RuntimeEventEnvelopeV16) => void,
   ): (() => void) | undefined {
     this.assertOpen();
-    if (this.providerReasoning !== "text" || this.reasoningTextSubscription) return undefined;
+    if (
+      (this.providerReasoning !== "text" && !this.engine.hasThreadReasoning?.("text")) ||
+      this.reasoningTextSubscription
+    ) {
+      return undefined;
+    }
     const subscription = { deliver: listener };
     this.reasoningTextSubscription = subscription;
     return () => {
@@ -778,6 +787,34 @@ export class RuntimeService {
     const items = records
       .slice(offset, offset + params.limit)
       .map((record) => toThreadSummary(this.store, record));
+    const nextOffset = offset + items.length;
+    return {
+      items,
+      nextCursor: nextOffset < records.length ? String(nextOffset) : null,
+    };
+  }
+
+  /** Pure committed-history browsing: never bootstrap an engine or acquire a session claim. */
+  browseThreads(
+    params: LatestRuntimeMethodParams<"thread.browse">,
+  ): LatestRuntimeMethodResult<"thread.browse"> {
+    this.assertOpen();
+    const offset = params.cursor === undefined ? 0 : Number(params.cursor);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.invalidParams,
+        "thread.browse cursor 超出安全整数范围",
+      );
+    }
+    const records = this.store.listThreads({
+      origin: "interactive",
+      ...(params.workspace === undefined ? {} : { workspace: params.workspace }),
+    });
+    const items = records.slice(offset, offset + params.limit).map((record) => ({
+      thread: toThreadSummary(this.store, record),
+      workspace: record.workspace ?? null,
+      occupancy: this.store.inspectSessionOccupancy(record.id),
+    }));
     const nextOffset = offset + items.length;
     return {
       items,
@@ -989,13 +1026,95 @@ export class RuntimeService {
 
   getModelConfig(): RuntimeModelConfigStatus {
     this.assertOpen();
-    if (this.modelConfigStatus === undefined) {
+    if (this.modelConfigController === undefined) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
         "当前 Runtime 没有可重新加载的模型配置来源",
       );
     }
-    return this.modelConfigStatus;
+    return this.modelConfigController.getStatus();
+  }
+
+  listModels(): LatestRuntimeMethodResult<"runtime.models.list"> {
+    this.assertOpen();
+    if (!this.engine.getModelCatalog) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前宿主不支持会话模型选择",
+      );
+    }
+    return this.engine.getModelCatalog();
+  }
+
+  getThreadModel(
+    params: LatestRuntimeMethodParams<"thread.model.get">,
+  ): LatestRuntimeMethodResult<"thread.model.get"> {
+    this.assertOpen();
+    this.requireThread(params.threadId);
+    if (!this.engine.getThreadModel) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前宿主不支持会话模型选择",
+      );
+    }
+    try {
+      return this.engine.getThreadModel(params.threadId);
+    } catch (error) {
+      if (!(error instanceof ThreadModelError)) throw error;
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前对话尚未打开或正在关闭，请先打开对话",
+        { retryable: true },
+      );
+    }
+  }
+
+  setThreadModel(
+    params: LatestRuntimeMethodParams<"thread.model.set">,
+  ): Promise<LatestRuntimeMethodResult<"thread.model.set">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.threadModelSet,
+      params,
+      async () => {
+        this.assertThreadOpen(params.threadId);
+        if (this.requireThread(params.threadId).origin.kind === "scheduled") {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.invalidParams,
+            "定时执行会话是只读记录",
+          );
+        }
+        if (!this.engine.setThreadModel) {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前宿主不支持会话模型选择",
+          );
+        }
+        // A delayed mutation must not undo detach by implicitly reacquiring the session.
+        const session = this.sessions.get(params.threadId);
+        if (session === undefined) {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前对话尚未打开或正在关闭，请先打开对话",
+            { retryable: true },
+          );
+        }
+        session.assertWritable?.();
+        this.ownership.get(params.threadId)?.assert();
+        try {
+          return await this.engine.setThreadModel(params);
+        } catch (error) {
+          if (!(error instanceof ThreadModelError)) throw error;
+          throw new RuntimeServiceError(
+            error.reason === "unavailable"
+              ? RUNTIME_ERROR_CODES.capabilityUnavailable
+              : RUNTIME_ERROR_CODES.invalidParams,
+            error.message,
+            { retryable: true, details: { modelSelection: error.reason } },
+          );
+        }
+      },
+    );
   }
 
   reloadModelConfig(
@@ -1006,47 +1125,18 @@ export class RuntimeService {
       RUNTIME_METHODS.modelConfigReload,
       params,
       () => {
-        const { active, revision } = this.getModelConfig();
-        this.modelConfigStatus = { status: "pending", active, revision: revision + 1 };
-        this.applyPendingModelConfig();
-        return this.getModelConfig();
+        this.getModelConfig();
+        return this.modelConfigController?.reload() ?? this.getModelConfig();
       },
     );
   }
 
   private applyPendingModelConfig(): void {
-    const host = this.modelConfig;
-    const pending = this.modelConfigStatus;
-    if (this.closing || host === undefined || pending?.status !== "pending") return;
-    if (this.modelConfigTurnFailed) {
-      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
-      return;
-    }
-    if (this.activeTurns.size > 0 || this.turnJobs.size > 0) return;
-
-    try {
-      const result = host.reload();
-      if (result.status === "failed") {
-        this.modelConfigStatus = { ...pending, status: "failed", reason: result.reason };
-        return;
-      }
-      this.providerReasoning = result.reasoning;
-      this.modelConfigStatus = {
-        status: "applied",
-        revision: pending.revision,
-        active: {
-          ...result.model,
-          revision: pending.revision,
-          reasoning: result.reasoning ?? null,
-        },
-      };
-    } catch {
-      this.modelConfigStatus = { ...pending, status: "failed", reason: "apply-failed" };
-    }
+    if (!this.closing) this.modelConfigController?.tryApply();
   }
 
   private assertModelConfigReady(): void {
-    const status = this.modelConfigStatus?.status;
+    const status = this.modelConfigController?.getStatus().status;
     if (status === "pending" || status === "failed") {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -1111,6 +1201,16 @@ export class RuntimeService {
         }
         this.assertThreadOpen(params.threadId);
         this.assertModelConfigReady();
+        try {
+          this.engine.assertThreadModelReady?.(params.threadId);
+        } catch (error) {
+          if (!(error instanceof ThreadModelError)) throw error;
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.capabilityUnavailable,
+            "当前对话的模型尚未应用，请选择可用模型或跟随默认设置",
+            { retryable: true },
+          );
+        }
         const attachments = this.resolveTurnAttachments(params);
         const state: ActiveTurnState = {
           ownership: this.ownership.get(params.threadId),
@@ -1137,10 +1237,13 @@ export class RuntimeService {
           () => {
             if (this.turnJobs.get(params.threadId) === job) this.turnJobs.delete(params.threadId);
             this.applyPendingModelConfig();
+            this.engine.settleThreadModel?.(params.threadId).catch(() => {
+              this.engine.failThreadModelSettlement?.(params.threadId);
+            });
           },
           () => {
-            this.modelConfigTurnFailed = true;
-            this.applyPendingModelConfig();
+            this.modelConfigController?.fail();
+            this.engine.failThreadModelSettlement?.(params.threadId);
           },
         ); // Failed projection remains a failed close barrier; never release it.
 
@@ -1534,6 +1637,8 @@ export class RuntimeService {
   close(): Promise<void> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closing = true;
+    this.engine.closeModelSelections?.();
+    this.modelConfigController?.close();
     this.setUserInputAvailable(false);
     for (const turn of this.activeTurns.values()) turn.session.cancel();
     this.closePromise = (async () => {
@@ -1739,8 +1844,10 @@ export class RuntimeService {
   }
 
   private createTurnReasoningDisplay(state: ActiveTurnState): TurnReasoningDisplay | undefined {
-    const kind = this.providerReasoning;
-    const legacy = this.reasoningSummaryProjector;
+    const kind = this.engine.getThreadModel
+      ? (this.engine.getThreadModel(state.threadId).active?.reasoning ?? undefined)
+      : this.providerReasoning;
+    const legacy = this.engine.getThreadModel ? undefined : this.reasoningSummaryProjector;
     if (kind === undefined && !legacy) return undefined;
     const subscription = this.reasoningTextSubscription;
     if (kind === "text" && !subscription) return undefined;

@@ -8,6 +8,7 @@ import {
   verifyProcessStartToken,
 } from "../registry/process-identity.ts";
 import type { RuntimeModule } from "./engine-factory.ts";
+import { log } from "../cli/utils/output.ts";
 
 /** Capability attests the public host factory, not an unconfigured embedded Runtime. */
 export const ROLL_SESSION_OCCUPANCY_CAPABILITY = {
@@ -15,7 +16,7 @@ export const ROLL_SESSION_OCCUPANCY_CAPABILITY = {
   hostInjection: "all-roll-writable-thread-stores",
   protocol: "THREAD_BUSY/session_occupied",
   expectedLibraryEnvironment: "ROLL_EXPECTED_SESSION_LIBRARY",
-  primarySchemaVersion: 11,
+  primarySchemaVersion: 12,
   legacyWriters: "unverified-sequential-only",
 } as const;
 
@@ -56,7 +57,11 @@ export function createOwnedThreadStore(runtime: RuntimeModule, dir: string, kind
   try {
     const store = new runtime.ThreadStore(resolve(runtime.expandTilde(dir)), {
       ownership: createSessionOwnershipHost(kind),
+      migrateOnOpen: true,
     });
+    if (store.migrationBackupPath !== null) {
+      log.info(`会话库已自动升级；升级前备份：${store.migrationBackupPath}`);
+    }
     if (launchBinding?.expected?.state === "missing") {
       launchBinding = { expected: inspectSessionLibraryBinding(runtime, dir) };
     }

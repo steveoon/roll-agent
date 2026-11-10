@@ -19,7 +19,7 @@ import {
 } from "../../config/defaults.ts";
 import { inspectAgentEnvRequirements, type AgentEnvCheckItem } from "../../config/helpers.ts";
 import { decodeFromYaml } from "../../config/key-codec.ts";
-import { loadAgentsConfig } from "../../config/loader.ts";
+import { loadAgentsConfig, type LoadConfigOptions } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 import {
@@ -134,8 +134,11 @@ async function resolveSetupModule(
   throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent, shell`);
 }
 
-export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
-  const context = readConfigDocumentContext();
+export async function setupLlm(
+  prompts: ConfigPromptAdapter,
+  options: LoadConfigOptions = {},
+): Promise<string> {
+  const context = readConfigDocumentContext(options);
   const provider = await prompts.select<LlmProviderOption>({
     message: "选择默认 LLM provider",
     options: LLM_PROVIDER_OPTIONS.map((value) => ({
@@ -515,8 +518,8 @@ function setInstallDefaults(document: Record<string, unknown>): void {
   setYamlValue(document, ["install", "networkTimeoutMs"], DEFAULT_CONFIG.install.networkTimeoutMs);
 }
 
-function readConfigDocumentContext(): ConfigDocumentContext {
-  const service = new ConfigApplicationService();
+function readConfigDocumentContext(options: LoadConfigOptions = {}): ConfigDocumentContext {
+  const service = new ConfigApplicationService(options);
   const snapshot = service.readForRepair();
   const internalSnapshot = readInternalConfigSnapshot(service);
   if (snapshot.revision !== internalSnapshot.revision) {

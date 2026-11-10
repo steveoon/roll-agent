@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { getAgentEnv, inspectLlmConfigReadiness } from "../../config/helpers.ts";
-import { loadAgentsConfig, loadConfig, loadInstallConfig } from "../../config/loader.ts";
+import { loadAgentsConfig, loadInstallConfig } from "../../config/loader.ts";
 import { catalogPackageSpec } from "../../registry/catalog.ts";
 import { resolveAgentCatalog } from "../../registry/catalog-discovery.ts";
 import { installAgent } from "../../registry/install.ts";
@@ -18,6 +18,7 @@ import type {
 } from "../../registry/install.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 import type { RollConfig } from "../../config/schema.ts";
+import { loadRuntimeConfig, type RuntimeConfigOptions } from "../../config/runtime-context.ts";
 
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
@@ -26,7 +27,7 @@ export interface LlmConfigStatus {
   readonly summary: string;
 }
 
-export interface RunChatOnboardingOptions {
+export interface RunChatOnboardingOptions extends RuntimeConfigOptions {
   readonly provider?: string;
   readonly model?: string;
 }
@@ -146,9 +147,9 @@ export async function runChatOnboarding(
     }
 
     if (!detectLlm().configured) {
-      prompts.info(await setupLlmFn(prompts));
+      prompts.info(await setupLlmFn(prompts, options));
     }
-    const installed = await installOfficialAgents(prompts, deps);
+    const installed = await installOfficialAgents(prompts, deps, options);
     for (const result of installed) {
       if (!result.envReport || result.envReport.missingRequired.length === 0) {
         continue;
@@ -172,8 +173,9 @@ export async function runChatOnboarding(
 async function installOfficialAgents(
   prompts: ConfigPromptAdapter,
   deps: RunSetupDeps,
+  options: RuntimeConfigOptions = {},
 ): Promise<readonly InstallAgentSuccess[]> {
-  const loadAgentContext = deps.loadAgentContext ?? loadSetupAgentContext;
+  const loadAgentContext = deps.loadAgentContext ?? (() => loadSetupAgentContext(options));
   const resolveCatalog = deps.resolveCatalog ?? resolveAgentCatalog;
   const inspectAvailability = deps.inspectAvailability ?? inspectCatalogAvailability;
   const install = deps.install ?? installAgent;
@@ -225,7 +227,7 @@ async function installOfficialAgents(
       {
         agentsConfig: context.agentsConfig,
         installConfig,
-        getStartEnv: (agentName) => getAgentEnv(loadConfig().config, agentName),
+        getStartEnv: (agentName) => getAgentEnv(loadRuntimeConfig(options).config, agentName),
         report: (event) => renderSetupInstallEvent(prompts, event),
       },
     );
@@ -241,21 +243,30 @@ async function installOfficialAgents(
 
 function detectLlmConfigStatus(options: RunChatOnboardingOptions = {}): LlmConfigStatus {
   try {
-    const { config } = loadConfig();
+    const { config } = loadRuntimeConfig(options);
     const status = inspectLlmConfigReadiness(config, options);
     return { configured: status.configured, summary: status.summary };
-  } catch {
+  } catch (error) {
+    if (options.configPath !== undefined || options.configWorkspace !== undefined) throw error;
     return { configured: false, summary: "" };
   }
 }
 
-function loadSetupAgentContext(): SetupAgentContext {
-  const { agentsConfig } = loadAgentsConfig();
+function loadSetupAgentContext(options: RuntimeConfigOptions = {}): SetupAgentContext {
+  if (options.configPath !== undefined || options.configWorkspace !== undefined) {
+    const { config } = loadRuntimeConfig(options);
+    return {
+      agentsConfig: config.agents,
+      installConfig: config.install,
+      agents: new AgentStore(config.agents.dataDir).list(),
+    };
+  }
+  const { agentsConfig } = loadAgentsConfig(options);
   const store = new AgentStore(agentsConfig.dataDir);
   try {
     return {
       agentsConfig,
-      installConfig: loadInstallConfig().installConfig,
+      installConfig: loadInstallConfig(options).installConfig,
       agents: store.list(),
     };
   } catch (error) {

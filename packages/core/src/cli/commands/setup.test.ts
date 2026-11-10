@@ -1,3 +1,16 @@
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  existsSync,
+  unlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadRuntimeConfig } from "../../config/runtime-context.ts";
+import { resolveChatLlmReadiness } from "../../runtime-host/engine-factory.ts";
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG } from "../../config/defaults.ts";
@@ -400,4 +413,106 @@ describe("runChatOnboarding", () => {
     assert.ok(!tracker.includes("setupLlm"));
     assert.ok(!tracker.some((item) => item.startsWith("install:")));
   });
+});
+
+describe("chat onboarding selected configuration", () => {
+  for (const configured of [false, true]) {
+    it(`keeps detection, writes and Agent installation on the selected source (configured=${String(configured)})`, async () => {
+      const originalCwd = process.cwd();
+      const root = mkdtempSync(join(tmpdir(), "roll-onboarding-context-"));
+      const project = join(root, "project");
+      const resources = join(root, "settings");
+      mkdirSync(project);
+      mkdirSync(resources);
+      const source = join(resources, "roll.config.yaml");
+      const foreign = join(project, "roll.config.yaml");
+      const provider = DEFAULT_CONFIG.llm.defaultProvider;
+      const document = (ready: boolean, envValue: string) => ({
+        llm: {
+          defaultProvider: provider,
+          providers: ready ? { [provider]: { apiKey: "existing-fixture-key" } } : {},
+        },
+        agents: { dataDir: "./agents", env: { "smart-reply-agent": { FIXTURE_ENV: envValue } } },
+        install: { registry: "https://selected.invalid" },
+      });
+      writeFileSync(source, JSON.stringify(document(configured, "selected")));
+      writeFileSync(foreign, JSON.stringify(document(!configured, "foreign")));
+      const untouched = readFileSync(foreign);
+      const prompts = new ScriptedPrompts({ confirm: [true], multiselect: [["smart-reply"]] });
+      let installations = 0;
+      try {
+        process.chdir(project);
+        const proceeded = await runChatOnboarding(
+          {
+            prompts,
+            resolveCatalog: async (_config, options) => {
+              assert.equal(options?.registry, "https://selected.invalid");
+              return [CATALOG_ITEM.entry];
+            },
+            inspectAvailability: async (_catalog, _agents, options) => {
+              assert.equal(options?.registry, "https://selected.invalid");
+              return [CATALOG_ITEM];
+            },
+            install: async (_request, deps) => {
+              installations++;
+              assert.equal(deps?.agentsConfig?.dataDir, join(resources, "agents"));
+              assert.equal(deps?.getStartEnv?.("smart-reply-agent")?.FIXTURE_ENV, "selected");
+              return { ok: false, step: "download", message: "fixture skips real installation" };
+            },
+          },
+          { configPath: source, configWorkspace: resources, provider },
+        );
+        assert.equal(proceeded, true);
+        assert.equal(installations, 1);
+        assert.equal(
+          resolveChatLlmReadiness(
+            loadRuntimeConfig({ configPath: source, configWorkspace: resources }).config,
+          ).configured,
+          true,
+        );
+        assert.equal(
+          prompts.calls.filter((call) => call.startsWith("password:")).length,
+          configured ? 0 : 1,
+        );
+        assert.deepEqual(readFileSync(foreign), untouched);
+        assert.equal(existsSync(join(project, "agents")), false);
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+it("chat onboarding refuses a deleted selected source without recreating it or using cwd", async () => {
+  const originalCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "roll-onboarding-missing-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const source = join(root, "selected.yaml");
+  const foreign = join(project, "roll.config.yaml");
+  writeFileSync(source, "{}\n");
+  writeFileSync(foreign, "{}\n");
+  const before = readFileSync(foreign);
+  const prompts = new ScriptedPrompts({});
+  prompts.confirm = async () => {
+    unlinkSync(source);
+    return true;
+  };
+  try {
+    process.chdir(project);
+    await assert.rejects(
+      runChatOnboarding({ prompts }, { configPath: source, configWorkspace: root }),
+      /not found/u,
+    );
+    assert.equal(existsSync(source), false);
+    assert.deepEqual(readFileSync(foreign), before);
+    assert.equal(
+      prompts.calls.some((call) => call.startsWith("password:")),
+      false,
+    );
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
