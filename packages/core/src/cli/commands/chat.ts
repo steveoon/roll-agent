@@ -1,10 +1,5 @@
 import { loadChatConfigBinding } from "../../runtime-host/chat-config-binding.ts";
 import { resolveChatWorkspace } from "../../runtime-host/workspace-identity.ts";
-import {
-  createChatConfigurationControl,
-  type ChatConfigurationControl,
-  type ChatOperationLifecycle,
-} from "../chat/configuration-control.ts";
 import { withReadOnlyChatHistory, readOnlyConversationText } from "../chat/read-only-history.ts";
 import type { RuntimeConfigContext, RuntimeConfigOptions } from "../../config/runtime-context.ts";
 import {
@@ -40,7 +35,6 @@ import {
   chatModelPickerItems,
   chatGptThinkingOptions,
   loadAuthenticatedChatGptModels,
-  prepareInteractiveChatReload,
   type ChatGptModels,
 } from "../../runtime-host/chatgpt-resolution.ts";
 import type { ChatModelSwitching } from "../chat/ink/app.ts";
@@ -61,7 +55,11 @@ import {
   resolveChatScreenModeRequest,
 } from "../chat/screen-mode.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
-import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
+import {
+  formatSkillList,
+  isSlashCommandShaped,
+  parseSkillInvocation,
+} from "../chat/ink/commands.ts";
 import { installCurrentCliShim } from "../utils/current-cli-shim.ts";
 import {
   createChatEngineSignalScope,
@@ -72,7 +70,10 @@ import {
   createClackUserInputPrompt,
   type ChatUserInputPrompt,
 } from "../utils/user-input-prompts.ts";
-import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
+import {
+  buildSessionPickerItems,
+  type BuildSessionPickerItemsOptions,
+} from "../chat/session-picker-format.ts";
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
 import { runBasicScheduleBrowser } from "../chat/basic-schedule-browser.ts";
@@ -120,11 +121,10 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
-  readonly configuration?: ChatConfigurationControl;
-  readonly operationLifecycle?: ChatOperationLifecycle;
+  readonly getStatus?: () => string;
   readonly workspace?: string;
   readonly allProjects?: boolean;
-  readonly occupancyLabel?: (threadId: string) => string;
+  readonly occupancy?: BuildSessionPickerItemsOptions["occupancy"];
   readonly viewConversation?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal?: AbortSignal) => Promise<void>;
@@ -134,8 +134,11 @@ interface ReplIo {
   readonly confirm?: ChatConfirm;
   readonly userInputPrompt?: ChatUserInputPrompt;
   readonly signal?: AbortSignal;
-  readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
-  readonly sessionPicker?: (items: readonly SessionPickerItem[]) => Promise<string | undefined>;
+  readonly resumeSession?: (
+    threadId: string,
+    assignToCurrentProject?: boolean,
+  ) => Promise<AgentSession>;
+  readonly sessionPicker?: typeof clackSessionPicker;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
   readonly scheduleBrowser?: ScheduleBrowserPort;
 }
@@ -431,9 +434,6 @@ export async function runRepl(
   const unsubscribeConnection = io.connection?.subscribe(reportConnectionFailure);
   reportConnectionFailure();
   io.connection?.start();
-  const unsubscribeConfiguration = io.configuration?.subscribe((snapshot) =>
-    log.info(snapshot.text),
-  );
   let titled = !isNewSession;
   const initial = { id: session.id, isNew: isNewSession, submitted: false };
   try {
@@ -465,16 +465,8 @@ export async function runRepl(
         }
         continue;
       }
-      if (input === "/status" || input === "/reload") {
-        if (!io.configuration) log.info("当前入口没有可重新加载的配置来源");
-        else if (input === "/status") log.info(io.configuration.snapshot().text);
-        else {
-          try {
-            io.configuration.reload();
-          } catch (error) {
-            log.error(error instanceof Error ? error.message : String(error));
-          }
-        }
+      if (input === "/status") {
+        log.info(io.getStatus?.() ?? "当前入口没有状态信息");
         continue;
       }
       if (input === "/view" || input.startsWith("/view ")) {
@@ -488,13 +480,8 @@ export async function runRepl(
       if (input === "/compact") {
         log.debug("chat.repl manual compact requested");
         try {
-          io.operationLifecycle?.begin();
-          try {
-            for await (const event of session.compact("manual")) {
-              await renderer.handle(event, session);
-            }
-          } finally {
-            io.operationLifecycle?.end();
+          for await (const event of session.compact("manual")) {
+            await renderer.handle(event, session);
           }
         } catch (error) {
           log.error(error instanceof Error ? error.message : String(error));
@@ -575,37 +562,36 @@ export async function runRepl(
           log.info("当前模式不支持会话切换");
           continue;
         }
-        const items = buildSessionPickerItems(
-          store.listThreads({
-            origin: "interactive",
-            ...(input === "/resume all" || io.allProjects || io.workspace === undefined
-              ? {}
-              : { workspace: io.workspace }),
-          }),
-          {
-            currentSessionId: session.id,
-            countMessages: (threadId) => store.countMessages(threadId),
-            now: new Date(),
-            ...(io.occupancyLabel ? { occupancyLabel: io.occupancyLabel } : {}),
-          },
-        );
+        const items = buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
+          currentSessionId: session.id,
+          countMessages: (threadId) => store.countMessages(threadId),
+          now: new Date(),
+          ...(io.workspace === undefined ? {} : { workspace: io.workspace }),
+          allProjects: input === "/resume all" || io.allProjects === true,
+          ...(io.occupancy ? { occupancy: io.occupancy } : {}),
+        });
         if (items.length === 0) {
           log.info("暂无其他会话");
           continue;
         }
         rl.pause();
-        const targetId = await (io.sessionPicker ?? clackSessionPicker)(items);
-        if (targetId === undefined) {
+        const selection = await (io.sessionPicker ?? clackSessionPicker)(items);
+        if (selection === undefined) {
           continue;
         }
+        if (selection.threadId === session.id && !selection.assignToCurrentProject) continue;
         let next: AgentSession;
         try {
-          next = await io.resumeSession(targetId);
+          next = await io.resumeSession(selection.threadId, selection.assignToCurrentProject);
         } catch (error) {
           log.error(`切换失败：${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
         const previous = session;
+        if (next === previous) {
+          log.info("已将当前会话归入本项目");
+          continue;
+        }
         previous.setUserInputAvailable(false);
         await previous.close();
         if (
@@ -640,6 +626,10 @@ export async function runRepl(
         log.info("用法: /<skill-name> [/<skill-name> ...] 你的请求");
         continue;
       }
+      if (!skillInvocation && isSlashCommandShaped(input)) {
+        log.warn(`未知命令 ${input.split(/\s+/, 1)[0] ?? input}`);
+        continue;
+      }
       if (!titled) {
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
@@ -649,13 +639,8 @@ export async function runRepl(
       }
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
       try {
-        io.operationLifecycle?.begin();
-        try {
-          await io.beforeSend?.(io.signal);
-          for await (const event of session.send(input)) await renderer.handle(event, session);
-        } finally {
-          io.operationLifecycle?.end();
-        }
+        await io.beforeSend?.(io.signal);
+        for await (const event of session.send(input)) await renderer.handle(event, session);
       } catch (error) {
         log.error(error instanceof Error ? error.message : String(error));
       }
@@ -666,7 +651,6 @@ export async function runRepl(
       session.setUserInputAvailable(false);
     } finally {
       unsubscribeConnection?.();
-      unsubscribeConfiguration?.();
       rl.close();
       if (
         initial.isNew &&
@@ -846,7 +830,6 @@ export default defineCommand({
       process.exitCode = 1;
       return;
     }
-    const startupConfig = config;
     let selection: Awaited<ReturnType<typeof resolveInteractiveChatLlm>>;
     try {
       selection = await resolveInteractiveChatLlm(config, {
@@ -940,7 +923,6 @@ export default defineCommand({
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
     let sessionPreparation: ReturnType<typeof createChatGptSessionPreparation> | undefined;
-    let configuration: ReturnType<typeof createChatConfigurationControl> | undefined;
     try {
       backfillScheduledThreads(config, runtime, store);
       if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
@@ -981,18 +963,15 @@ export default defineCommand({
       signalScope.setEngine(engine);
       const chatEngine = engine;
       const fastMode = createChatFastModeControl({
-        guard: () => configuration?.guard() ?? (() => {}),
         isAvailable: () => currentProvider === "chatgpt",
         getEnabled: () => currentProvider === "chatgpt" && currentFastMode,
         prepareEnable: async () => {
-          configuration?.assertReady();
           if (currentProvider !== "chatgpt") {
             throw new Error("Fast 模式仅适用于 ChatGPT 订阅模型。");
           }
           await chatConnection.ensure();
         },
         apply: (enabled) => {
-          configuration?.assertReady();
           if (currentProvider !== "chatgpt") {
             if (enabled) throw new Error("Fast 模式仅适用于 ChatGPT 订阅模型。");
             currentFastMode = false;
@@ -1027,61 +1006,12 @@ export default defineCommand({
           ? { contextWindowOverride: config.runtime.contextWindow }
           : {}),
       });
-      configuration = createChatConfigurationControl({
-        runtime,
-        initial: { provider, model: modelName },
-        ...(resolveReasoningPresentation(model, providerOptions) === undefined
-          ? {}
-          : { initialReasoning: resolveReasoningPresentation(model, providerOptions)!.kind }),
-        startupConfig,
-        source: binding.configPath ?? "内置默认配置（没有可重新加载的文件）",
-        workspace,
-        ...(binding.configPath === undefined
-          ? {}
-          : { read: () => applyLlmOverrides(binding.read()) }),
-        getThinkingLevel: () => currentThinkingLevel,
-        async apply(latest, signal) {
-          const prepared = await prepareInteractiveChatReload(
-            latest,
-            chatConnection,
-            subscriptionAccountId,
-            undefined,
-            signal,
-          );
-          const next = prepared.selection;
-          signal?.throwIfAborted();
-          if (
-            prepared.accountId !== undefined &&
-            chatConnection.accountId !== undefined &&
-            prepared.accountId !== chatConnection.accountId
-          ) {
-            throw new Error("ChatGPT 账号已变化，请重新连接");
-          }
-          chatEngine.switchModel(next);
-          config = latest;
-          activeSelection = next;
-          currentProvider = next.provider;
-          currentModel = next.modelName;
-          currentThinkingLevel = latest.runtime.thinkingLevel;
-          currentFastMode = latest.runtime.fastMode;
-          if (prepared.models !== undefined) {
-            subscriptionModels = prepared.models;
-            subscriptionAccountId = prepared.accountId;
-            chatConnection.updateCatalog(prepared.models, prepared.accountId);
-          }
-          chatConnection.setEnabled(currentProvider === "chatgpt");
-          sessionPreparation?.synchronize();
-          const reasoning = resolveReasoningPresentation(
-            activeSelection.model,
-            activeSelection.providerOptions,
-          );
-          return {
-            status: "applied",
-            model: { provider: currentProvider, model: currentModel },
-            ...(reasoning ? { reasoning: reasoning.kind } : {}),
-          };
-        },
-      });
+      const getStatus = () =>
+        [
+          `项目：${workspace}`,
+          `配置：${binding.configPath ?? "内置默认配置"}`,
+          `有效模型：${currentProvider}/${currentModel}`,
+        ].join("\n");
       const viewConversation = (threadId: string) => {
         if (!threadId) throw new Error("用法: /view <session-id>");
         const text = withReadOnlyChatHistory(runtime, config, (readOnly) =>
@@ -1091,7 +1021,13 @@ export default defineCommand({
         return text;
       };
       const scheduleBrowser = createScheduleBrowserPort({ config, runtime, engine: chatEngine });
-      const resumeSession = async (threadId: string): Promise<AgentSession> => {
+      const resumeSession = async (
+        threadId: string,
+        assignToCurrentProject = false,
+      ): Promise<AgentSession> => {
+        if (assignToCurrentProject && store.getThread(threadId)?.origin.kind === "scheduled") {
+          throw new Error("只能将未分类的交互会话归入当前项目");
+        }
         if (store.getThread(threadId)?.origin.kind === "scheduled") {
           const next = await continueScheduledThread(
             { config, runtime, engine: chatEngine },
@@ -1102,7 +1038,20 @@ export default defineCommand({
           );
           return next;
         }
-        return chatEngine.resumeSession(threadId);
+        const active = sessionForCleanup;
+        const next = await chatEngine.resumeSession(threadId);
+        try {
+          if (assignToCurrentProject) store.assignThreadWorkspace(threadId, workspace);
+          return next;
+        } catch (error) {
+          if (next === active) throw error;
+          try {
+            await next.close();
+          } catch (closeError) {
+            throw new AggregateError([error, closeError], "会话归类失败，目标会话清理未完成");
+          }
+          throw error;
+        }
       };
       let session: AgentSession;
       if (fromRun !== undefined) {
@@ -1182,11 +1131,10 @@ export default defineCommand({
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
               fastMode,
-              configuration,
-              operationLifecycle: configuration.lifecycle,
+              getStatus,
               workspace,
               allProjects: args["all-projects"],
-              occupancyLabel: (id) => occupancyLabel(store, id),
+              occupancy: (id) => store.inspectSessionOccupancy(id),
               viewConversation,
               model: currentModel,
               connection: chatConnection,
@@ -1215,14 +1163,9 @@ export default defineCommand({
                         currentFastMode,
                       )
                     : thinkingProviderOptions(currentProvider, currentModel, level);
-                configuration?.assertReady();
                 session.setProviderOptions(nextOptions);
                 activeSelection = { ...activeSelection, providerOptions: nextOptions ?? {} };
                 currentThinkingLevel = level;
-                configuration?.adoptActive(
-                  { provider: currentProvider, model: currentModel },
-                  resolveReasoningPresentation(activeSelection.model, nextOptions)?.kind,
-                );
               },
               resumeSession,
               scheduleBrowser,
@@ -1267,7 +1210,6 @@ export default defineCommand({
                   return chatGptThinkingLevels(model);
                 },
                 switchTo: async (input, selectedEffort) => {
-                  const assertCurrent = configuration?.guard();
                   if (input.startsWith("chatgpt/") && subscriptionModels.length === 0) {
                     const choices = await loadAuthenticatedChatGptModels(
                       getChatGptAuthService(),
@@ -1296,20 +1238,12 @@ export default defineCommand({
                       ),
                     getFastMode: () => currentFastMode,
                     commit: (nextSelection) => {
-                      assertCurrent?.();
                       const resolution = chatEngine.switchModel(nextSelection);
                       activeSelection = nextSelection;
                       currentProvider = choice.provider;
                       chatConnection.setEnabled(choice.provider === "chatgpt");
                       currentModel = choice.model;
                       currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
-                      configuration?.adoptActive(
-                        { provider: currentProvider, model: currentModel },
-                        resolveReasoningPresentation(
-                          nextSelection.model,
-                          nextSelection.providerOptions,
-                        )?.kind,
-                      );
                       return {
                         thinkingLevel: currentThinkingLevel,
                         id: choice.id,
@@ -1356,11 +1290,10 @@ export default defineCommand({
           );
           await runRepl(session, store, isNewSession, {
             fastMode,
-            configuration,
-            operationLifecycle: configuration.lifecycle,
+            getStatus,
             workspace,
             allProjects: args["all-projects"],
-            occupancyLabel: (id) => occupancyLabel(store, id),
+            occupancy: (id) => store.inspectSessionOccupancy(id),
             viewConversation,
             input: process.stdin,
             output: process.stdout,
@@ -1382,7 +1315,6 @@ export default defineCommand({
         process.exitCode = 1;
       }
     } finally {
-      configuration?.close();
       sessionPreparation?.dispose();
       chatConnection.dispose();
       catalogRefreshController.abort();

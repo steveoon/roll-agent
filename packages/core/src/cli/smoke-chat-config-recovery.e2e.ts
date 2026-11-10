@@ -259,15 +259,15 @@ test(
 );
 
 test(
-  "real no-config ChatGPT CLI keeps sending and preserving history after unsupported reload",
+  "real no-config ChatGPT CLI reports startup identity and ignores subsequently created config",
   { timeout: 60_000 },
   async (t) => {
     const f = await fixture(t);
     const child = f.start(["--provider", "chatgpt", "--model", "review-model"]);
     await f.wait(child, "no-config CLI prompt", () => child.output.stdout.includes("› "));
-    child.child.stdin.write("/reload\n");
-    await f.wait(child, "unsupported reload notice", () =>
-      child.output.stderr.includes("未绑定配置文件"),
+    child.child.stdin.write("/status\n");
+    await f.wait(child, "built-in config status", () =>
+      child.output.stderr.includes("配置：内置默认配置"),
     );
     child.child.stdin.write("first-unbound-message\n");
     await f.wait(child, "first real subscription reply", () =>
@@ -275,9 +275,9 @@ test(
     );
     const after = child.output.stderr.length;
     writeFileSync(join(f.project, "roll.config.yaml"), "runtime:\n  model: must-not-rebind\n");
-    child.child.stdin.write("/reload\n");
-    await f.wait(child, "still unbound after new file", () =>
-      child.output.stderr.slice(after).includes("未绑定配置文件"),
+    child.child.stdin.write("/status\n");
+    await f.wait(child, "still using built-in config after new file", () =>
+      child.output.stderr.slice(after).includes("配置：内置默认配置"),
     );
     child.child.stdin.write("second-unbound-message\n");
     await f.wait(child, "second real subscription reply", () =>

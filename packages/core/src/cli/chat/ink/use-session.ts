@@ -1,4 +1,3 @@
-import type { ChatOperationLifecycle } from "../configuration-control.ts";
 import { randomUUID } from "node:crypto";
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { AgentSession, SessionAttachment, SessionEvent } from "@roll-agent/runtime";
@@ -17,7 +16,6 @@ import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
-  readonly operationLifecycle?: ChatOperationLifecycle;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly onPreparationCancelled?: () => void;
   readonly model: string;
@@ -88,7 +86,6 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   const busyRef = useRef(false);
   const preparationRef = useRef<AbortController | undefined>(undefined);
   const beforeSend = options.beforeSend;
-  const operationLifecycle = options.operationLifecycle;
   const onPreparationCancelled = options.onPreparationCancelled;
 
   useEffect(() => {
@@ -105,7 +102,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   }, [session]);
 
   const drive = useCallback(
-    async (iterable: AsyncIterable<SessionEvent>, onAdmissionDenied?: () => void) => {
+    async (iterable: AsyncIterable<SessionEvent>) => {
       let pendingDelta: StreamDeltaEvent | undefined;
       let flushTimer: ReturnType<typeof setTimeout> | undefined;
       const flushPending = () => {
@@ -142,10 +139,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           flushTimer = setTimeout(flushPending, STREAM_FLUSH_MS);
         }
       };
-      let admitted = false;
       try {
-        operationLifecycle?.begin();
-        admitted = true;
         for await (const event of iterable) {
           if (event.type === "debug") {
             log.debug(formatDebugEvent(event));
@@ -213,7 +207,6 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       } catch (error) {
-        if (!admitted) onAdmissionDenied?.();
         flushPending();
         dispatch({
           type: "session-event",
@@ -225,10 +218,9 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         flushPending();
         dispatch({ type: "turn-end" });
         busyRef.current = false;
-        if (admitted) operationLifecycle?.end();
       }
     },
-    [session, operationLifecycle],
+    [session],
   );
 
   const submit = useCallback(
@@ -255,12 +247,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
               })),
             }
           : text;
-      const restoreInput = () => {
-        dispatch({ type: "set-draft", value: text });
-        onPreparationCancelled?.();
-      };
       if (!beforeSend) {
-        drive(session.send(input), restoreInput).catch(() => undefined);
+        drive(session.send(input)).catch(() => undefined);
         return;
       }
       const preparation = new AbortController();
@@ -278,7 +266,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         }
         yield* session.send(input);
       }
-      drive(preparedTurn(), restoreInput).catch(() => undefined);
+      drive(preparedTurn()).catch(() => undefined);
     },
     [drive, session, beforeSend, onPreparationCancelled],
   );

@@ -1539,6 +1539,28 @@ export class ThreadStore {
     this.db.prepare("UPDATE threads SET title = ? WHERE id = ?").run(title, threadId);
   }
 
+  /** Explicitly classify interactive history without changing its recency or contents. */
+  assignThreadWorkspace(threadId: string, workspace: string): void {
+    this.withThreadWrite(threadId, () => {
+      const target = threadWorkspaceSchema.parse(workspace);
+      const thread = this.getThread(threadId);
+      if (thread === undefined) throw new Error(`Thread "${threadId}" 不存在`);
+      if (thread.origin.kind !== "interactive") {
+        throw new Error("定时执行会话不能修改项目归属");
+      }
+      if (thread.workspace === target) return;
+      if (thread.workspace !== undefined) {
+        throw new Error("会话已有项目归属，不能归入其他项目");
+      }
+      const result = this.db
+        .prepare("UPDATE threads SET workspace = ? WHERE id = ? AND workspace IS NULL")
+        .run(target, threadId);
+      if (result.changes !== 1) {
+        throw new Error("会话项目归属已变化，请刷新会话列表后重试");
+      }
+    });
+  }
+
   updateModel(threadId: string, model: string): void {
     return this.withThreadWrite(threadId, () => this.updateModelOwned(threadId, model));
   }
