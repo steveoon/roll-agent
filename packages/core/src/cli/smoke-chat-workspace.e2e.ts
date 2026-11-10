@@ -6,9 +6,11 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -20,7 +22,13 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { z } from "zod";
-import { ScheduleStore, ThreadStore } from "@roll-agent/runtime";
+import {
+  ScheduleStore,
+  SessionClaims,
+  ThreadStore,
+  inspectThreadLibrary,
+} from "@roll-agent/runtime";
+import { createSessionOwnershipHost } from "../runtime-host/session-ownership.ts";
 import {
   cleanupSpawnedRollProcess,
   exitRollChat,
@@ -525,6 +533,73 @@ globalThis.fetch = (input, options) => {
     history: join(source, "history"),
   };
 }
+
+test(
+  "real CLI automatically upgrades history while an idle scheduler keeps running",
+  { timeout: 60_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const store = new ThreadStore(f.history);
+    const id = store.createThread({ title: "before upgrade" });
+    store.appendMessages(id, [{ role: "user", content: "keep this history" }]);
+    store.close();
+    const path = join(f.history, "threads.db");
+    const old = new DatabaseSync(path);
+    old.exec("ALTER TABLE threads DROP COLUMN workspace; PRAGMA user_version = 11");
+    old.close();
+    const original = readFileSync(path);
+    const listed = await f.run(["--list", "--all-projects", "--json"]);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(readFileSync(path), original);
+
+    const ledger = join(f.source, "ledger");
+    const daemon = f.startNode(f.cli, [
+      "schedule",
+      "daemon",
+      "--foreground",
+      "--data-dir",
+      ledger,
+      "--max-concurrent-runs",
+      "1",
+    ]);
+    await f.wait(daemon, () => existsSync(join(ledger, "daemon.json")), "idle scheduler startup");
+    const daemonRecord = readFileSync(join(ledger, "daemon.json"));
+    const claims = new SessionClaims(path, createSessionOwnershipHost("desktop"));
+    const hold = claims.acquire(id);
+    try {
+      const blocked = await f.run(["do not run", "--session", id, "--json"]);
+      assert.notEqual(blocked.status, 0);
+      assert.match(blocked.stderr, /另一个客户端中使用/u);
+      assert.deepEqual(readFileSync(path), original);
+      assert.equal(f.requests.length, 0);
+      hold.release();
+      const resumed = await f.run(["continue after upgrade", "--session", id, "--json"]);
+      assert.equal(resumed.status, 0, resumed.stderr);
+      assert.equal(completedSchema.parse(JSON.parse(resumed.stdout)).sessionId, id);
+      assert.match(resumed.stderr, /会话库已自动升级/u);
+      assert.equal(inspectThreadLibrary(f.history).status, "current");
+      const backups = readdirSync(f.history).filter((name) => name.includes(".backup-"));
+      assert.equal(backups.length, 1);
+      const history = new ThreadStore(f.history, { readOnly: true });
+      try {
+        assert.equal(history.getThread(id)?.workspace, undefined);
+        assert.equal(history.readSnapshot(id).messages[0]?.content, "keep this history");
+      } finally {
+        history.close();
+      }
+      const repeated = await f.run(["continue again", "--session", id, "--json"]);
+      assert.equal(repeated.status, 0, repeated.stderr);
+      assert.doesNotMatch(repeated.stderr, /会话库已自动升级/u);
+      assert.equal(readdirSync(f.history).filter((name) => name.includes(".backup-")).length, 1);
+      assert.equal(daemon.child.exitCode, null);
+      assert.equal(daemon.child.signalCode, null);
+      assert.deepEqual(readFileSync(join(ledger, "daemon.json")), daemonRecord);
+    } finally {
+      hold.release();
+      claims.close();
+    }
+  },
+);
 
 test(
   "real CLI --last and history browsing stay in the current project even when B closes last",

@@ -96,6 +96,7 @@ jobs:
           packages/runtime/src/service/model-config-controller.test.ts
           packages/runtime/src/service/thread-browse.test.ts
           packages/runtime/src/ownership/session-claims.test.ts
+          packages/runtime/src/store/thread-store-auto-migration.test.ts
           packages/runtime/src/store/thread-store-workspace.test.ts
           packages/protocol/src/thread-browse.test.ts
           packages/protocol/src/thread-model.test.ts
