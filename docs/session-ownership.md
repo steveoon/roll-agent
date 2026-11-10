@@ -57,21 +57,42 @@ and another client can reopen the surviving history.
 The original `requestId` still replays its cached failure; an explicit new deletion
 attempt must use a fresh `requestId`, following the existing mutation contract.
 
-## Read-only inspection and explicit migration
+## Read-only inspection and automatic migration
 
 `inspectThreadLibrary(dir)` never creates a directory, claim, or database and never
 migrates. It returns `databasePath`, optional `physicalIdentity` (`inode:dev:ino:birthtimeNs`) and
 `writableAliasSafe`, `schemaVersion`, `supportedSchemaVersion`, and `status`:
 `new`, `current`, `needs_migration`, or `unsupported`.
 
-Core's protected normal constructor permits new database creation and current
-schema access. Existing lower or higher schemas fail with
-`ThreadLibraryMigrationRequiredError`; they are never silently upgraded or replaced.
-The upper client must preserve user choice and explain old-CLI effects before
-calling `migrateOwnedThreadLibrary(runtime, dir, true)`, or Runtime's
-`migrateThreadLibrary({ dir, ownership, confirmStoppedLegacyClients: true })`.
+Core's protected normal constructor opts into `ThreadStoreOptions.migrateOnOpen`.
+Known older schemas are backed up, verified and upgraded automatically on writable
+open, including normal chat, Runtime service and scheduled execution. A successful
+upgrade reports the backup path on stderr; stdout remains usable for JSON/stdio.
+New/current libraries create no backup. Read-only inspection never migrates.
+Automatic startup rejects unversioned existing evidence and unsupported future schemas.
 
-CLI users run `roll runtime migrate` in the original project directory to inspect
+Automatic initialization uses the existing library gate to exclude all live or
+unverifiable thread claims. An idle scheduler does not hold a conversation claim
+and does not need to stop, uninstall or restart. A conflicting session must finish
+before retrying; Roll never terminates another client or takes over its live claim.
+The primary SQLite `BEGIN IMMEDIATE` transaction starts before backup, rechecks
+the schema, and remains held until the migration commits. Backup or migration
+failure rolls back the transaction and releases initialization resources for retry.
+An incomplete or unverified backup is removed. Once rollback succeeds, automatic
+migration also removes that attempt's verified backup; older backups are untouched.
+If rollback cannot be verified, the verified backup is retained and its path is
+reported. Cleanup errors preserve the initiating error and report the retained path.
+Automatic migration does not run global retention sweeps.
+
+Runtime embedders retain the default explicit migration behavior unless they opt
+into `migrateOnOpen` alongside `ownership`. Writable automatic migration without
+an ownership host is rejected. `ThreadStore.migrationBackupPath` is the verified backup
+created by that open, or `null`. The explicit APIs
+`migrateOwnedThreadLibrary(runtime, dir, true)` and
+`migrateThreadLibrary({ dir, ownership, confirmStoppedLegacyClients: true })`
+remain available for clients that manage migration themselves.
+
+For manual maintenance, users can run `roll runtime migrate` in the original project directory to inspect
 the selected library and receive the confirmation instructions. It does not require
 LLM configuration or create a library when none exists. After stopping every CLI,
 desktop client and scheduler using that library, explicitly confirm the backup and
@@ -87,16 +108,21 @@ roll runtime migrate --threads-dir "/path/to/threads" --confirm-stopped-clients 
 project's `runtime.threads-dir`. No confirmation means no migration; live coordinated
 claims still block an explicitly confirmed migration. JSON success returns
 `{ backupPath, preflight }`; `backupPath` is `null` when the library is already current
-or absent. Unsupported future schemas are refused. Normal chat startup remains
-protected and points old-schema users to this command instead of migrating implicitly.
+or absent. Unsupported future schemas are refused. This explicit command's
+confirmation requirement does not apply to automatic normal startup. The existing
+explicit API can also initialize an unversioned database after the caller has
+inspected it and explicitly requested a backed-up migration; this is not automatic
+recognition of that database as Roll history.
 
 Migration acquires the library gate, requires no thread claims, rechecks schema,
 uses SQLite `VACUUM INTO` to create a consistent unique backup, verifies the backup
 with `quick_check` and the original schema version, and only then runs transactional
 migration. It returns `backupPath` and the resulting preflight. Failure before
-verification leaves history unmigrated. Old clients do not honor the gate: the
-explicit confirmation means those clients have been stopped, not that they were
-automatically detected. Schema-11 old CLI/Desktop Runtime versions reject a migrated
+verification leaves history unmigrated. Pre-ownership clients do not honor the
+session gate: an explicit command's confirmation means those clients have been
+stopped, not that they were automatically detected. Automatic migration serializes
+SQLite writes during backup/upgrade but does not make uncooperative legacy
+applications safe to use concurrently afterward. Schema-11 CLI/Desktop Runtime versions reject a migrated
 schema-12 library, even for read-only access. Upgrade all clients sharing the library
 before migration; updating an external CLI does not update Desktop's bundled Runtime.
 
