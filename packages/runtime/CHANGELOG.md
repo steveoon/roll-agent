@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 1.7.0
+
+### Minor Changes
+
+- [#317](https://github.com/steveoon/roll-agent/pull/317) [`03dd2a3`](https://github.com/steveoon/roll-agent/commit/03dd2a3b907603a4b45f3f95402c75b088a88ed7) Thanks [@steveoon](https://github.com/steveoon)! - Add an explicit ThreadStore operation to assign unclassified interactive history to a workspace while retaining the existing session ownership checks. Preserve conversation identity, timestamps, messages, checkpoints and execution history; reject reassignment to another project and changes to scheduled execution provenance.
+
 ## 1.6.0
 
 ### Minor Changes

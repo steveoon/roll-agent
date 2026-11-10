@@ -1,5 +1,22 @@
 # @roll-agent/core
 
+## 2.0.0
+
+### Major Changes
+
+- [#317](https://github.com/steveoon/roll-agent/pull/317) [`2cccf63`](https://github.com/steveoon/roll-agent/commit/2cccf63afffbb35759fb80da1f3d7167fb8dc3dc) Thanks [@steveoon](https://github.com/steveoon)! - Remove the partial `/reload` command from ordinary interactive `roll chat`. After editing `roll.config.yaml`, restart and resume with `--last` (or `--session <id>`) to apply the complete configuration while preserving conversation history. `/status` remains read-only; `/model`, effort and Fast switching retain their existing behavior. Runtime configuration reload and per-thread model APIs used by third-party apps, including the legacy `--server` entry point, are unchanged.
+
+### Minor Changes
+
+- [#317](https://github.com/steveoon/roll-agent/pull/317) [`7d4553b`](https://github.com/steveoon/roll-agent/commit/7d4553b817983461900c4f016e33b01cc48d16e5) Thanks [@steveoon](https://github.com/steveoon)! - Show current-project conversations and unclassified old history together in `/resume`, including the visibly marked currently open conversation. Provide an explicit action to assign old conversations to the current project, including assigning the active conversation in place. Preserve history and existing session ownership; reject assignment while another client owns the conversation.
+  
+  Clarify history groups with counts and separators, align metadata in responsive columns, distinguish the open conversation from the cursor selection, and combine navigation hints into one action bar.
+
+### Patch Changes
+
+- Updated dependencies [[`03dd2a3`](https://github.com/steveoon/roll-agent/commit/03dd2a3b907603a4b45f3f95402c75b088a88ed7)]:
+  - @roll-agent/runtime@1.7.0
+
 ## 1.6.1
 
 ### Patch Changes
