@@ -141,6 +141,8 @@ jobs:
           packages/core/src/cli/chat/ink/state.test.ts
           packages/core/src/cli/chat/ink/app.test.ts
           packages/core/src/cli/utils/current-cli-shim.test.ts
+          packages/core/src/cli/utils/current-cli-windows.test.ts
+          packages/core/src/cli/utils/current-cli-windows-lifecycle.test.ts
           packages/core/src/cli/utils/chat-renderer.test.ts
           packages/core/src/skills/library.test.ts
 
