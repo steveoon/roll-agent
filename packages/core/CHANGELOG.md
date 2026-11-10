@@ -1,5 +1,15 @@
 # @roll-agent/core
 
+## 1.6.1
+
+### Patch Changes
+
+- [#315](https://github.com/steveoon/roll-agent/pull/315) [`2a0da7d`](https://github.com/steveoon/roll-agent/commit/2a0da7da49feb16a0b2b708f6074d8249a435087) Thanks [@steveoon](https://github.com/steveoon)! - Restore automatic history upgrades during normal writable startup. Roll Chat, Runtime service and scheduled execution back up and verify known older libraries before migrating, without requiring a separate command or scheduler service uninstall. Idle schedulers keep running; live or unverifiable session claims still block migration.
+  
+  Successful upgrades report the verified backup path on stderr without changing JSON/stdio output. Read-only operations never migrate. Older clients that do not support the new schema must be upgraded before reopening the shared library.
+- Updated dependencies [[`b6d8afe`](https://github.com/steveoon/roll-agent/commit/b6d8afe6896a42c859e09f91eb08b9e86be6ccf7)]:
+  - @roll-agent/runtime@1.6.0
+
 ## 1.6.0
 
 ### Minor Changes
