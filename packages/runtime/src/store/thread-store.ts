@@ -14,7 +14,16 @@ import {
   type ContextRecoveryState,
   type SemanticLedgerRow,
 } from "./semantic-ledger.ts";
-import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -568,12 +577,16 @@ function parseRuntimeEventRow(
 export interface ThreadStoreOptions {
   readonly now?: () => Date;
   readonly readOnly?: boolean;
+  /** Back up and migrate known older schemas on writable open; requires ownership. */
+  readonly migrateOnOpen?: boolean;
   readonly ownership?: SessionOwnershipHost;
   /** Advisory liveness probe for read-only browsing; does not grant write ownership. */
   readonly ownershipProbe?: Pick<SessionOwnershipHost, "probe">;
 }
 
 export class ThreadStore {
+  /** Verified pre-upgrade backup created by this open; null when no migration ran. */
+  readonly migrationBackupPath: string | null = null;
   private readonly db: DatabaseSync;
   private readonly databasePath: string;
   private readonly ownershipProbe: Pick<SessionOwnershipHost, "probe">;
@@ -605,6 +618,9 @@ export class ThreadStore {
       }
       return;
     }
+    if (options.migrateOnOpen === true && options.ownership === undefined) {
+      throw new Error("Automatic history migration requires session ownership");
+    }
     if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
@@ -623,6 +639,14 @@ export class ThreadStore {
     try {
       releaseInitialization = this.claims?.beginLibraryInitialization(() => {
         const inspection = inspectThreadLibrary(resolved);
+        if (
+          options.migrateOnOpen === true &&
+          inspection.status === "needs_migration" &&
+          inspection.schemaVersion !== null &&
+          inspection.schemaVersion > 0
+        ) {
+          return true;
+        }
         if (inspection.status !== "current" && inspection.status !== "new") {
           throw new ThreadLibraryMigrationRequiredError(inspection);
         }
@@ -630,7 +654,10 @@ export class ThreadStore {
       });
       this.db = opened = new DatabaseSync(databasePath);
       if (process.platform !== "win32") chmodSync(databasePath, 0o600);
-      this.init(options.ownership !== undefined);
+      this.migrationBackupPath = this.init(
+        options.ownership !== undefined,
+        options.migrateOnOpen === true,
+      );
     } catch (error) {
       opened?.close();
       releaseInitialization?.();
@@ -641,7 +668,7 @@ export class ThreadStore {
     }
   }
 
-  private init(coordinated = false): void {
+  private init(coordinated = false, migrateOnOpen = false): string | null {
     // v4 rewrites and prunes legacy secret-bearing evidence. Secure deletion overwrites removed
     // cells instead of leaving recoverable payloads on SQLite freelist pages.
     this.db.exec(
@@ -649,22 +676,37 @@ export class ThreadStore {
        PRAGMA foreign_keys = ON;
        PRAGMA secure_delete = ON;`,
     );
-    const versionRow = this.db.prepare("PRAGMA user_version").get() as {
-      readonly user_version: number;
-    };
-    if (versionRow.user_version > SCHEMA_VERSION) {
+    const initialVersion = this.db.prepare("PRAGMA user_version").get()?.user_version;
+    if (typeof initialVersion !== "number") throw new Error("Invalid ThreadStore schema version");
+    if (initialVersion > SCHEMA_VERSION) {
       throw new Error(
-        `ThreadStore schema v${String(versionRow.user_version)} 高于当前支持的 v${String(SCHEMA_VERSION)}`,
+        `ThreadStore schema v${String(initialVersion)} 高于当前支持的 v${String(SCHEMA_VERSION)}`,
       );
     }
 
     // Current-schema initialization must not prune or repair other threads behind their owners.
-    if (coordinated && versionRow.user_version === SCHEMA_VERSION) return;
-    if (coordinated && versionRow.user_version !== 0) {
+    if (coordinated && initialVersion === SCHEMA_VERSION) return null;
+    if (coordinated && initialVersion !== 0 && !migrateOnOpen) {
       throw new Error("Existing history requires explicit backed-up migration");
     }
+    let backupPath: string | null = null;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Recheck after acquiring the primary write lock. Keep it until COMMIT so even a
+      // SQLite writer outside the ownership protocol cannot write between backup and DDL.
+      const version = this.db.prepare("PRAGMA user_version").get()?.user_version;
+      if (typeof version !== "number" || version > SCHEMA_VERSION) {
+        throw new Error("Unsupported ThreadStore schema version");
+      }
+      if (coordinated && version === SCHEMA_VERSION) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const versionRow = { user_version: version };
+      backupPath =
+        migrateOnOpen && version > 0 && version < SCHEMA_VERSION
+          ? createThreadLibraryBackup(this.databasePath, version)
+          : null;
       this.db.exec(
         `CREATE TABLE IF NOT EXISTS threads (
          id TEXT PRIMARY KEY,
@@ -934,13 +976,25 @@ export class ThreadStore {
         }
       }
       this.initializeMissingRuntimeEventStatesInTransaction();
-      const retentionNow = this.now().toISOString();
-      this.enforceAllToolExecutionRetentionInTransaction(retentionNow);
-      this.enforceAllRuntimeEventRetentionInTransaction(retentionNow);
+      if (!migrateOnOpen) {
+        const retentionNow = this.now().toISOString();
+        this.enforceAllToolExecutionRetentionInTransaction(retentionNow);
+        this.enforceAllRuntimeEventRetentionInTransaction(retentionNow);
+      }
       this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
       this.db.exec("COMMIT");
+      return backupPath;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      try {
+        this.db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `History migration failed and rollback could not be verified${backupPath === null ? "" : `; backup retained: ${backupPath}`}`,
+          { cause: error },
+        );
+      }
+      if (backupPath !== null) discardFailedThreadLibraryBackup(backupPath, error);
       throw error;
     }
   }
@@ -3292,9 +3346,28 @@ export function migrateThreadLibrary(input: {
       throw new ThreadLibraryMigrationRequiredError(current);
     }
     const sourcePath = canonicalSessionDatabasePath(current.databasePath);
-    const backupPath = `${sourcePath}.backup-${randomUUID()}.sqlite`;
+    const backupPath = createThreadLibraryBackup(sourcePath, current.schemaVersion);
+    gate.assert();
+    const upgraded = new ThreadStore(input.dir);
+    upgraded.close();
+    return { backupPath, preflight: inspectThreadLibrary(input.dir) };
+  } finally {
+    gate?.release();
+    claims.close();
+  }
+}
+
+/** A consistent verified snapshot; automatic migration holds the primary write lock throughout. */
+function createThreadLibraryBackup(databasePath: string, schemaVersion: number | null): string {
+  const sourcePath = canonicalSessionDatabasePath(databasePath);
+  const backupPath = `${sourcePath}.backup-${randomUUID()}.sqlite`;
+  // Reserve an empty private file. VACUUM INTO accepts it, and cleanup owns only this file.
+  const file = openSync(backupPath, "wx", 0o600);
+  try {
+    closeSync(file);
     const source = new DatabaseSync(sourcePath, { readOnly: true });
     try {
+      source.exec(`PRAGMA busy_timeout = ${String(THREAD_STORE_BUSY_TIMEOUT_MS)};`);
       source.prepare("VACUUM INTO ?").run(backupPath);
     } finally {
       source.close();
@@ -3306,19 +3379,29 @@ export function migrateThreadLibrary(input: {
       if (
         check.length !== 1 ||
         check[0]?.quick_check !== "ok" ||
-        backup.prepare("PRAGMA user_version").get()?.user_version !== current.schemaVersion
+        backup.prepare("PRAGMA user_version").get()?.user_version !== schemaVersion
       ) {
         throw new Error("SQLite backup verification failed; original history was not migrated");
       }
     } finally {
       backup.close();
     }
-    gate.assert();
-    const upgraded = new ThreadStore(input.dir);
-    upgraded.close();
-    return { backupPath, preflight: inspectThreadLibrary(input.dir) };
-  } finally {
-    gate?.release();
-    claims.close();
+    return backupPath;
+  } catch (error) {
+    discardFailedThreadLibraryBackup(backupPath, error);
   }
+}
+
+/** Discard only this attempt's unusable/unneeded backup, without hiding the initiating error. */
+function discardFailedThreadLibraryBackup(backupPath: string, error: unknown): never {
+  try {
+    rmSync(backupPath, { force: true });
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [error, cleanupError],
+      `Failed to remove unsuccessful history backup: ${backupPath}`,
+      { cause: error },
+    );
+  }
+  throw error;
 }
