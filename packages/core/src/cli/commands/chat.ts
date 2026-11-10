@@ -72,7 +72,10 @@ import {
   createClackUserInputPrompt,
   type ChatUserInputPrompt,
 } from "../utils/user-input-prompts.ts";
-import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
+import {
+  buildSessionPickerItems,
+  type BuildSessionPickerItemsOptions,
+} from "../chat/session-picker-format.ts";
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
 import { runBasicScheduleBrowser } from "../chat/basic-schedule-browser.ts";
@@ -124,7 +127,7 @@ interface ReplIo {
   readonly operationLifecycle?: ChatOperationLifecycle;
   readonly workspace?: string;
   readonly allProjects?: boolean;
-  readonly occupancyLabel?: (threadId: string) => string;
+  readonly occupancy?: BuildSessionPickerItemsOptions["occupancy"];
   readonly viewConversation?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal?: AbortSignal) => Promise<void>;
@@ -134,8 +137,11 @@ interface ReplIo {
   readonly confirm?: ChatConfirm;
   readonly userInputPrompt?: ChatUserInputPrompt;
   readonly signal?: AbortSignal;
-  readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
-  readonly sessionPicker?: (items: readonly SessionPickerItem[]) => Promise<string | undefined>;
+  readonly resumeSession?: (
+    threadId: string,
+    assignToCurrentProject?: boolean,
+  ) => Promise<AgentSession>;
+  readonly sessionPicker?: typeof clackSessionPicker;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
   readonly scheduleBrowser?: ScheduleBrowserPort;
 }
@@ -575,37 +581,36 @@ export async function runRepl(
           log.info("当前模式不支持会话切换");
           continue;
         }
-        const items = buildSessionPickerItems(
-          store.listThreads({
-            origin: "interactive",
-            ...(input === "/resume all" || io.allProjects || io.workspace === undefined
-              ? {}
-              : { workspace: io.workspace }),
-          }),
-          {
-            currentSessionId: session.id,
-            countMessages: (threadId) => store.countMessages(threadId),
-            now: new Date(),
-            ...(io.occupancyLabel ? { occupancyLabel: io.occupancyLabel } : {}),
-          },
-        );
+        const items = buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
+          currentSessionId: session.id,
+          countMessages: (threadId) => store.countMessages(threadId),
+          now: new Date(),
+          ...(io.workspace === undefined ? {} : { workspace: io.workspace }),
+          allProjects: input === "/resume all" || io.allProjects === true,
+          ...(io.occupancy ? { occupancy: io.occupancy } : {}),
+        });
         if (items.length === 0) {
           log.info("暂无其他会话");
           continue;
         }
         rl.pause();
-        const targetId = await (io.sessionPicker ?? clackSessionPicker)(items);
-        if (targetId === undefined) {
+        const selection = await (io.sessionPicker ?? clackSessionPicker)(items);
+        if (selection === undefined) {
           continue;
         }
+        if (selection.threadId === session.id && !selection.assignToCurrentProject) continue;
         let next: AgentSession;
         try {
-          next = await io.resumeSession(targetId);
+          next = await io.resumeSession(selection.threadId, selection.assignToCurrentProject);
         } catch (error) {
           log.error(`切换失败：${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
         const previous = session;
+        if (next === previous) {
+          log.info("已将当前会话归入本项目");
+          continue;
+        }
         previous.setUserInputAvailable(false);
         await previous.close();
         if (
@@ -1091,7 +1096,13 @@ export default defineCommand({
         return text;
       };
       const scheduleBrowser = createScheduleBrowserPort({ config, runtime, engine: chatEngine });
-      const resumeSession = async (threadId: string): Promise<AgentSession> => {
+      const resumeSession = async (
+        threadId: string,
+        assignToCurrentProject = false,
+      ): Promise<AgentSession> => {
+        if (assignToCurrentProject && store.getThread(threadId)?.origin.kind === "scheduled") {
+          throw new Error("只能将未分类的交互会话归入当前项目");
+        }
         if (store.getThread(threadId)?.origin.kind === "scheduled") {
           const next = await continueScheduledThread(
             { config, runtime, engine: chatEngine },
@@ -1102,7 +1113,20 @@ export default defineCommand({
           );
           return next;
         }
-        return chatEngine.resumeSession(threadId);
+        const active = sessionForCleanup;
+        const next = await chatEngine.resumeSession(threadId);
+        try {
+          if (assignToCurrentProject) store.assignThreadWorkspace(threadId, workspace);
+          return next;
+        } catch (error) {
+          if (next === active) throw error;
+          try {
+            await next.close();
+          } catch (closeError) {
+            throw new AggregateError([error, closeError], "会话归类失败，目标会话清理未完成");
+          }
+          throw error;
+        }
       };
       let session: AgentSession;
       if (fromRun !== undefined) {
@@ -1186,7 +1210,7 @@ export default defineCommand({
               operationLifecycle: configuration.lifecycle,
               workspace,
               allProjects: args["all-projects"],
-              occupancyLabel: (id) => occupancyLabel(store, id),
+              occupancy: (id) => store.inspectSessionOccupancy(id),
               viewConversation,
               model: currentModel,
               connection: chatConnection,
@@ -1360,7 +1384,7 @@ export default defineCommand({
             operationLifecycle: configuration.lifecycle,
             workspace,
             allProjects: args["all-projects"],
-            occupancyLabel: (id) => occupancyLabel(store, id),
+            occupancy: (id) => store.inspectSessionOccupancy(id),
             viewConversation,
             input: process.stdin,
             output: process.stdout,

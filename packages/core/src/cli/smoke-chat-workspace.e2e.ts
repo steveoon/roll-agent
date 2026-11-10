@@ -720,6 +720,193 @@ test(
 );
 
 test(
+  "real resume groups old history and assigns it only after acquiring ownership",
+  { timeout: 90_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const peer = new ThreadStore(f.history, { ownership: createSessionOwnershipHost("runtime") });
+    const old = peer.createThread({ title: "OLD_HISTORY_TO_ASSIGN" });
+    peer.appendMessages(old, [{ role: "user", content: "old-unclassified-context-proof" }]);
+    peer.createThread({ title: "OTHER_PROJECT_MUST_BE_ABSENT", workspace: f.b });
+    const claim = peer.retainThread(old);
+    try {
+      const child = f.startChat(["--screen-mode", "inline"]);
+      await f.wait(child, () => child.output.stdout.includes("› "), "initial project prompt");
+      const chooseAssignment = async () => {
+        const start = child.output.stdout.length;
+        child.child.stdin.write("/resume\n");
+        await f.wait(
+          child,
+          () => child.output.stdout.slice(start).includes("OLD_HISTORY_TO_ASSIGN"),
+          "grouped history",
+        );
+        const history = child.output.stdout.slice(start);
+        assert.match(history, /本项目下的对话/u);
+        assert.match(history, /旧会话/u);
+        assert.match(history, /当前打开/u);
+        assert.doesNotMatch(history, /OTHER_PROJECT_MUST_BE_ABSENT/u);
+        const historyMoveStart = child.output.stdout.length;
+        child.child.stdin.write("\x1b[B");
+        await f.wait(
+          child,
+          () => child.output.stdout.length > historyMoveStart,
+          "choose old conversation",
+        );
+        const actionStart = child.output.stdout.length;
+        child.child.stdin.write("\r");
+        await f.wait(
+          child,
+          () => child.output.stdout.slice(actionStart).includes("归入本项目并继续"),
+          "explicit assignment action",
+        );
+        const moveStart = child.output.stdout.length;
+        child.child.stdin.write("\x1b[B");
+        await f.wait(child, () => child.output.stdout.length > moveStart, "choose assignment");
+        child.child.stdin.write("\r");
+      };
+      await chooseAssignment();
+      await f.wait(
+        child,
+        () => child.output.stderr.includes("切换失败"),
+        "occupied assignment refusal",
+      );
+      assert.equal(peer.getThread(old)?.workspace, undefined);
+      assert.equal(f.requests.length, 0);
+      claim?.release();
+      const currentId = peer.listThreads({ workspace: f.a })[0]?.id;
+      assert.ok(currentId);
+      const database = new DatabaseSync(join(f.history, "threads.db"));
+      try {
+        database.exec(
+          "CREATE TRIGGER deny_fixture_assignment BEFORE UPDATE OF workspace ON threads BEGIN SELECT RAISE(ABORT, 'fixture assignment rejected'); END",
+        );
+        const failureStart = child.output.stderr.length;
+        await chooseAssignment();
+        await f.wait(
+          child,
+          () => child.output.stderr.slice(failureStart).includes("fixture assignment rejected"),
+          "assignment write failure",
+        );
+        assert.equal(peer.getThread(old)?.workspace, undefined);
+        assert.equal(
+          peer.inspectSessionOccupancy(old).status,
+          "available",
+          "failed assignment must release the newly opened target",
+        );
+        assert.equal(
+          peer.inspectSessionOccupancy(currentId).status,
+          "occupied",
+          "failed assignment must preserve the current session claim",
+        );
+        database.exec("DROP TRIGGER deny_fixture_assignment");
+      } finally {
+        database.close();
+      }
+      await chooseAssignment();
+      await f.wait(
+        child,
+        () => child.output.stderr.includes(`已切换到会话 ${old}`),
+        "assigned history continuation",
+      );
+      assert.equal(peer.getThread(old)?.workspace, f.a);
+      await f.line(child, "message-after-explicit-project-assignment");
+      assert.equal(f.requests.length, 1);
+      assert.match(JSON.stringify(f.requests[0]?.messages), /old-unclassified-context-proof/u);
+      await exitRollChat(child, "assigned history");
+      const current = await f.run(["--list", "--json"]);
+      assert.equal(current.status, 0, current.stderr);
+      assert.deepEqual(
+        listedSchema.parse(JSON.parse(current.stdout)).map((thread) => thread.id),
+        [old],
+      );
+      const resumed = await f.run(["verify-project-last", "--last", "--json"]);
+      assert.equal(resumed.status, 0, resumed.stderr);
+      assert.equal(completedSchema.parse(JSON.parse(resumed.stdout)).sessionId, old);
+      assert.deepEqual(f.failures, []);
+    } finally {
+      claim?.release();
+      peer.close();
+    }
+  },
+);
+
+test(
+  "real CLI retains its open old conversation when assignment fails and assigns it in place",
+  { timeout: 90_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const peer = new ThreadStore(f.history, { ownership: createSessionOwnershipHost("runtime") });
+    const id = peer.createThread({ title: "OPEN_OLD_CONVERSATION" });
+    peer.appendMessages(id, [{ role: "user", content: "open-old-context-proof" }]);
+    const child = f.startChat(["--session", id, "--screen-mode", "inline"]);
+    const database = new DatabaseSync(join(f.history, "threads.db"));
+    try {
+      await f.wait(child, () => child.output.stdout.includes("› "), "open old conversation prompt");
+      const chooseCurrentAssignment = async () => {
+        const start = child.output.stdout.length;
+        child.child.stdin.write("/resume\n");
+        await f.wait(
+          child,
+          () => child.output.stdout.slice(start).includes("[当前打开] OPEN_OLD_CONVERSATION"),
+          "visible current old conversation",
+        );
+        const actions = child.output.stdout.length;
+        child.child.stdin.write("\r");
+        await f.wait(
+          child,
+          () => child.output.stdout.slice(actions).includes("归入本项目"),
+          "current assignment menu",
+        );
+        const movement = child.output.stdout.length;
+        child.child.stdin.write("\x1b[B");
+        await f.wait(
+          child,
+          () => child.output.stdout.length > movement,
+          "select in-place assignment",
+        );
+        child.child.stdin.write("\r");
+      };
+      database.exec(
+        "CREATE TRIGGER deny_current_assignment BEFORE UPDATE OF workspace ON threads BEGIN SELECT RAISE(ABORT, 'current assignment rejected'); END",
+      );
+      await chooseCurrentAssignment();
+      await f.wait(
+        child,
+        () => child.output.stderr.includes("current assignment rejected"),
+        "current assignment failure",
+      );
+      assert.equal(peer.inspectSessionOccupancy(id).status, "occupied");
+      assert.equal(peer.getThread(id)?.workspace, undefined);
+      database.exec("DROP TRIGGER deny_current_assignment");
+      await f.line(child, "message-after-current-assignment-failure");
+      assert.equal(f.requests.length, 1);
+      assert.match(JSON.stringify(f.requests[0]?.messages), /open-old-context-proof/u);
+      await chooseCurrentAssignment();
+      await f.wait(
+        child,
+        () => child.output.stderr.includes("已将当前会话归入本项目"),
+        "in-place assignment success",
+      );
+      assert.equal(peer.getThread(id)?.workspace, f.a);
+      assert.equal(peer.inspectSessionOccupancy(id).status, "occupied");
+      await f.line(child, "message-after-current-assignment-success");
+      assert.equal(f.requests.length, 2);
+      assert.match(
+        JSON.stringify(f.requests[1]?.messages),
+        /message-after-current-assignment-failure/u,
+      );
+      await exitRollChat(child, "current conversation assignment");
+      assert.equal(peer.inspectSessionOccupancy(id).status, "available");
+      assert.equal(peer.listThreads().length, 1);
+      assert.deepEqual(f.failures, []);
+    } finally {
+      database.close();
+      peer.close();
+    }
+  },
+);
+
+test(
   "basic REPL reload changes the actual endpoint/model and recovers from invalid or deleted bound source",
   { timeout: 90_000 },
   async (t) => {

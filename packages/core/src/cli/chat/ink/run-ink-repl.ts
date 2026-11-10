@@ -9,7 +9,10 @@ import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { ChatApp, INK_HINTS, type ChatModelSwitching } from "./app.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import { titleFromMessage } from "../title.ts";
-import { buildSessionPickerItems } from "../session-picker-format.ts";
+import {
+  buildSessionPickerItems,
+  type BuildSessionPickerItemsOptions,
+} from "../session-picker-format.ts";
 import type { BannerInfo } from "../banner.ts";
 import { log } from "../../utils/output.ts";
 import { createChatTerminalOutput } from "./terminal-output.ts";
@@ -44,7 +47,7 @@ export interface RunInkReplOptions {
   readonly viewConversation?: (threadId: string) => string;
   readonly workspace?: string;
   readonly allProjects?: boolean;
-  readonly occupancyLabel?: (threadId: string) => string;
+  readonly occupancy?: BuildSessionPickerItemsOptions["occupancy"];
   readonly fastMode?: ChatFastModeControl;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly connection?: ChatConnection;
@@ -56,7 +59,10 @@ export interface RunInkReplOptions {
   readonly getThinkingLevels?: () => readonly ThinkingLevel[];
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
-  readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
+  readonly resumeSession?: (
+    threadId: string,
+    assignToCurrentProject?: boolean,
+  ) => Promise<AgentSession>;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
   readonly modelSwitching?: ChatModelSwitching;
   readonly scheduleBrowser?: ScheduleBrowserPort;
@@ -88,22 +94,16 @@ export async function runInkRepl(
       ? undefined
       : {
           loadItems: (currentSessionId: string, allProjects = false) =>
-            buildSessionPickerItems(
-              store.listThreads({
-                origin: "interactive",
-                ...(allProjects || options.allProjects || options.workspace === undefined
-                  ? {}
-                  : { workspace: options.workspace }),
-              }),
-              {
-                currentSessionId,
-                countMessages: (threadId: string) => store.countMessages(threadId),
-                now: new Date(),
-                ...(options.occupancyLabel ? { occupancyLabel: options.occupancyLabel } : {}),
-              },
-            ),
-          resume: async (threadId: string) => {
-            const next = await resumeSession(threadId);
+            buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
+              currentSessionId,
+              countMessages: (threadId: string) => store.countMessages(threadId),
+              now: new Date(),
+              ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+              allProjects: allProjects || options.allProjects === true,
+              ...(options.occupancy ? { occupancy: options.occupancy } : {}),
+            }),
+          resume: async (threadId: string, assignToCurrentProject?: boolean) => {
+            const next = await resumeSession(threadId, assignToCurrentProject);
             active = next;
             titled =
               store.listThreads().find((thread) => thread.id === next.id)?.title !== undefined;

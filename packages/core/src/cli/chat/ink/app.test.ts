@@ -1543,7 +1543,7 @@ test("ChatApp switches sessions via /resume picker", async () => {
   await delay(20);
   stdin.write("\r");
   await delay(20);
-  assert.match(lastFrame() ?? "", /切换会话/);
+  assert.match(lastFrame() ?? "", /对话历史/);
   assert.match(lastFrame() ?? "", /发布计划/);
   stdin.write("\r");
   await delay(50);
@@ -1664,7 +1664,7 @@ test("ChatApp preserves model-selected and manually changed efforts across resum
     stdin.write("\u001b");
     await delay(20);
     stdin.write("/resume\r");
-    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /对话历史/));
     stdin.write("\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第二会话/));
     assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} low`));
@@ -1675,7 +1675,7 @@ test("ChatApp preserves model-selected and manually changed efforts across resum
     stdin.write("\x1b[46;3u");
     await waitFor(() => assert.equal(requestEffort, "medium"));
     stdin.write("/resume\r");
-    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /切换会话/));
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /对话历史/));
     stdin.write("\r");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /恢复第三会话/));
     assert.match(plain(lastFrame() ?? ""), literalPattern(`${GLYPHS.think} medium`));
@@ -2828,7 +2828,7 @@ test("ChatApp does not retire/delete a session whose cleanup failed", async () =
     stdin.write("/resume");
     await delay(20);
     stdin.write("\r");
-    await waitFor(() => assert.match(lastFrame() ?? "", /切换会话/u));
+    await waitFor(() => assert.match(lastFrame() ?? "", /对话历史/u));
     stdin.write("\r");
     await waitFor(() => assert.equal(failed, true));
     await delay(10);
@@ -2918,5 +2918,142 @@ test("resume all forwards explicit global scope to the session picker", async ()
   await delay(20);
   stdin.write("\r");
   await waitFor(() => assert.deepEqual(scopes, [true]));
+  unmount();
+});
+
+test("assigning old history preserves the current session on failure and switches only after success", async () => {
+  const first = switchableFakeSession("current-project");
+  const second = switchableFakeSession("old-history", [
+    { role: "user", content: "old context proof" },
+  ]);
+  const attempts: Array<[string, boolean | undefined]> = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [
+          { id: "old-history", title: "old", meta: "", group: "旧会话", canAssignToProject: true },
+        ],
+        resume: async (id, assign) => {
+          attempts.push([id, assign]);
+          if (attempts.length === 1) throw new Error("另一个客户端正在使用");
+          return second.session;
+        },
+        onRetired: () => {},
+      },
+    }),
+  );
+  await delay(30);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /旧会话/u));
+  stdin.write("m");
+  await waitFor(() => assert.match(lastFrame() ?? "", /另一个客户端正在使用/u));
+  assert.equal(first.isClosed(), false);
+  stdin.write("m");
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /old context proof/u);
+    assert.equal(first.isClosed(), true);
+  });
+  assert.deepEqual(attempts, [
+    ["old-history", true],
+    ["old-history", true],
+  ]);
+  unmount();
+});
+
+test("selecting the visible current conversation returns without resuming or retiring it", async () => {
+  const current = switchableFakeSession("current");
+  let resumes = 0;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: current.session,
+      model: "test",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [
+          { id: "other", title: "other", meta: "" },
+          { id: "current", title: "current", meta: "", isCurrent: true },
+        ],
+        resume: async () => {
+          resumes += 1;
+          throw new Error("must not resume current");
+        },
+        onRetired: () => {
+          throw new Error("must not retire current");
+        },
+      },
+    }),
+  );
+  await delay(30);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /❯ current[^\n]*当前打开/u));
+  assert.match(lastFrame() ?? "", /Enter 返回聊天/u);
+  stdin.write("\r");
+  await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", /对话历史/u));
+  assert.equal(resumes, 0);
+  assert.equal(current.isClosed(), false);
+  stdin.write("continue current");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(current.sent(), ["continue current"]));
+  unmount();
+});
+
+test("assigning the current old conversation keeps its session open on failure and success", async () => {
+  const current = switchableFakeSession("current-old", [
+    { role: "user", content: "current context proof" },
+  ]);
+  let attempts = 0;
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: current.session,
+      model: "test",
+      initialHistory: [{ kind: "user", id: "current-proof", text: "current context proof" }],
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [
+          {
+            id: current.session.id,
+            title: "old",
+            meta: "",
+            group: "旧会话",
+            canAssignToProject: true,
+            isCurrent: true,
+          },
+        ],
+        resume: async (id, assign) => {
+          assert.equal(id, current.session.id);
+          assert.equal(assign, true);
+          if (++attempts === 1) throw new Error("assignment failed");
+          return current.session;
+        },
+        onRetired: () => {
+          throw new Error("must not retire active conversation");
+        },
+      },
+    }),
+  );
+  await delay(30);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /当前打开/u));
+  stdin.write("m");
+  await waitFor(() => assert.match(lastFrame() ?? "", /assignment failed/u));
+  assert.equal(current.isClosed(), false);
+  stdin.write("m");
+  await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", /对话历史/u));
+  assert.equal(current.isClosed(), false);
+  assert.equal(attempts, 2);
+  assert.match(lastFrame() ?? "", /current context proof/u);
   unmount();
 });

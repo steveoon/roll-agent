@@ -1227,9 +1227,9 @@ test("runRepl switches sessions via /resume", async () => {
     sessionPicker: async (items) => {
       assert.deepEqual(
         items.map((item) => item.id),
-        ["t2"],
+        ["s1", "t2"],
       );
-      return "t2";
+      return { threadId: "t2" };
     },
     resumeSession: async () => second.session,
     onActiveSessionChange: (next) => switched.push(next.id),
@@ -1249,6 +1249,87 @@ test("runRepl switches sessions via /resume", async () => {
   assert.deepEqual(deleted, []);
 });
 
+test("basic resume includes old history by default and forwards explicit project assignment", async () => {
+  const first = replFakeSession("current");
+  const second = replFakeSession("old");
+  const input = new PassThrough();
+  const attempts: Array<[string, boolean | undefined]> = [];
+  const store = {
+    listThreads: () => [
+      { id: "old", title: "old", updatedAt: new Date().toISOString() },
+      {
+        id: "another-project",
+        title: "other",
+        updatedAt: new Date().toISOString(),
+        workspace: "/b",
+      },
+    ],
+    countMessages: () => 1,
+    getThread: () => ({ id: "old", title: "old", workspace: "/a" }),
+  } as unknown as Parameters<typeof runRepl>[1];
+  const done = runRepl(first.session, store, false, {
+    input,
+    output: sink(),
+    workspace: "/a",
+    sessionPicker: async (items) => {
+      assert.deepEqual(
+        items.map(({ id, group }) => ({ id, group })),
+        [{ id: "old", group: "旧会话" }],
+      );
+      return { threadId: "old", assignToCurrentProject: true };
+    },
+    resumeSession: async (id, assign) => {
+      attempts.push([id, assign]);
+      return second.session;
+    },
+  });
+  await delay(20);
+  input.write("/resume\n");
+  await delay(30);
+  input.write("message after assigning\n");
+  await delay(30);
+  input.end("exit\n");
+  await done;
+  assert.deepEqual(attempts, [["old", true]]);
+  assert.deepEqual(second.sent(), ["message after assigning"]);
+  assert.equal(first.isClosed(), true);
+});
+
+test("basic history retains the current session when returning or assigning it", async () => {
+  for (const assignToCurrentProject of [false, true]) {
+    const current = replFakeSession("current");
+    const input = new PassThrough();
+    let resumes = 0;
+    const store = {
+      listThreads: () => [{ id: "current", title: "current", updatedAt: new Date().toISOString() }],
+      countMessages: () => 1,
+    } as unknown as Parameters<typeof runRepl>[1];
+    const done = runRepl(current.session, store, false, {
+      input,
+      output: sink(),
+      workspace: "/a",
+      sessionPicker: async (items) => {
+        assert.equal(items[0]?.isCurrent, true);
+        return { threadId: "current", assignToCurrentProject };
+      },
+      resumeSession: async () => {
+        resumes += 1;
+        return current.session;
+      },
+    });
+    await delay(20);
+    input.write("/resume\n");
+    await delay(30);
+    input.write("message after returning\n");
+    await delay(30);
+    input.end("exit\n");
+    await done;
+    assert.equal(resumes, assignToCurrentProject ? 1 : 0);
+    assert.equal(current.isClosed(), false);
+    assert.deepEqual(current.sent(), ["message after returning"]);
+  }
+});
+
 test("runRepl keeps current session when picker cancels or resume fails", async () => {
   const first = replFakeSession("s1");
   const store = {
@@ -1265,7 +1346,7 @@ test("runRepl keeps current session when picker cancels or resume fails", async 
     output: sink(),
     sessionPicker: async () => {
       call += 1;
-      return call === 1 ? undefined : "t2";
+      return call === 1 ? undefined : { threadId: "t2" };
     },
     resumeSession: async () => {
       throw new Error("线程不存在");
@@ -1420,7 +1501,7 @@ test(
       repl = runRepl(current, first, false, {
         input,
         output: sink(),
-        sessionPicker: async () => targetId,
+        sessionPicker: async () => ({ threadId: targetId }),
         resumeSession: async (id) => {
           try {
             return await cli.resumeSession(id);

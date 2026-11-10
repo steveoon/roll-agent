@@ -62,7 +62,7 @@ export interface ChatSessionSwitching {
     currentSessionId: string,
     allProjects?: boolean,
   ) => readonly SessionPickerItem[];
-  readonly resume: (threadId: string) => Promise<AgentSession>;
+  readonly resume: (threadId: string, assignToCurrentProject?: boolean) => Promise<AgentSession>;
   readonly onRetired: (threadId: string) => void;
 }
 
@@ -171,7 +171,7 @@ function errorText(error: unknown): string {
 interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly picker: SessionPickerState | undefined;
   readonly onOpenPicker: (allProjects?: boolean) => boolean;
-  readonly onPickerSelect: (threadId: string) => void;
+  readonly onPickerSelect: (threadId: string, assignToCurrentProject?: boolean) => void;
   readonly onPickerCancel: () => void;
   readonly onModelChanged: (model: string, thinkingLevel: ThinkingLevel) => void;
   readonly onScheduleContinue: (session: AgentSession) => void;
@@ -241,15 +241,23 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   }, []);
 
   const selectSession = useCallback(
-    (threadId: string) => {
+    (threadId: string, assignToCurrentProject?: boolean) => {
       if (sessionSwitching === undefined) {
+        return;
+      }
+      if (threadId === activeSession.id && !assignToCurrentProject) {
+        setPicker(undefined);
         return;
       }
       setPicker((current) =>
         current === undefined ? current : { items: current.items, busy: true },
       );
-      sessionSwitching.resume(threadId).then(
+      sessionSwitching.resume(threadId, assignToCurrentProject).then(
         (next) => {
+          if (next === activeSession) {
+            setPicker(undefined);
+            return;
+          }
           retiringRef.current = activeSession;
           setSessionHistory(
             props.historySource ? undefined : messagesToHistory(next.getMessages()),
