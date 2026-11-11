@@ -11,45 +11,11 @@ import {
   cleanupSpawnedRollProcess,
   formatSpawnedRollProcess,
   runRoll,
+  runRollAsync,
   spawnRollProcess,
   waitForSmokeCondition,
   waitForSpawnedRollExit,
 } from "./smoke.e2e-harness.ts";
-
-test("e2e calendar: Roll Core skill installation preserves calendar instructions and references", () => {
-  const workspace = mkdtempSync(join(tmpdir(), "roll-calendar-skill-"));
-  const source = resolve(import.meta.dirname, "../../../../openclaw-roll-core-skill-template");
-  const target = join(workspace, ".agents", "skills");
-  try {
-    writeFileSync(
-      join(workspace, "roll.config.yaml"),
-      JSON.stringify({
-        agents: { "data-dir": join(workspace, "agents") },
-      }),
-    );
-    const installed = runRoll(["skills", "install", source, "--dir", target, "--json"], workspace);
-    assert.equal(installed.status, 0, installed.stderr);
-    assert.match(installed.stdout, /roll-core/u);
-    for (const file of [
-      "SKILL.md",
-      "agents/openai.yaml",
-      "references/workflows.md",
-      "references/errors.md",
-    ]) {
-      assert.equal(
-        readFileSync(join(target, "roll-core", file), "utf8"),
-        readFileSync(join(source, file), "utf8"),
-      );
-    }
-    const instructions = readFileSync(join(target, "roll-core", "SKILL.md"), "utf8");
-    assert.match(instructions, /--start-at/u);
-    assert.match(instructions, /--daily/u);
-    assert.match(instructions, /--weekly/u);
-    assert.doesNotMatch(instructions, /Interval only|There is no calendar/u);
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
-});
 
 test(
   "e2e calendar: future interval ends after two real rounds; daily/weekly and manual execution preserve quota",
@@ -136,15 +102,14 @@ test(
         }),
       );
       // All three first occurrences share an independently calculated UTC minute. Leave
-      // at least 15 seconds for registration/startup; no clock or claim code is mocked.
-      const firstAt = Math.ceil((Date.now() + 15_000) / 60_000) * 60_000;
+      // at least 10 seconds for registration/startup; no clock or claim code is mocked.
+      const firstAt = Math.ceil((Date.now() + 10_000) / 60_000) * 60_000;
       const local = new Date(firstAt + 345 * 60_000).toISOString().slice(0, 16);
       const shanghai = new Date(firstAt + 480 * 60_000);
       const time = shanghai.toISOString().slice(11, 16);
       const day = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][shanghai.getUTCDay()];
       assert.ok(day);
-      const ids: string[] = [];
-      for (const [name, flags] of [
+      const scheduleSpecs = [
         ["future-interval", ["--every", "1m", "--start-at", local]],
         ["daily", ["--daily", local.slice(11), "--start-at", local]],
         [
@@ -160,8 +125,9 @@ test(
             new Date(firstAt).toISOString(),
           ],
         ],
-      ] as const) {
-        const added = runRoll(
+      ] as const;
+      const registerSchedule = ([name, flags]: (typeof scheduleSpecs)[number]) =>
+        runRollAsync(
           [
             "schedule",
             "add",
@@ -176,6 +142,14 @@ test(
           workspace,
           { env: { TZ: "Asia/Kathmandu" } },
         );
+      // Initialize the SQLite ledger once, then register the remaining schedules concurrently.
+      const firstAdded = await registerSchedule(scheduleSpecs[0]);
+      const restAdded = await Promise.all([
+        registerSchedule(scheduleSpecs[1]),
+        registerSchedule(scheduleSpecs[2]),
+      ]);
+      const ids: string[] = [];
+      for (const added of [firstAdded, ...restAdded]) {
         assert.equal(added.status, 0, added.stderr);
         const result = z
           .object({ id: z.string(), nextRunAt: z.string() })
@@ -271,3 +245,38 @@ test(
     }
   },
 );
+
+test("e2e calendar: Roll Core skill installation preserves calendar instructions and references", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "roll-calendar-skill-"));
+  const source = resolve(import.meta.dirname, "../../../../openclaw-roll-core-skill-template");
+  const target = join(workspace, ".agents", "skills");
+  try {
+    writeFileSync(
+      join(workspace, "roll.config.yaml"),
+      JSON.stringify({
+        agents: { "data-dir": join(workspace, "agents") },
+      }),
+    );
+    const installed = runRoll(["skills", "install", source, "--dir", target, "--json"], workspace);
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stdout, /roll-core/u);
+    for (const file of [
+      "SKILL.md",
+      "agents/openai.yaml",
+      "references/workflows.md",
+      "references/errors.md",
+    ]) {
+      assert.equal(
+        readFileSync(join(target, "roll-core", file), "utf8"),
+        readFileSync(join(source, file), "utf8"),
+      );
+    }
+    const instructions = readFileSync(join(target, "roll-core", "SKILL.md"), "utf8");
+    assert.match(instructions, /--start-at/u);
+    assert.match(instructions, /--daily/u);
+    assert.match(instructions, /--weekly/u);
+    assert.doesNotMatch(instructions, /Interval only|There is no calendar/u);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

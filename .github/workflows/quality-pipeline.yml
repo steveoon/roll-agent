@@ -87,10 +87,23 @@ jobs:
           "src/**/*.test.ts" "ui/**/*.test.ts"
 
   e2e:
+    name: e2e (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 1-4
+            shard: 1/4
+          - name: 2-4
+            shard: 2/4
+          - name: 3-4
+            shard: 3/4
+          - name: 4-4
+            shard: 4/4
 
     steps:
       - name: Checkout
@@ -102,7 +115,14 @@ jobs:
         uses: ./.github/actions/setup-workspace
 
       - name: E2E smoke
-        run: pnpm test:e2e
+        env:
+          ROLL_E2E_SUITE_CONCURRENCY: "3"
+        # Node options must precede the file glob so every existing and future .e2e.ts is sharded.
+        run: >
+          pnpm --filter @roll-agent/core exec node
+          --experimental-strip-types --experimental-sqlite
+          --test-concurrency=3 --test-shard=${{ matrix.shard }} --test
+          "src/**/*.e2e.ts"
 
   build:
     runs-on: ubuntu-latest
