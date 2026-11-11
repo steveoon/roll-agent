@@ -722,7 +722,11 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
       await f.wait(child, () => child.output.stdout.includes("› "), "basic prompt");
       await f.line(child, "/model");
       await f.line(child, "/model qwen/another-model");
-      assert.equal(child.output.stderr.match(/基础模式不支持 \/model/gu)?.length, 2);
+      await f.wait(
+        child,
+        () => child.output.stderr.match(/基础模式不支持 \/model/gu)?.length === 2,
+        "basic model command warnings flushed",
+      );
       assert.doesNotMatch(child.output.stderr, /未知 skill/u);
       assert.equal(f.requests.length, 0);
       await f.line(child, "ordinary message after model command");
@@ -777,7 +781,13 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
           const moveStart = child.output.stdout.length;
           child.child.stdin.write("\x1b[B");
           await f.wait(child, () => child.output.stdout.length > moveStart, "choose assignment");
+          const promptStart = child.output.stdout.length;
           child.child.stdin.write("\r");
+          await f.wait(
+            child,
+            () => child.output.stdout.slice(promptStart).includes("› "),
+            "prompt after assignment menu",
+          );
         };
         await chooseAssignment();
         await f.wait(
@@ -883,7 +893,13 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
             () => child.output.stdout.length > movement,
             "select in-place assignment",
           );
+          const promptStart = child.output.stdout.length;
           child.child.stdin.write("\r");
+          await f.wait(
+            child,
+            () => child.output.stdout.slice(promptStart).includes("› "),
+            "prompt after current assignment menu",
+          );
         };
         database.exec(
           "CREATE TRIGGER deny_current_assignment BEFORE UPDATE OF workspace ON threads BEGIN SELECT RAISE(ABORT, 'current assignment rejected'); END",
@@ -948,9 +964,17 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
       };
       f.save(alternate);
       await f.line(child, "/status");
-      assert.match(child.output.stderr, /有效模型：qwen\/qwen3\.7-plus/u);
+      await f.wait(
+        child,
+        () => /有效模型：qwen\/qwen3\.7-plus/u.test(child.output.stderr),
+        "initial status stderr flushed",
+      );
       await f.line(child, "/reload");
-      assert.match(child.output.stderr, /未知命令 \/reload/u);
+      await f.wait(
+        child,
+        () => /未知命令 \/reload/u.test(child.output.stderr),
+        "unknown reload warning flushed",
+      );
       await f.line(child, "after-config-edit-marker");
       writeFileSync(f.configPath, "runtime: [not-valid");
       await f.line(child, "after-invalid-config-marker");
@@ -969,7 +993,11 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
       const restarted = f.startChat(["--screen-mode", "inline", "--last"]);
       await f.wait(restarted, () => restarted.output.stdout.includes("› "), "resumed REPL prompt");
       await f.line(restarted, "/status");
-      assert.match(restarted.output.stderr, /有效模型：qwen\/qwen3\.7-turbo/u);
+      await f.wait(
+        restarted,
+        () => /有效模型：qwen\/qwen3\.7-turbo/u.test(restarted.output.stderr),
+        "restarted status stderr flushed",
+      );
       await f.line(restarted, "after-restart-marker");
       assert.equal(f.requests.length, 5);
       assert.equal(f.requests[4]?.model, "qwen3.7-turbo");
