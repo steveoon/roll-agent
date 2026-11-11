@@ -138,8 +138,8 @@ test(
       const observed = join(root, "observed.json");
       writeFileSync(
         entry,
-        `import{writeFileSync}from'node:fs';
-writeFileSync(process.env.ROLL_ARGV_PROBE,JSON.stringify({args:process.argv.slice(2),execArgv:process.execArgv,cwd:process.cwd(),arch:process.arch,environment:{value:process.env.ROLL_FORWARD_PROBE,path:process.env.PATH}}));
+        `import{realpathSync,writeFileSync}from'node:fs';
+writeFileSync(process.env.ROLL_ARGV_PROBE,JSON.stringify({args:process.argv.slice(2),execArgv:process.execArgv,cwd:realpathSync.native(process.cwd()),arch:process.arch,environment:{value:process.env.ROLL_FORWARD_PROBE,path:process.env.PATH}}));
 const chunks=[];process.stdin.on('data',b=>chunks.push(b));process.stdin.on('end',()=>{const b=Buffer.concat(chunks);process.stdout.write(b);process.stderr.write(b);process.exitCode=7;});`,
       );
       const args = [
