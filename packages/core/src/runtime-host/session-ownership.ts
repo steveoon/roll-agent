@@ -6,9 +6,17 @@ import {
   isProcessStartToken,
   readProcessStartToken,
   verifyProcessStartToken,
+  type ProcessStartToken,
 } from "../registry/process-identity.ts";
 import type { RuntimeModule } from "./engine-factory.ts";
 import { log } from "../cli/utils/output.ts";
+
+let ownProcessStartToken: ProcessStartToken | undefined;
+
+function readOwnProcessStartToken(): ProcessStartToken | undefined {
+  ownProcessStartToken ??= readProcessStartToken(process.pid);
+  return ownProcessStartToken;
+}
 
 /** Capability attests the public host factory, not an unconfigured embedded Runtime. */
 export const ROLL_SESSION_OCCUPANCY_CAPABILITY = {
@@ -21,7 +29,7 @@ export const ROLL_SESSION_OCCUPANCY_CAPABILITY = {
 } as const;
 
 export function createSessionOwnershipHost(kind = "cli"): SessionOwnershipHost {
-  const token = readProcessStartToken(process.pid);
+  const token = readOwnProcessStartToken();
   if (token === undefined) {
     throw new Error("无法核验当前进程身份，不能安全取得会话占用；请稍后重试。");
   }
