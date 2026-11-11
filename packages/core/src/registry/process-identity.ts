@@ -139,6 +139,12 @@ export function verifyProcessStartToken(
       undefined,
     );
   }
+  if (readProcessLiveness(pid) === "missing") {
+    return createMismatchVerification(
+      PROCESS_START_TOKEN_VERIFICATION_REASONS.PROCESS_NOT_FOUND,
+      undefined,
+    );
+  }
 
   if (expected.startsWith(`${PROCESS_START_TOKEN_PREFIXES.V2}:`)) {
     const currentProcessStartToken = readProcessStartToken(pid);
@@ -244,6 +250,7 @@ function readLegacyDarwinProcessStartIdentity(pid: number): string | undefined {
 }
 
 function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): string | undefined {
+  if (readProcessLiveness(pid) === "missing") return undefined;
   // Windows PowerShell's Get-Process cmdlet can stall on ARM64.
   // Read the same OS-owned StartTime through .NET without depending on module discovery.
   const script =
@@ -254,6 +261,9 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
   const deadline = performance.now() + identityCommandTimeoutMs("win32");
   const executables = resolveTrustedWindowsPowerShellExecutables();
   for (const [index, executable] of executables.entries()) {
+    if (index > 0 && readProcessLiveness(pid) === "missing") {
+      return undefined;
+    }
     const remainingMs = Math.ceil(deadline - performance.now());
     if (remainingMs <= 0) {
       break;

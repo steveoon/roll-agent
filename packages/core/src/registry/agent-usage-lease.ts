@@ -821,12 +821,19 @@ function createLeaseHandle(
   return lease;
 }
 
+let ownProcessStartToken: ProcessStartToken | undefined;
+
+function readOwnProcessStartToken(): ProcessStartToken | undefined {
+  ownProcessStartToken ??= readProcessStartToken(process.pid);
+  return ownProcessStartToken;
+}
+
 function createLeaseRecord(
   agentName: string,
   holderKind: AgentUsageHolderKind,
   runtimeIdentity: ManagedAgentRuntimeIdentity,
 ): AgentUsageLeaseRecord {
-  const processStartToken = readProcessStartToken(process.pid);
+  const processStartToken = readOwnProcessStartToken();
   if (processStartToken === undefined) {
     throw new AgentUsageLeaseStateError(agentName, "无法验证当前 Roll 进程身份");
   }

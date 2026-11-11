@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { describe, test } from "node:test";
 import { RollNodeClient } from "@roll-agent/client-node";
 import type { RuntimeEventEnvelope } from "@roll-agent/protocol";
 import { runRoll } from "./smoke.e2e-harness.ts";
@@ -373,30 +373,36 @@ const cases: DisplayCase[] = [
     expectedSubscription: false,
   },
 ];
-for (const scenario of cases) {
-  const { provider, model, chunks, expectedSubscription, expected } = scenario;
-  test(`stdio reasoning display: ${scenario.name}`, { timeout: 30_000 }, async (t) => {
-    const workspace = await mkdtemp(join(tmpdir(), "roll-display-"));
-    let requestBody = "";
-    const server = createServer((request, response) => {
-      request.setEncoding("utf8");
-      request.on("data", (part: string) => {
-        requestBody += part;
+
+const parsedConcurrency = Number.parseInt(process.env.ROLL_E2E_SUITE_CONCURRENCY ?? "", 10);
+const suiteConcurrency =
+  Number.isSafeInteger(parsedConcurrency) && parsedConcurrency > 0 ? parsedConcurrency : 2;
+
+describe("stdio reasoning display", { concurrency: suiteConcurrency }, () => {
+  for (const scenario of cases) {
+    const { provider, model, chunks, expectedSubscription, expected } = scenario;
+    test(`stdio reasoning display: ${scenario.name}`, { timeout: 30_000 }, async (t) => {
+      const workspace = await mkdtemp(join(tmpdir(), "roll-display-"));
+      let requestBody = "";
+      const server = createServer((request, response) => {
+        request.setEncoding("utf8");
+        request.on("data", (part: string) => {
+          requestBody += part;
+        });
+        request.on("end", () => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""));
+        });
       });
-      request.on("end", () => {
-        response.writeHead(200, { "content-type": "text/event-stream" });
-        response.end(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""));
-      });
-    });
-    let client: RollNodeClient | undefined;
-    try {
-      server.listen(0, "127.0.0.1");
-      await once(server, "listening");
-      const address = server.address();
-      assert.ok(address && typeof address === "object");
-      await writeFile(
-        join(workspace, "roll.config.yaml"),
-        `llm:
+      let client: RollNodeClient | undefined;
+      try {
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        await writeFile(
+          join(workspace, "roll.config.yaml"),
+          `llm:
   default-provider: ${provider}
   default-model: ${model}
   providers:
@@ -411,127 +417,132 @@ runtime:
 agents:
   data-dir: ${workspace}/agents
 `,
-      );
-      client = await RollNodeClient.start({
-        command: process.execPath,
-        cwd: workspace,
-        env: { ...process.env, HOME: workspace, USERPROFILE: workspace },
-        args: [
-          "--experimental-strip-types",
-          "--experimental-sqlite",
-          join(import.meta.dirname, "index.ts"),
-          "runtime",
-          "serve",
-          "--stdio",
-        ],
-      });
-      assert.equal(
-        client.getInitializationResult().features.includes("reasoning-summary"),
-        scenario.summary === true,
-      );
-      if (expectedSubscription !== undefined) {
-        assert.deepEqual(await client.request("reasoning.text.subscribe", {}), {
-          subscribed: expectedSubscription,
+        );
+        client = await RollNodeClient.start({
+          command: process.execPath,
+          cwd: workspace,
+          env: { ...process.env, HOME: workspace, USERPROFILE: workspace },
+          args: [
+            "--experimental-strip-types",
+            "--experimental-sqlite",
+            join(import.meta.dirname, "index.ts"),
+            "runtime",
+            "serve",
+            "--stdio",
+          ],
         });
-      }
-      const { thread } = await client.request("thread.create", { requestId: randomUUID() });
-      const events: RuntimeEventEnvelope[] = [];
-      const ended = Promise.withResolvers<void>();
-      client.onEvent((event) => {
-        events.push(event);
-        if (event.event.type === "turn.completed") ended.resolve();
-        if (event.event.type === "turn.failed" || event.event.type === "turn.cancelled") {
-          if (scenario.invalidResponse && event.event.type === "turn.failed") ended.resolve();
-          else ended.reject(new Error(JSON.stringify(event.event)));
+        assert.equal(
+          client.getInitializationResult().features.includes("reasoning-summary"),
+          scenario.summary === true,
+        );
+        if (expectedSubscription !== undefined) {
+          assert.deepEqual(await client.request("reasoning.text.subscribe", {}), {
+            subscribed: expectedSubscription,
+          });
         }
-      });
-      t.signal.addEventListener("abort", () => ended.reject(t.signal.reason), { once: true });
-      await client.request("turn.start", {
-        requestId: randomUUID(),
-        threadId: thread.id,
-        turnId: randomUUID(),
-        input: { text: "fixture" },
-      });
-      await ended.promise;
-      const body: unknown = JSON.parse(requestBody);
-      if (provider === "openai") {
-        assert.ok(typeof body === "object" && body !== null);
-        const reasoning = "reasoning" in body ? body.reasoning : undefined;
-        assert.deepEqual(
-          reasoning,
-          model === "gpt-4o"
-            ? undefined
-            : scenario.thinkingOff
-              ? { effort: "none" }
-              : { effort: "medium", summary: "detailed" },
+        const { thread } = await client.request("thread.create", { requestId: randomUUID() });
+        const events: RuntimeEventEnvelope[] = [];
+        const ended = Promise.withResolvers<void>();
+        client.onEvent((event) => {
+          events.push(event);
+          if (event.event.type === "turn.completed") ended.resolve();
+          if (event.event.type === "turn.failed" || event.event.type === "turn.cancelled") {
+            if (scenario.invalidResponse && event.event.type === "turn.failed") ended.resolve();
+            else ended.reject(new Error(JSON.stringify(event.event)));
+          }
+        });
+        t.signal.addEventListener("abort", () => ended.reject(t.signal.reason), { once: true });
+        await client.request("turn.start", {
+          requestId: randomUUID(),
+          threadId: thread.id,
+          turnId: randomUUID(),
+          input: { text: "fixture" },
+        });
+        await ended.promise;
+        const body: unknown = JSON.parse(requestBody);
+        if (provider === "openai") {
+          assert.ok(typeof body === "object" && body !== null);
+          const reasoning = "reasoning" in body ? body.reasoning : undefined;
+          assert.deepEqual(
+            reasoning,
+            model === "gpt-4o"
+              ? undefined
+              : scenario.thinkingOff
+                ? { effort: "none" }
+                : { effort: "medium", summary: "detailed" },
+          );
+        }
+        if (provider === "deepseek") {
+          assert.ok(typeof body === "object" && body !== null && "thinking" in body);
+          assert.deepEqual(body.thinking, { type: scenario.thinkingOff ? "disabled" : "enabled" });
+        }
+        if (provider === "google") {
+          assert.ok(typeof body === "object" && body !== null && "generationConfig" in body);
+          const config = body.generationConfig;
+          assert.ok(typeof config === "object" && config !== null && "thinkingConfig" in config);
+          assert.deepEqual(
+            config.thinkingConfig,
+            scenario.thinkingOff
+              ? { thinkingLevel: "low" }
+              : { thinkingLevel: "medium", includeThoughts: true },
+          );
+        }
+        if (provider === "xai") {
+          assert.ok(
+            typeof body === "object" && body !== null && "reasoning" in body && "model" in body,
+          );
+          assert.equal(body.model, model);
+          assert.deepEqual(body.reasoning, { effort: "medium" });
+        }
+        if (provider === "qwen") {
+          assert.ok(typeof body === "object" && body !== null && "enable_thinking" in body);
+          assert.equal(body.enable_thinking, scenario.thinkingOff !== true);
+        }
+        if (provider === "anthropic") {
+          assert.ok(typeof body === "object" && body !== null && "thinking" in body);
+          assert.deepEqual(
+            body.thinking,
+            scenario.thinkingOff
+              ? { type: "disabled" }
+              : { type: "adaptive", display: "summarized" },
+          );
+        }
+        if (scenario.invalidResponse) {
+          const liveFailure = events.find(({ event }) => event.type === "turn.failed");
+          assert.ok(liveFailure?.event.type === "turn.failed");
+          assert.equal(liveFailure.event.message, "模型调用的数据未通过格式校验。");
+          await client.request("runtime.events.resume", { threadId: thread.id, afterCursor: null });
+          const failures = events.filter(({ event }) => event.type === "turn.failed");
+          assert.equal(failures.length, 2);
+          assert.doesNotMatch(JSON.stringify(failures), /opaque-[\w-]*fixture/u);
+          return;
+        }
+        assert.doesNotMatch(JSON.stringify(events), /opaque-[\w-]*fixture/u);
+        const snapshot = await client.request("thread.snapshot", { threadId: thread.id });
+        assert.doesNotMatch(JSON.stringify(snapshot), /Display fixture|opaque-[\w-]*fixture/u);
+        const display = events.flatMap(({ event }) =>
+          event.type === "reasoning.text.delta" || event.type === "reasoning.summary.delta"
+            ? [event]
+            : [],
         );
-      }
-      if (provider === "deepseek") {
-        assert.ok(typeof body === "object" && body !== null && "thinking" in body);
-        assert.deepEqual(body.thinking, { type: scenario.thinkingOff ? "disabled" : "enabled" });
-      }
-      if (provider === "google") {
-        assert.ok(typeof body === "object" && body !== null && "generationConfig" in body);
-        const config = body.generationConfig;
-        assert.ok(typeof config === "object" && config !== null && "thinkingConfig" in config);
         assert.deepEqual(
-          config.thinkingConfig,
-          scenario.thinkingOff
-            ? { thinkingLevel: "low" }
-            : { thinkingLevel: "medium", includeThoughts: true },
+          [...new Set(display.map((event) => event.type))],
+          expected ? [expected] : [],
         );
-      }
-      if (provider === "xai") {
+        if (expected) {
+          assert.equal(display.map((event) => event.delta).join(""), "Display fixture.");
+        } else assert.doesNotMatch(JSON.stringify(events), /Display fixture/u);
         assert.ok(
-          typeof body === "object" && body !== null && "reasoning" in body && "model" in body,
+          events.some(
+            ({ event }) => event.type === "message.completed" && event.text === "Answer.",
+          ),
         );
-        assert.equal(body.model, model);
-        assert.deepEqual(body.reasoning, { effort: "medium" });
+      } finally {
+        await client?.shutdown();
+        server.closeAllConnections();
+        server.close();
+        await rm(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
       }
-      if (provider === "qwen") {
-        assert.ok(typeof body === "object" && body !== null && "enable_thinking" in body);
-        assert.equal(body.enable_thinking, scenario.thinkingOff !== true);
-      }
-      if (provider === "anthropic") {
-        assert.ok(typeof body === "object" && body !== null && "thinking" in body);
-        assert.deepEqual(
-          body.thinking,
-          scenario.thinkingOff ? { type: "disabled" } : { type: "adaptive", display: "summarized" },
-        );
-      }
-      if (scenario.invalidResponse) {
-        const liveFailure = events.find(({ event }) => event.type === "turn.failed");
-        assert.ok(liveFailure?.event.type === "turn.failed");
-        assert.equal(liveFailure.event.message, "模型调用的数据未通过格式校验。");
-        await client.request("runtime.events.resume", { threadId: thread.id, afterCursor: null });
-        const failures = events.filter(({ event }) => event.type === "turn.failed");
-        assert.equal(failures.length, 2);
-        assert.doesNotMatch(JSON.stringify(failures), /opaque-[\w-]*fixture/u);
-        return;
-      }
-      assert.doesNotMatch(JSON.stringify(events), /opaque-[\w-]*fixture/u);
-      const snapshot = await client.request("thread.snapshot", { threadId: thread.id });
-      assert.doesNotMatch(JSON.stringify(snapshot), /Display fixture|opaque-[\w-]*fixture/u);
-      const display = events.flatMap(({ event }) =>
-        event.type === "reasoning.text.delta" || event.type === "reasoning.summary.delta"
-          ? [event]
-          : [],
-      );
-      assert.deepEqual(
-        [...new Set(display.map((event) => event.type))],
-        expected ? [expected] : [],
-      );
-      if (expected) {
-        assert.equal(display.map((event) => event.delta).join(""), "Display fixture.");
-      } else assert.doesNotMatch(JSON.stringify(events), /Display fixture/u);
-      assert.ok(
-        events.some(({ event }) => event.type === "message.completed" && event.text === "Answer."),
-      );
-    } finally {
-      await client?.shutdown();
-      server.closeAllConnections();
-      server.close();
-      await rm(workspace, { recursive: true, force: true });
-    }
-  });
-}
+    });
+  }
+});

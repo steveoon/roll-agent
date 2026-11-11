@@ -1,9 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { dirname, delimiter, join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import { installCurrentCliShim } from "./current-cli-shim.ts";
 
 function testRoot(): string {
@@ -162,6 +170,149 @@ test("current CLI shim 在 Windows 使用现有 Path 键并生成 cmd", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("current CLI shim normalizes only the Windows executable and disposes bridge files", () => {
+  const root = testRoot();
+  const env: NodeJS.ProcessEnv = { Path: "C:\\Windows\\System32" };
+  try {
+    const direct = installCurrentCliShim({
+      executable: String.raw`\\?\C:\app\node.exe`,
+      execArgv: [],
+      entryPath: String.raw`\\?\C:\app\roll.js`,
+      platform: "win32",
+      tempRoot: root,
+      env,
+    });
+    assert.ok(
+      readFileSync(direct.path, "utf8").includes('"C:\\app\\node.exe" "\\\\?\\C:\\app\\roll.js"'),
+    );
+    assert.equal(existsSync(join(dirname(direct.path), "launch.ps1")), false);
+    const bridge = installCurrentCliShim({
+      executable: String.raw`\\?\C:\app.\node.exe`,
+      execArgv: ["--inspect", "--no-warnings"],
+      entryPath: String.raw`C:\app\roll.js`,
+      platform: "win32",
+      tempRoot: root,
+      env,
+    });
+    assert.equal(existsSync(join(dirname(bridge.path), "launch.ps1")), true);
+    direct.dispose();
+    assert.equal(env.ROLL_CURRENT_CLI, bridge.path);
+    bridge.dispose();
+    assert.equal(existsSync(dirname(bridge.path)), false);
+    assert.equal(env.Path, "C:\\Windows\\System32");
+    assert.equal(env.ROLL_CURRENT_CLI, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("current CLI shim 在 Windows 忽略空 SystemRoot 并回退", () => {
+  const root = testRoot();
+  const env: NodeJS.ProcessEnv = { Path: "C:\\Windows\\System32", SystemRoot: "   " };
+  try {
+    const shim = installCurrentCliShim({
+      executable: "C:\\Users\\中文\\node.exe",
+      execArgv: [],
+      entryPath: "C:\\Users\\中文\\cli.js",
+      env,
+      platform: "win32",
+      tempRoot: root,
+    });
+    assert.equal(existsSync(join(dirname(shim.path), "launch.ps1")), true);
+    assert.match(
+      readFileSync(shim.path, "utf8"),
+      /System32\\WindowsPowerShell\\v1\.0\\powershell\.exe/iu,
+    );
+    shim.dispose();
+    assert.equal(env.Path, "C:\\Windows\\System32");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "current CLI shim 在临时目录无法删除时仍恢复环境且不抛错",
+  { skip: process.platform !== "win32" && process.getuid?.() === 0 },
+  async () => {
+    const root = testRoot();
+    if (process.platform === "win32") {
+      const env: NodeJS.ProcessEnv = {
+        Path: "C:\\Windows\\System32",
+        ROLL_CURRENT_CLI: "C:\\previous\\roll.cmd",
+      };
+      const psExe = join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      );
+      let holder: ReturnType<typeof spawn> | undefined;
+      try {
+        const shim = installCurrentCliShim({
+          executable: "C:\\Users\\中文\\node.exe",
+          execArgv: [],
+          entryPath: "C:\\Users\\中文\\cli.js",
+          env,
+          platform: "win32",
+          tempRoot: root,
+        });
+        holder = spawn(
+          psExe,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `$s = [IO.File]::Open(${JSON.stringify(shim.path)}, 'Open', 'Read', 'None'); [Console]::Out.WriteLine('LOCKED'); [Console]::Out.Flush(); Start-Sleep -Seconds 10`,
+          ],
+          { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+        );
+        await new Promise<void>((resolve, reject) => {
+          holder?.stdout?.on("data", (chunk: Buffer) => {
+            if (chunk.toString("utf8").includes("LOCKED")) resolve();
+          });
+          holder?.once("error", reject);
+        });
+        assert.doesNotThrow(() => {
+          shim.dispose();
+        });
+        assert.equal(env.Path, "C:\\Windows\\System32");
+        assert.equal(env.ROLL_CURRENT_CLI, "C:\\previous\\roll.cmd");
+        assert.equal(existsSync(shim.path), true);
+      } finally {
+        if (holder && holder.exitCode === null) {
+          holder.kill();
+          await new Promise((resolve) => holder?.once("exit", resolve));
+        }
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      }
+      return;
+    }
+
+    const env: NodeJS.ProcessEnv = { PATH: "/old/bin", ROLL_CURRENT_CLI: "/previous/roll" };
+    try {
+      const shim = installCurrentCliShim({
+        executable: "/path/to/node",
+        execArgv: [],
+        entryPath: "/workspace/cli.ts",
+        env,
+        platform: "linux",
+        tempRoot: root,
+      });
+      chmodSync(root, 0o500);
+      try {
+        assert.doesNotThrow(() => {
+          shim.dispose();
+        });
+        assert.equal(env.PATH, "/old/bin");
+        assert.equal(env.ROLL_CURRENT_CLI, "/previous/roll");
+      } finally {
+        chmodSync(root, 0o700);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "current CLI shim 在 Windows 真正转发参数与退出码",

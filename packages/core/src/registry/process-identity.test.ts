@@ -513,3 +513,54 @@ test(
     }
   },
 );
+
+test("Windows identity short-circuits ESRCH without spawning PowerShell", (t) => {
+  const expected = requireProcessStartToken(`pst-v2:${"a".repeat(64)}`);
+  const dir = mkdtempSync(join(tmpdir(), "roll-esrch-short-circuit-"));
+  const marker = join(dir, "invoked.txt");
+  const windowsPowerShell = [
+    "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  ].join("\\");
+  if (process.platform !== "win32") {
+    writeFileSync(
+      join(dir, windowsPowerShell),
+      `#!/bin/sh\necho invoked > ${JSON.stringify(marker)}\necho 637000000000000000\n`,
+      { mode: 0o755 },
+    );
+  }
+  const originalCwd = process.cwd();
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const originalSystemRoot = process.env.SystemRoot;
+  t.mock.method(process, "kill", () => {
+    throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+  });
+  try {
+    if (process.platform !== "win32") {
+      process.chdir(dir);
+      process.env.SystemRoot = "C:\\Windows";
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    }
+    assert.equal(readProcessStartToken(process.pid), undefined);
+    assert.deepEqual(verifyProcessStartToken(process.pid, expected), {
+      status: PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH,
+      reason: PROCESS_START_TOKEN_VERIFICATION_REASONS.PROCESS_NOT_FOUND,
+      currentProcessStartToken: undefined,
+    });
+    assert.equal(readFileSync(marker, { encoding: "utf8", flag: "a+" }), "");
+  } finally {
+    if (platformDescriptor !== undefined) {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+    process.chdir(originalCwd);
+    if (originalSystemRoot === undefined) {
+      delete process.env.SystemRoot;
+    } else {
+      process.env.SystemRoot = originalSystemRoot;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

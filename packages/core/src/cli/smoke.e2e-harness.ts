@@ -123,6 +123,30 @@ export function runRoll(
   };
 }
 
+export function runRollAsync(
+  args: readonly string[],
+  cwd: string,
+  options: RunRollOptions = {},
+): Promise<CliResult> {
+  const spawned = spawnRollProcess(args, cwd, options.env ?? {});
+  if (options.input !== undefined) {
+    spawned.child.stdin.end(options.input);
+  } else {
+    spawned.child.stdin.end();
+  }
+  const deferred = Promise.withResolvers<CliResult>();
+  spawned.child.once("error", deferred.reject);
+  spawned.child.once("close", (status) => {
+    spawned.child.off("error", deferred.reject);
+    deferred.resolve({
+      status,
+      stdout: spawned.output.stdout,
+      stderr: spawned.output.stderr,
+    });
+  });
+  return deferred.promise;
+}
+
 export function spawnRollProcess(
   args: readonly string[],
   cwd: string,

@@ -1,6 +1,7 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { renderWindowsCliFiles } from "./current-cli-windows.ts";
 
 const CURRENT_CLI_ENV = "ROLL_CURRENT_CLI";
 const INSPECT_ARG_PATTERN = /^--inspect/u;
@@ -44,12 +45,6 @@ const envShimStates = new WeakMap<NodeJS.ProcessEnv, EnvShimState>();
 
 function posixQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function windowsQuote(value: string): string {
-  const escapedPercent = value.replaceAll("%", "%%");
-  const escapedQuotes = escapedPercent.replaceAll('"', '\\"');
-  return `"${escapedQuotes}"`;
 }
 
 function absoluteLaunchSpecifier(value: string, launchCwd: string): string {
@@ -97,13 +92,28 @@ function renderPosixShim(command: readonly string[]): string {
   return `#!/bin/sh\nexec ${command.map(posixQuote).join(" ")} "$@"\n`;
 }
 
-function renderWindowsShim(command: readonly string[]): string {
-  return [
-    "@echo off",
-    `${command.map(windowsQuote).join(" ")} %*`,
-    "exit /b %ERRORLEVEL%",
-    "",
-  ].join("\r\n");
+function resolveSystemRoot(env: NodeJS.ProcessEnv): string {
+  const envSystemRoot = Object.entries(env).find(
+    ([key]) => key.toLowerCase() === "systemroot",
+  )?.[1];
+  return (
+    [envSystemRoot, process.env.SystemRoot].find(
+      (value) => value !== undefined && value.trim().length > 0,
+    ) ?? "C:\\Windows"
+  );
+}
+
+function removeShimDirectory(directory: string, platform: NodeJS.Platform): void {
+  try {
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      ...(platform === "win32" ? { maxRetries: 3, retryDelay: 50 } : {}),
+    });
+  } catch {
+    // Best-effort cleanup: transient Windows handle locks on shim files must not
+    // abort caller teardown (e.g. ThreadStore.close()) after env is restored.
+  }
 }
 
 export function installCurrentCliShim(options: InstallCurrentCliShimOptions): CurrentCliShim {
@@ -130,11 +140,16 @@ export function installCurrentCliShim(options: InstallCurrentCliShimOptions): Cu
       ),
       entryPath,
     ];
-    const content = platform === "win32" ? renderWindowsShim(command) : renderPosixShim(command);
-    writeFileSync(shimPath, content, { encoding: "utf8", mode: 0o700 });
+    const files =
+      platform === "win32"
+        ? renderWindowsCliFiles(command, resolveSystemRoot(env))
+        : { roll: renderPosixShim(command) };
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(directory, name), content, { encoding: "utf8", mode: 0o700 });
+    }
   } catch (error) {
     if (directory !== undefined) {
-      rmSync(directory, { recursive: true, force: true });
+      removeShimDirectory(directory, platform);
     }
     throw error;
   }
@@ -159,7 +174,7 @@ export function installCurrentCliShim(options: InstallCurrentCliShimOptions): Cu
   env[CURRENT_CLI_ENV] = shimPath;
 
   const removeDirectory = (): void => {
-    rmSync(directory, { recursive: true, force: true });
+    removeShimDirectory(entry.directory, platform);
   };
   process.once("exit", removeDirectory);
   let disposed = false;

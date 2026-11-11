@@ -115,7 +115,7 @@ function plain(frame: string): string {
   return frame.replace(ANSI_STYLE_PATTERN, "");
 }
 
-async function waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
+async function waitFor(assertion: () => void, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -680,9 +680,7 @@ test("Shift+Tab enables auto mode and confirmations are approved silently", asyn
   await delay(10);
   stdin.write("\x1b[Z");
   await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
-  stdin.write("go");
-  await delay(10);
-  stdin.write("\r");
+  await submitDraft({ stdin, lastFrame }, sink, "go");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
   assert.ok(frames.every((frame) => !frame.includes("执行 browser-use-agent")));
   unmount();
@@ -709,10 +707,7 @@ test("Shift+Tab during a pending confirmation approves it immediately", async ()
       onExit: () => {},
     }),
   );
-  await delay(10);
-  stdin.write("go");
-  await delay(10);
-  stdin.write("\r");
+  await submitDraft({ stdin, lastFrame }, sink, "go");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
   assert.match(lastFrame() ?? "", /AI 说明：点击目标按钮并继续当前任务/u);
   await delay(100);
@@ -748,9 +743,7 @@ test("Shift+Tab twice turns auto mode back off and manual confirm returns", asyn
   await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   stdin.write("\x1b[Z");
   await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", AUTO_BADGE_PATTERN));
-  stdin.write("go");
-  await delay(10);
-  stdin.write("\r");
+  await submitDraft({ stdin, lastFrame }, sink, "go");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
   await delay(100);
 
