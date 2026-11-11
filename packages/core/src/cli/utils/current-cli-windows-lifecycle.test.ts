@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { renderWindowsCliFiles } from "./current-cli-windows.ts";
 
-const windowsOnly = { skip: process.platform !== "win32", timeout: 45_000 };
+const windowsOnly = { skip: process.platform !== "win32", timeout: 60_000 };
 
 function alive(pid: number): boolean {
   try {
@@ -21,7 +21,7 @@ function alive(pid: number): boolean {
 }
 
 async function until(check: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 25_000;
   while (!check()) {
     assert.ok(Date.now() < deadline, label);
     await delay(50);
@@ -129,7 +129,7 @@ public static class RollConsoleProbe {
     PROCESS_INFO child;
     Check(CreateProcessW(cmd,new StringBuilder(line),IntPtr.Zero,IntPtr.Zero,false,0x10,IntPtr.Zero,cwd,ref startup,out child));
     try {
-      for(int i=0;i<300 && !System.IO.File.Exists(ready);i++)System.Threading.Thread.Sleep(50);
+      for(int i=0;i<500 && !System.IO.File.Exists(ready);i++)System.Threading.Thread.Sleep(50);
       if(!System.IO.File.Exists(ready))throw new Exception("Console child did not start");
       FreeConsole();Check(AttachConsole(child.pid));Check(SetConsoleCtrlHandler(protect,true));
       Check(GenerateConsoleCtrlEvent(0,0));System.Threading.Thread.Sleep(1000);FreeConsole();
@@ -194,7 +194,7 @@ test(
           {
             env: { ...process.env, ROLL_PROBE_NODE: process.execPath },
             encoding: "utf8",
-            timeout: 25_000,
+            timeout: 35_000,
             windowsHide: true,
           },
         );

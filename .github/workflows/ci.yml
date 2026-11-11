@@ -43,6 +43,7 @@ jobs:
         shard:
           - unit-core-runtime
           - unit-shell
+          - unit-ink-engine
           - unit-scheduler-lease
           - e2e-runtime-lease
           - e2e-workspace
@@ -110,20 +111,25 @@ jobs:
 
       - name: Targeted shell tests
         if: matrix.shard == 'unit-shell'
-        # PowerShell-heavy files share a runner; schedule longest suites first while bounding contention.
+        # PowerShell / Add-Type suites trigger Defender scans; cap concurrency at 2 to avoid CPU starvation.
         run: >
-          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=3
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
           packages/core/src/cli/utils/current-cli-windows-lifecycle.test.ts
           packages/core/src/cli/utils/current-cli-windows.test.ts
           packages/core/src/cli/utils/current-cli-shim.test.ts
           .claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.powershell.e2e.test.mjs
           packages/runtime/src/bash/powershell-smoke.test.ts
           packages/runtime/src/bash/powershell-session-smoke.test.ts
-          packages/core/src/cli/commands/config-setup.test.ts
           packages/runtime/src/bash/profile.test.ts
           packages/runtime/src/bash/format-result.test.ts
           packages/runtime/src/tool-bridge/bash-tool.test.ts
           packages/runtime/src/tool-bridge/session-exec-tool.test.ts
+
+      - name: Ink TUI and runtime engine unit tests
+        if: matrix.shard == 'unit-ink-engine'
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=3
+          packages/core/src/cli/commands/config-setup.test.ts
           packages/runtime/src/tool-bridge/skill-tool.test.ts
           packages/runtime/src/engine/agent-session.test.ts
           packages/runtime/src/engine/compactor.test.ts
