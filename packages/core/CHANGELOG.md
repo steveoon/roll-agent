@@ -1,5 +1,13 @@
 # @roll-agent/core
 
+## 2.0.1
+
+### Patch Changes
+
+- [#319](https://github.com/steveoon/roll-agent/pull/319) [`185c6ca`](https://github.com/steveoon/roll-agent/commit/185c6ca6bfe3ae4074cbd2bdafd5e9f0a9739ee7) Thanks [@steveoon](https://github.com/steveoon)! - Short-circuit process identity probes when the target PID has already exited, and reuse the current process start token across session ownership and Agent usage leases to avoid redundant PowerShell startups on Windows.
+
+- [#319](https://github.com/steveoon/roll-agent/pull/319) [`82dc0d0`](https://github.com/steveoon/roll-agent/commit/82dc0d02f383e6c2beca1c0708ab52be9550b5a4) Thanks [@steveoon](https://github.com/steveoon)! - Fix nested Roll commands on Windows when the current Node executable uses an extended path. Preserve equivalent ordinary drive and UNC paths, and use a native launch bridge for namespace-dependent, Unicode or genuinely long launch paths. Keep arguments, raw standard streams, exit codes and existing process ownership while continuing to run the current Node and Roll entrypoint.
+
 ## 2.0.0
 
 ### Major Changes
