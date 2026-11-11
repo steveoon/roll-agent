@@ -92,6 +92,30 @@ function renderPosixShim(command: readonly string[]): string {
   return `#!/bin/sh\nexec ${command.map(posixQuote).join(" ")} "$@"\n`;
 }
 
+function resolveSystemRoot(env: NodeJS.ProcessEnv): string {
+  const envSystemRoot = Object.entries(env).find(
+    ([key]) => key.toLowerCase() === "systemroot",
+  )?.[1];
+  return (
+    [envSystemRoot, process.env.SystemRoot].find(
+      (value) => value !== undefined && value.trim().length > 0,
+    ) ?? "C:\\Windows"
+  );
+}
+
+function removeShimDirectory(directory: string, platform: NodeJS.Platform): void {
+  try {
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      ...(platform === "win32" ? { maxRetries: 3, retryDelay: 50 } : {}),
+    });
+  } catch {
+    // Best-effort cleanup: transient Windows handle locks on shim files must not
+    // abort caller teardown (e.g. ThreadStore.close()) after env is restored.
+  }
+}
+
 export function installCurrentCliShim(options: InstallCurrentCliShimOptions): CurrentCliShim {
   const executable = options.executable ?? process.execPath;
   const entryPath = options.entryPath ?? process.argv[1];
@@ -116,20 +140,16 @@ export function installCurrentCliShim(options: InstallCurrentCliShimOptions): Cu
       ),
       entryPath,
     ];
-    const systemRoot =
-      Object.entries(env).find(([key]) => key.toLowerCase() === "systemroot")?.[1] ??
-      process.env.SystemRoot ??
-      "C:\\Windows";
     const files =
       platform === "win32"
-        ? renderWindowsCliFiles(command, systemRoot)
+        ? renderWindowsCliFiles(command, resolveSystemRoot(env))
         : { roll: renderPosixShim(command) };
     for (const [name, content] of Object.entries(files)) {
       writeFileSync(join(directory, name), content, { encoding: "utf8", mode: 0o700 });
     }
   } catch (error) {
     if (directory !== undefined) {
-      rmSync(directory, { recursive: true, force: true });
+      removeShimDirectory(directory, platform);
     }
     throw error;
   }
@@ -154,7 +174,7 @@ export function installCurrentCliShim(options: InstallCurrentCliShimOptions): Cu
   env[CURRENT_CLI_ENV] = shimPath;
 
   const removeDirectory = (): void => {
-    rmSync(directory, { recursive: true, force: true });
+    removeShimDirectory(entry.directory, platform);
   };
   process.once("exit", removeDirectory);
   let disposed = false;

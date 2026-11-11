@@ -76,6 +76,7 @@ Authenticode 签名的 x64 MSI 是 GA 门槛，当前仓库尚未产出该签名
 | `roll agent stop` 优雅关闭 | Windows 无 SIGTERM，等于强杀（stop 时有提示） | 先 `roll browser stop` 关浏览器再停 agent |
 | session exec 的 root 先退出、后代继续持有 stdio | root PID 已可能被系统复用，Roll 不会再用旧 PID 调 `taskkill /T`；会话保守标为 `cleanup-failed`，不伪报后代已清理 | 让脚本 root 等待自己启动的子进程结束；需保证这类后代必杀时需未来引入 Windows Job Object |
 | session exec 跨 `roll chat` 进程重启恢复 | 会话仅存在于当前长驻进程，重启后不能重新附着旧 OS 进程 | 保持同一 chat 进程运行，或重新执行脚本 |
+| 中文/超长路径下嵌套调用 `roll` 命令 | 为避免在纯 JS 包中分发未签名 `.exe`，非纯 ASCII 或 `>= 260` 字符启动路径经系统 PowerShell 5.1 `Add-Type` 桥接调用 `CreateProcessW`：每次嵌套调用有约 0.5–2 s 编译开销，且在企业 WDAC/AppLocker `ConstrainedLanguage` 策略下动态编译会被拦截；外层 `.cmd` 传复杂 JSON 仍受 `cmd.exe` `%*` 引号规则限制 | 高频批处理或受管企业环境可将 Node/Roll 安装在纯 ASCII 短路径下；复杂参数优先用 `--input-file` |
 
 ## 编码问题的成因模型
 

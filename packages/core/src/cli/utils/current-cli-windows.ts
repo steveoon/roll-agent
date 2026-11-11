@@ -5,7 +5,7 @@ const CMD_UNSAFE = /["%!^&|<>]/u;
 // CMD reads a batch file in the console code page. Keep its source ASCII rather
 // than changing a user's console code page or corrupting Unicode launch values.
 const NON_ASCII = /[^\u0020-\u007e]/u;
-const DOS_DEVICE = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu;
+const DOS_DEVICE = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu;
 
 function hasControlCharacters(value: string): boolean {
   return Array.from(value).some((character) => character.charCodeAt(0) < 32);

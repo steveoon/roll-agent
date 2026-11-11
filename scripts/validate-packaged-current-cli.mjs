@@ -287,7 +287,15 @@ const lifecycle =
           const parentById = new Map(owned.map((row) => [row.ProcessId, row.ParentProcessId]));
           const depth = (row) => {
             let result = 0;
-            for (let pid = row.ProcessId; parentById.has(pid); pid = parentById.get(pid)) result++;
+            const visited = new Set();
+            for (
+              let pid = row.ProcessId;
+              parentById.has(pid) && !visited.has(pid);
+              pid = parentById.get(pid)
+            ) {
+              visited.add(pid);
+              result++;
+            }
             return result;
           };
           const hostCore = owned

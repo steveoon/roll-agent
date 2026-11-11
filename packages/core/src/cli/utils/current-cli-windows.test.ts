@@ -34,6 +34,8 @@ test("CMD conversion declines namespace-dependent or ambiguous paths", () => {
     String.raw`\\?\C:\app\..\node.exe`,
     String.raw`\\?\C:\app\.\node.exe`,
     String.raw`\\?\C:\NUL\node.exe`,
+    String.raw`\\?\C:\CONIN$\node.exe`,
+    String.raw`\\?\C:\CONOUT$\node.exe`,
     String.raw`\\?\C:\app/node.exe`,
     String.raw`\\?\C:\\app\node.exe`,
     String.raw`C:\app%PATH%\node.exe`,

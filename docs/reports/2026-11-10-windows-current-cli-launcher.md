@@ -89,3 +89,7 @@ node scripts/validate-packaged-current-cli.mjs '<Windows packaged executable>' '
 ```
 
 缺少系统 PowerShell 7 的测试环境可只为该子进程指定 `ROLL_VALIDATION_PWSH_ROOT`，指向包含 `PowerShell/7/pwsh.exe` 的私有根。fixture 不安装工具或修改持久环境。
+
+## 审查跟进修订（2026-11-11）
+
+上述打包验收与覆盖文件 SHA-256 对应 `82dc0d02` 快照。代码审查后在同一分支追加了最小防御补丁（不改变发布架构或公开契约）：`current-cli-shim.ts` 为临时目录删除补充 Windows 短重试与 best-effort 异常兜底（防止瞬态句柄锁中断上游清理链）并过滤空白 `SystemRoot` 回退；`current-cli-windows.ts` 在 `DOS_DEVICE` 中补入 `CONIN$` / `CONOUT$`；`scripts/validate-packaged-current-cli.mjs` 为进程树深度计算增加防环保护；`docs/windows-compatibility.md` 记录了中文/超长路径下 `Add-Type` 的编译开销与企业 `ConstrainedLanguage` 边界。
