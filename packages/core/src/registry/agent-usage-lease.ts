@@ -15,10 +15,13 @@ import {
 import { basename, dirname, resolve } from "node:path";
 import { z } from "zod";
 import {
+  PROCESS_START_TOKEN_VERIFICATION_REASONS,
+  PROCESS_START_TOKEN_VERIFICATION_STATUSES,
   isProcessStartToken,
   readProcessStartToken,
   verifyProcessStartToken,
   type ProcessStartToken,
+  type ProcessStartTokenVerification,
 } from "./process-identity.ts";
 import {
   AgentLifecycleBusyError,
@@ -558,7 +561,7 @@ function inspectAgentUsageStopRecoveryWithLock(
   }
 
   for (const candidate of candidates) {
-    const ownerVerification = verifyProcessStartToken(
+    const ownerVerification = verifyMaybeOwnProcessStartToken(
       candidate.record.ownerIdentity.pid,
       candidate.record.ownerIdentity.processStartToken,
     );
@@ -584,7 +587,7 @@ function inspectAgentUsageStopRecoveryWithLock(
       sameManagedAgentRuntimeIdentity(runtime.identity, candidate.record.runtimeIdentity);
     if (referencesCurrentRuntime) continue;
 
-    const referencedRuntimeVerification = verifyProcessStartToken(
+    const referencedRuntimeVerification = verifyMaybeOwnProcessStartToken(
       candidate.record.runtimeIdentity.pid,
       candidate.record.runtimeIdentity.processStartToken,
     );
@@ -828,6 +831,29 @@ function readOwnProcessStartToken(): ProcessStartToken | undefined {
   return ownProcessStartToken;
 }
 
+function verifyMaybeOwnProcessStartToken(
+  pid: number,
+  expected: ProcessStartToken,
+): ProcessStartTokenVerification {
+  if (pid === process.pid && expected.startsWith("pst-v2:")) {
+    const currentProcessStartToken = readOwnProcessStartToken();
+    if (currentProcessStartToken !== undefined) {
+      return currentProcessStartToken === expected
+        ? {
+            status: PROCESS_START_TOKEN_VERIFICATION_STATUSES.MATCH,
+            reason: PROCESS_START_TOKEN_VERIFICATION_REASONS.TOKEN_MATCH,
+            currentProcessStartToken,
+          }
+        : {
+            status: PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH,
+            reason: PROCESS_START_TOKEN_VERIFICATION_REASONS.TOKEN_MISMATCH,
+            currentProcessStartToken,
+          };
+    }
+  }
+  return verifyProcessStartToken(pid, expected);
+}
+
 function createLeaseRecord(
   agentName: string,
   holderKind: AgentUsageHolderKind,
@@ -913,7 +939,7 @@ function reconcileLeaseFiles(
       blockers.push({ kind: "invalid", filePath: leasePath });
       continue;
     }
-    const verification = verifyProcessStartToken(
+    const verification = verifyMaybeOwnProcessStartToken(
       record.ownerIdentity.pid,
       record.ownerIdentity.processStartToken,
     );

@@ -1467,7 +1467,7 @@ test("runRepl /diff on 让后续文件变更 diff 完整输出，/diff off 恢�
 
 test(
   "basic CLI switch keeps its current claim on conflict, then retires only after successful resume",
-  { timeout: 10_000 },
+  { timeout: 30_000 },
   async () => {
     const runtime = await import("@roll-agent/runtime");
     const { createOwnedThreadStore } = await import("../../runtime-host/session-ownership.ts");

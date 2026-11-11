@@ -49,6 +49,9 @@ export function createSessionOwnershipHost(kind = "cli"): SessionOwnershipHost {
         ) {
           return "unknown";
         }
+        if (value.pid === process.pid && value.token.startsWith("pst-v2:")) {
+          return value.token === token ? "alive" : "dead";
+        }
         const result = verifyProcessStartToken(value.pid, value.token);
         if (result.status === "match") return "alive";
         if (result.status === "mismatch") return "dead";
