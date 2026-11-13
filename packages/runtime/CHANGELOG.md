@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 1.7.1
+
+### Patch Changes
+
+- [#322](https://github.com/steveoon/roll-agent/pull/322) [`3fbba46`](https://github.com/steveoon/roll-agent/commit/3fbba46e536958a64ea9f30b3f9aef6f7c9e38bf) Thanks [@steveoon](https://github.com/steveoon)! - Preserve causal step ordering between assistant messages and tool executions in `thread.snapshot`. Record monotonic per-step timestamps when persisting multi-step turn messages while keeping transcript and tool coverage writes atomic, and align legacy batched transcript timestamps against read-only turn boundaries and paired tool execution metadata consistently across full and paginated snapshots without migrating SQLite schema 12 or changing Protocol 1.6 payloads.
+
 ## 1.7.0
 
 ### Minor Changes
