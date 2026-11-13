@@ -55,6 +55,7 @@ interface UserInputPromptSignalScope {
 function createUserInputPromptSignalScope(
   expiresAt: string,
   outerSignal: AbortSignal | undefined,
+  timeoutReason = USER_INPUT_TIMEOUT_REASON,
 ): UserInputPromptSignalScope {
   const deadlineMs = Date.parse(expiresAt);
   const deadlineController = new AbortController();
@@ -63,7 +64,7 @@ function createUserInputPromptSignalScope(
   const expire = (): void => {
     expired = true;
     if (!deadlineController.signal.aborted) {
-      deadlineController.abort(new Error(USER_INPUT_TIMEOUT_REASON));
+      deadlineController.abort(new Error(timeoutReason));
     }
   };
   const scheduleExpiration = (): void => {
@@ -72,7 +73,10 @@ function createUserInputPromptSignalScope(
       expire();
       return;
     }
-    deadlineTimer = setTimeout(scheduleExpiration, Math.min(remainingMs, MAX_TIMEOUT_DELAY_MS));
+    // ISO deadlines have millisecond precision. Round the wake-up outward so
+    // truncation cannot race ahead of the Runtime timer at the same deadline.
+    // hasExpired() still rejects clicks at the exact wall-clock boundary.
+    deadlineTimer = setTimeout(scheduleExpiration, Math.min(remainingMs + 1, MAX_TIMEOUT_DELAY_MS));
   };
   if (Number.isFinite(deadlineMs)) {
     if (expired) {
@@ -317,11 +321,29 @@ export class ChatRenderer {
               }).join("\n")
             : formatApprovalDetails(event.input);
         const message = [header, explanation, body].filter((line) => line.length > 0).join("\n");
-        const approved = await this.confirm(message, this.signal, event.fullDiff);
-        if (approved) {
-          responder.approve(event.approvalId);
-        } else {
-          responder.reject(event.approvalId, "用户取消");
+        if (event.expiresAt !== undefined && !Number.isFinite(Date.parse(event.expiresAt))) {
+          responder.reject(event.approvalId, "审批请求截止时间无效");
+          break;
+        }
+        const promptScope =
+          event.expiresAt === undefined
+            ? undefined
+            : createUserInputPromptSignalScope(event.expiresAt, this.signal, "审批请求已超时");
+        try {
+          const signal = promptScope?.signal ?? this.signal;
+          const approved =
+            promptScope?.hasExpired() === true || signal?.aborted === true
+              ? false
+              : await this.confirm(message, signal, event.fullDiff);
+          if (promptScope?.hasExpired() === true) {
+            responder.reject(event.approvalId, "审批请求已超时");
+          } else if (approved && signal?.aborted !== true) {
+            responder.approve(event.approvalId);
+          } else {
+            responder.reject(event.approvalId, "用户取消");
+          }
+        } finally {
+          promptScope?.dispose();
         }
         break;
       }

@@ -6,6 +6,7 @@ import { Box } from "ink";
 import { cleanup, render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
+import { createTerminalAgentStatus } from "../terminal-agent-status.ts";
 import { createChatFastModeControl } from "../fast-mode.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
@@ -1512,6 +1513,14 @@ function switchableFakeSession(
 }
 
 test("ChatApp switches sessions via /resume picker", async () => {
+  const statuses: string[] = [];
+  const terminalAgentStatus = createTerminalAgentStatus({
+    enabled: true,
+    write: (s) => {
+      statuses.push(s);
+    },
+  });
+  terminalAgentStatus.beginTurn().finish("failed");
   const first = switchableFakeSession("s1");
   const second = switchableFakeSession("s2", [
     { role: "user", content: "旧消息" },
@@ -1520,6 +1529,7 @@ test("ChatApp switches sessions via /resume picker", async () => {
   const retired: string[] = [];
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
+      terminalAgentStatus,
       session: first.session,
       model: "test-model",
       onUserSubmit: () => {},
@@ -1544,6 +1554,7 @@ test("ChatApp switches sessions via /resume picker", async () => {
     assert.match(lastFrame() ?? "", /旧消息/);
     assert.equal(first.isClosed(), true);
     assert.deepEqual(retired, ["s1"]);
+    assert.equal(statuses.at(-1), "\u001B]7501;state=idle:app=roll\u001B\\");
   });
   stdin.write("hello");
   await delay(20);
@@ -1551,7 +1562,9 @@ test("ChatApp switches sessions via /resume picker", async () => {
   await delay(30);
   assert.deepEqual(second.sent(), ["hello"]);
   assert.deepEqual(first.sent(), []);
+  assert.equal(statuses.at(-1), "\u001B]7501;state=done:app=roll\u001B\\");
   unmount();
+  assert.ok(!statuses.some((s) => s.includes("state=clear")));
 });
 
 test("ChatApp keeps the switched model in its status after /resume", async () => {

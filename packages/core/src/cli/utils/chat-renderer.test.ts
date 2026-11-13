@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import type { SessionEvent } from "@roll-agent/runtime";
 import { ChatRenderer, paginateApprovalReview, type ChatApprover } from "./chat-renderer.ts";
@@ -116,6 +116,114 @@ test("expired boundary settles exactly once even when the prompt returns immedia
   assert.deepEqual(records.cancelled, [
     { requestId: event.requestId, reason: "用户输入请求已超时" },
   ]);
+});
+
+test("permission deadline aborts confirmation, suppresses late Yes and settles once", async () => {
+  const decisions: string[] = [];
+  let observed: AbortSignal | undefined;
+  const renderer = new ChatRenderer(async (_message, signal) => {
+    observed = signal;
+    if (!signal?.aborted) {
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    }
+    return true;
+  });
+  await renderer.handle(
+    {
+      type: "confirmation-required",
+      approvalId: "deadline",
+      agentName: "fixture",
+      toolName: "test",
+      input: {},
+      expiresAt: new Date(Date.now() + 30).toISOString(),
+    },
+    {
+      approve: () => {
+        decisions.push("approved");
+      },
+      reject: (_id, reason) => {
+        decisions.push(reason ?? "rejected");
+      },
+    },
+  );
+  assert.equal(observed?.aborted, true);
+  assert.equal(observed?.reason instanceof Error && observed.reason.message, "审批请求已超时");
+  assert.deepEqual(decisions, ["审批请求已超时"]);
+});
+
+test("permission rejects expired/invalid before opening UI and keeps missing-deadline compatibility", async () => {
+  for (const expiresAt of [undefined, new Date(Date.now() - 10).toISOString(), "invalid"]) {
+    let prompts = 0;
+    const decisions: string[] = [];
+    const renderer = new ChatRenderer(async () => {
+      prompts++;
+      return true;
+    });
+    await renderer.handle(
+      {
+        type: "confirmation-required",
+        approvalId: "compat",
+        agentName: "fixture",
+        toolName: "test",
+        input: {},
+        ...(expiresAt === undefined ? {} : { expiresAt }),
+      },
+      {
+        approve: () => {
+          decisions.push("approved");
+        },
+        reject: (_id, reason) => {
+          decisions.push(reason ?? "rejected");
+        },
+      },
+    );
+    assert.equal(prompts, expiresAt === undefined ? 1 : 0);
+    assert.deepEqual(decisions, [
+      expiresAt === undefined
+        ? "approved"
+        : expiresAt === "invalid"
+          ? "审批请求截止时间无效"
+          : "审批请求已超时",
+    ]);
+  }
+});
+
+test("permission checks wall clock at the click boundary and clears its timer on normal decision", async () => {
+  const deadline = Date.now() + 60_000;
+  const decisions: string[] = [];
+  let observed: AbortSignal | undefined;
+  const renderer = new ChatRenderer(async (_message, signal) => {
+    observed = signal;
+    mock.method(Date, "now", () => deadline);
+    return true;
+  });
+  try {
+    await renderer.handle(
+      {
+        type: "confirmation-required",
+        approvalId: "race",
+        agentName: "fixture",
+        toolName: "test",
+        input: {},
+        expiresAt: new Date(deadline).toISOString(),
+      },
+      {
+        approve: () => {
+          decisions.push("approved");
+        },
+        reject: (_id, reason) => {
+          decisions.push(reason ?? "rejected");
+        },
+      },
+    );
+    assert.deepEqual(decisions, ["审批请求已超时"]);
+    // Date advanced without timer dispatch: hasExpired must still catch the late Yes.
+    assert.equal(observed?.aborted, false);
+  } finally {
+    mock.restoreAll();
+  }
 });
 
 const DIFF_FIXTURE = {
