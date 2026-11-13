@@ -90,18 +90,24 @@ function occursBefore(left: ToolPartOccurrence, right: ToolPartOccurrence): bool
   );
 }
 
-/**
- * Reconstruct a provider-safe active projection from persisted ModelMessages.
- *
- * A Tool protocol pair is retained only when its id has exactly one call, exactly
- * one later result, and no ambiguity. Every malformed id is removed as a whole;
- * choosing a duplicate occurrence would otherwise let persistence order invent
- * which external side effect the result belongs to.
- */
-export function repairActiveToolProtocol(
-  messages: readonly ModelMessage[],
-): ActiveToolProtocolRepair {
-  const index = indexToolProtocol(messages);
+export type RepairedToolProtocolEntry<TEntry extends { readonly message: ModelMessage }> = Omit<
+  TEntry,
+  "message"
+> & {
+  readonly message: ModelMessage;
+};
+
+interface InternalToolProtocolRepair<TEntry extends { readonly message: ModelMessage }> {
+  readonly status: ActiveToolProtocolRepairStatus;
+  readonly entries: RepairedToolProtocolEntry<TEntry>[];
+  readonly removedToolCallIds: readonly string[];
+  readonly removedToolResultIds: readonly string[];
+}
+
+function repairToolProtocolInternal<TEntry extends { readonly message: ModelMessage }>(
+  entries: readonly TEntry[],
+): InternalToolProtocolRepair<TEntry> {
+  const index = indexToolProtocol(entries.map((entry) => entry.message));
   const allIds = new Set([...index.calls.keys(), ...index.results.keys()]);
   const invalidIds = new Set<string>();
   for (const toolCallId of allIds) {
@@ -123,7 +129,7 @@ export function repairActiveToolProtocol(
   if (invalidIds.size === 0) {
     return {
       status: ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS.valid,
-      messages: [...messages],
+      entries: [...entries],
       removedToolCallIds: [],
       removedToolResultIds: [],
     };
@@ -131,10 +137,11 @@ export function repairActiveToolProtocol(
 
   const removedToolCallIds = new Set<string>();
   const removedToolResultIds = new Set<string>();
-  const repaired: ModelMessage[] = [];
-  for (const message of messages) {
+  const repaired: RepairedToolProtocolEntry<TEntry>[] = [];
+  for (const entry of entries) {
+    const { message } = entry;
     if (!Array.isArray(message.content)) {
-      repaired.push(message);
+      repaired.push(entry);
       continue;
     }
     const content = message.content.filter((part) => {
@@ -147,17 +154,53 @@ export function repairActiveToolProtocol(
       );
       return false;
     });
-    if (content.length > 0) {
-      repaired.push(modelMessageSchema.parse({ ...message, content }));
+    if (content.length === message.content.length) {
+      repaired.push(entry);
+    } else if (content.length > 0) {
+      const parsedMessage: ModelMessage = modelMessageSchema.parse({ ...message, content });
+      repaired.push({
+        ...entry,
+        message: parsedMessage,
+      });
     }
   }
 
   return {
     status: ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS.repaired,
-    messages: repaired,
+    entries: repaired,
     removedToolCallIds: [...removedToolCallIds].sort((left, right) => left.localeCompare(right)),
     removedToolResultIds: [...removedToolResultIds].sort((left, right) =>
       left.localeCompare(right),
     ),
   };
+}
+
+/**
+ * Reconstruct a provider-safe active projection from persisted ModelMessages.
+ *
+ * A Tool protocol pair is retained only when its id has exactly one call, exactly
+ * one later result, and no ambiguity. Every malformed id is removed as a whole;
+ * choosing a duplicate occurrence would otherwise let persistence order invent
+ * which external side effect the result belongs to.
+ */
+export function repairActiveToolProtocol(
+  messages: readonly ModelMessage[],
+): ActiveToolProtocolRepair {
+  const repaired = repairToolProtocolInternal(messages.map((message) => ({ message })));
+  return {
+    status: repaired.status,
+    messages: repaired.entries.map((entry) => entry.message),
+    removedToolCallIds: repaired.removedToolCallIds,
+    removedToolResultIds: repaired.removedToolResultIds,
+  };
+}
+
+/**
+ * Repair Tool protocol pairs across enveloped message entries while preserving
+ * each surviving entry's attached metadata and widening `message` to `ModelMessage`.
+ */
+export function repairActiveToolProtocolEntries<TEntry extends { readonly message: ModelMessage }>(
+  entries: readonly TEntry[],
+): RepairedToolProtocolEntry<TEntry>[] {
+  return repairToolProtocolInternal(entries).entries;
 }

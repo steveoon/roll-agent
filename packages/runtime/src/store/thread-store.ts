@@ -188,6 +188,7 @@ export interface ToolExecutionContextCoverageInput {
 
 export interface AppendMessagesOptions {
   readonly toolExecutionCoverage?: ToolExecutionContextCoverageInput;
+  readonly messageCreatedAt?: readonly string[];
 }
 
 export interface ThreadRecord {
@@ -270,6 +271,25 @@ interface ForeignKeyRow {
 interface ToolExecutionRow {
   readonly sequence: number;
   readonly record_json: string;
+}
+
+interface ToolExecutionTimestampRow {
+  readonly sequence: number;
+  readonly tool_call_id: string;
+  readonly created_at: string;
+  readonly transcript_sequence: number | null;
+}
+
+interface TranscriptTurnBoundaryRow {
+  readonly sequence: number;
+  readonly created_at: string;
+}
+
+interface TranscriptTurnContextNodeRow {
+  readonly sequence: number;
+  readonly role: string;
+  readonly created_at: string;
+  readonly tool_call_ids_json: string | null;
 }
 
 interface StoredToolExecutionMigrationRow {
@@ -377,6 +397,36 @@ export interface RecentTranscriptMessagePage {
 export interface RecentToolExecutionPage {
   readonly entries: readonly SequencedToolExecutionRecord[];
   readonly nextBeforeSequence: number | undefined;
+}
+
+export interface ToolExecutionTimestampEntry {
+  readonly sequence: number;
+  readonly toolCallId: string;
+  readonly createdAt: string;
+  readonly coverageTranscriptSequence: number | null;
+}
+
+export interface TranscriptTurnBoundary {
+  readonly sequence: number;
+  readonly createdAt: string;
+}
+
+export interface TranscriptTurnContextNode {
+  readonly sequence: number;
+  readonly role: string;
+  readonly createdAt: string;
+  readonly toolCallIds: readonly string[];
+}
+
+export interface ReadTranscriptTurnContextOptions {
+  readonly includeLeadingTurn?: boolean;
+  readonly includeTrailingTurn?: boolean;
+}
+
+export interface TranscriptTurnContext {
+  readonly leadingTurnNodes: readonly TranscriptTurnContextNode[];
+  readonly trailingTurnNodes: readonly TranscriptTurnContextNode[];
+  readonly nextUserAfterWindow: TranscriptTurnBoundary | undefined;
 }
 
 export interface CompactionEvidenceWatermarks {
@@ -594,6 +644,8 @@ export class ThreadStore {
   private readonly readOnly: boolean;
   private readonly claims: SessionClaims | undefined;
   private readonly sessionReservations = new Map<string, string>();
+  private toolExecutionsTableExists: boolean | undefined;
+  private toolExecutionCoverageTableExists: boolean | undefined;
 
   constructor(dir: string = defaultThreadsDir(), options: ThreadStoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -2081,11 +2133,18 @@ export class ThreadStore {
     options: AppendMessagesOptions = {},
   ): void {
     const coverage = options.toolExecutionCoverage;
+    const rawMessageCreatedAt = options.messageCreatedAt;
     if (messages.length === 0) {
       if (coverage !== undefined && coverage.executionIds.length > 0) {
         throw new Error("Tool execution coverage 必须与至少一条 transcript message 原子写入");
       }
+      if (rawMessageCreatedAt !== undefined && rawMessageCreatedAt.length > 0) {
+        throw new Error("messageCreatedAt 长度必须与 messages 一致");
+      }
       return;
+    }
+    if (rawMessageCreatedAt !== undefined && rawMessageCreatedAt.length !== messages.length) {
+      throw new Error("messageCreatedAt 长度必须与 messages 一致");
     }
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
@@ -2108,6 +2167,14 @@ export class ThreadStore {
       }
       uniqueCoverageIds.add(executionId);
     }
+    const normalizedMessageCreatedAt = rawMessageCreatedAt?.map((value) => {
+      const parsed = timestampSchema.parse(value);
+      const epochMs = Date.parse(parsed);
+      if (!Number.isFinite(epochMs)) {
+        throw new Error(`messageCreatedAt 时间戳无效: ${value}`);
+      }
+      return new Date(epochMs).toISOString();
+    });
     const parsedMessages = messages.map((message) =>
       sanitizePersistedExplicitSkillCheckpoint(modelMessageSchema.parse(message)),
     );
@@ -2115,7 +2182,13 @@ export class ThreadStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.appendMessagesInTransaction(threadId, parsedMessages, now, coverage);
+      this.appendMessagesInTransaction(
+        threadId,
+        parsedMessages,
+        now,
+        coverage,
+        normalizedMessageCreatedAt,
+      );
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -2158,7 +2231,16 @@ export class ThreadStore {
         executionIds: records.map((record) => record.id),
         representation: TOOL_EXECUTION_CONTEXT_REPRESENTATIONS.recoveryEvidence,
       };
-      this.appendMessagesInTransaction(threadId, [message], new Date().toISOString(), coverage);
+      const now = new Date().toISOString();
+      const latestRecordMs = records.reduce(
+        (maxMs, record) => Math.max(maxMs, Date.parse(record.createdAt)),
+        Number.NEGATIVE_INFINITY,
+      );
+      const recoveryCreatedAt =
+        Number.isFinite(latestRecordMs) && Date.parse(now) <= latestRecordMs
+          ? new Date(latestRecordMs + 1).toISOString()
+          : now;
+      this.appendMessagesInTransaction(threadId, [message], now, coverage, [recoveryCreatedAt]);
       this.db.exec("COMMIT");
       return message;
     } catch (error) {
@@ -2172,6 +2254,7 @@ export class ThreadStore {
     messages: readonly ModelMessage[],
     now: string,
     coverage: ToolExecutionContextCoverageInput | undefined,
+    messageCreatedAt?: readonly string[],
   ): void {
     const insertActive = this.db.prepare(
       "INSERT INTO messages (thread_id, idx, role, content_json, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -2204,16 +2287,24 @@ export class ThreadStore {
       .get(threadId) as { readonly maxSequence: number };
     let idx = activeStartRow.maxIdx + 1;
     let sequence = transcriptStartRow.maxSequence + 1;
-    for (const message of messages) {
+    let updatedAt = now;
+    let updatedAtMs = Date.parse(now);
+    for (const [index, message] of messages.entries()) {
+      const createdAt = messageCreatedAt?.[index] ?? now;
+      const createdAtMs = Date.parse(createdAt);
+      if (createdAtMs > updatedAtMs) {
+        updatedAtMs = createdAtMs;
+        updatedAt = createdAt;
+      }
       const serialized = JSON.stringify(message);
-      insertActive.run(threadId, idx, message.role, serialized, now);
+      insertActive.run(threadId, idx, message.role, serialized, createdAt);
       insertTranscript.run(
         threadId,
         sequence,
         message.role,
         serialized,
         TRANSCRIPT_MESSAGE_PROVENANCES[0],
-        now,
+        createdAt,
       );
       idx += 1;
       sequence += 1;
@@ -2238,7 +2329,7 @@ export class ThreadStore {
       }
       this.enforceToolExecutionRetentionInTransaction(threadId, now);
     }
-    this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
+    this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(updatedAt, threadId);
   }
 
   replaceMessages(threadId: string, messages: readonly ModelMessage[]): void {
@@ -2662,6 +2753,101 @@ export class ThreadStore {
     };
   }
 
+  hasAnyToolExecutions(threadId: string): boolean {
+    if (!this.hasToolExecutionsTable()) {
+      return false;
+    }
+    return (
+      this.db.prepare("SELECT 1 FROM tool_executions WHERE thread_id = ? LIMIT 1").get(threadId) !==
+      undefined
+    );
+  }
+
+  listToolExecutionTimestampsByCallIds(
+    threadId: string,
+    toolCallIds: readonly string[],
+  ): ToolExecutionTimestampEntry[] {
+    const uniqueCallIds = [
+      ...new Set(toolCallIds.filter((callId) => typeof callId === "string" && callId.length > 0)),
+    ];
+    if (uniqueCallIds.length === 0 || !this.hasToolExecutionsTable()) {
+      return [];
+    }
+    const withCoverage = this.hasToolExecutionCoverageTable();
+    const chunkSize = 200;
+    const collected: ToolExecutionTimestampEntry[] = [];
+    for (let offset = 0; offset < uniqueCallIds.length; offset += chunkSize) {
+      const chunk = uniqueCallIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const sql = withCoverage
+        ? `SELECT
+             tool_executions.sequence AS sequence,
+             tool_executions.tool_call_id AS tool_call_id,
+             tool_executions.created_at AS created_at,
+             tool_execution_context_coverage.transcript_sequence AS transcript_sequence
+           FROM tool_executions
+           LEFT JOIN tool_execution_context_coverage
+             ON tool_execution_context_coverage.thread_id = tool_executions.thread_id
+            AND tool_execution_context_coverage.execution_id = tool_executions.id
+           WHERE tool_executions.thread_id = ?
+             AND tool_executions.tool_call_id IN (${placeholders})
+           ORDER BY tool_executions.sequence ASC`
+        : `SELECT
+             sequence,
+             tool_call_id,
+             created_at,
+             NULL AS transcript_sequence
+           FROM tool_executions
+           WHERE thread_id = ?
+             AND tool_call_id IN (${placeholders})
+           ORDER BY sequence ASC`;
+      const rows = this.db.prepare(sql).all(threadId, ...chunk);
+      for (const row of rows) {
+        if (!isToolExecutionTimestampRow(row)) {
+          continue;
+        }
+        collected.push({
+          sequence: row.sequence,
+          toolCallId: row.tool_call_id,
+          createdAt: row.created_at,
+          coverageTranscriptSequence: row.transcript_sequence,
+        });
+      }
+    }
+    if (uniqueCallIds.length > chunkSize) {
+      collected.sort((left, right) => left.sequence - right.sequence);
+    }
+    return collected;
+  }
+
+  private hasToolExecutionsTable(): boolean {
+    if (!this.readOnly) {
+      return true;
+    }
+    if (this.toolExecutionsTableExists === undefined) {
+      this.toolExecutionsTableExists =
+        this.db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_executions'")
+          .get() !== undefined;
+    }
+    return this.toolExecutionsTableExists;
+  }
+
+  private hasToolExecutionCoverageTable(): boolean {
+    if (!this.readOnly) {
+      return true;
+    }
+    if (this.toolExecutionCoverageTableExists === undefined) {
+      this.toolExecutionCoverageTableExists =
+        this.db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_execution_context_coverage'",
+          )
+          .get() !== undefined;
+    }
+    return this.toolExecutionCoverageTableExists;
+  }
+
   getToolExecution(
     threadId: string,
     executionId: string,
@@ -2753,6 +2939,156 @@ export class ThreadStore {
       entries,
       nextBeforeSequence: hasMore ? entries[0]?.sequence : undefined,
     };
+  }
+
+  readTranscriptTurnContext(
+    threadId: string,
+    firstSequence: number,
+    lastSequence: number,
+    options: ReadTranscriptTurnContextOptions = {},
+  ): TranscriptTurnContext {
+    if (
+      !Number.isInteger(firstSequence) ||
+      !Number.isInteger(lastSequence) ||
+      firstSequence < 0 ||
+      lastSequence < firstSequence
+    ) {
+      throw new Error(
+        `Invalid transcript turn context range [${String(firstSequence)}, ${String(lastSequence)}]`,
+      );
+    }
+    const includeLeadingTurn = options.includeLeadingTurn ?? true;
+    const includeTrailingTurn = options.includeTrailingTurn ?? true;
+
+    let leadingTurnNodes: readonly TranscriptTurnContextNode[] = [];
+    if (includeLeadingTurn && firstSequence > 0) {
+      const priorUserRow = this.db
+        .prepare(
+          `SELECT sequence, created_at
+             FROM transcript_messages
+            WHERE thread_id = ?
+              AND sequence < ?
+              AND role = 'user'
+            ORDER BY sequence DESC
+            LIMIT 1`,
+        )
+        .get(threadId, firstSequence);
+      const turnStartSequence = isTranscriptTurnBoundaryRow(priorUserRow)
+        ? priorUserRow.sequence
+        : 0;
+      leadingTurnNodes = this.readTranscriptTurnNodesInRange(
+        threadId,
+        turnStartSequence,
+        firstSequence,
+      );
+    }
+
+    let nextUserAfterWindow: TranscriptTurnBoundary | undefined;
+    let trailingTurnNodes: readonly TranscriptTurnContextNode[] = [];
+    if (includeTrailingTurn) {
+      const nextUserRow = this.db
+        .prepare(
+          `SELECT sequence, created_at
+             FROM transcript_messages
+            WHERE thread_id = ?
+              AND sequence > ?
+              AND role = 'user'
+            ORDER BY sequence ASC
+            LIMIT 1`,
+        )
+        .get(threadId, lastSequence);
+      if (isTranscriptTurnBoundaryRow(nextUserRow)) {
+        nextUserAfterWindow = {
+          sequence: nextUserRow.sequence,
+          createdAt: nextUserRow.created_at,
+        };
+      }
+      trailingTurnNodes = this.readTranscriptTurnNodesInRange(
+        threadId,
+        lastSequence + 1,
+        nextUserAfterWindow?.sequence,
+      );
+    }
+
+    return {
+      leadingTurnNodes,
+      trailingTurnNodes,
+      nextUserAfterWindow,
+    };
+  }
+
+  private readTranscriptTurnNodesInRange(
+    threadId: string,
+    fromInclusive: number,
+    toExclusive: number | undefined,
+  ): TranscriptTurnContextNode[] {
+    if (toExclusive !== undefined && fromInclusive >= toExclusive) {
+      return [];
+    }
+    const baseSelectSql = `SELECT
+      tm.sequence AS sequence,
+      tm.role AS role,
+      tm.created_at AS created_at,
+      CASE
+        WHEN tm.role = 'assistant'
+         AND instr(tm.message_json, '"tool-call"') > 0
+         AND json_valid(tm.message_json)
+         AND json_type(tm.message_json, '$.content') = 'array'
+        THEN (
+          SELECT json_group_array(json_extract(part.value, '$.toolCallId'))
+            FROM json_each(tm.message_json, '$.content') AS part
+           WHERE json_type(part.value) = 'object'
+              AND json_extract(part.value, '$.type') = 'tool-call'
+              AND json_type(part.value, '$.toolCallId') = 'text'
+              AND length(json_extract(part.value, '$.toolCallId')) > 0
+        )
+        WHEN tm.role = 'tool'
+         AND instr(tm.message_json, '"tool-result"') > 0
+         AND json_valid(tm.message_json)
+         AND json_type(tm.message_json, '$.content') = 'array'
+        THEN (
+          SELECT json_group_array(json_extract(part.value, '$.toolCallId'))
+            FROM json_each(tm.message_json, '$.content') AS part
+           WHERE json_type(part.value) = 'object'
+              AND json_extract(part.value, '$.type') = 'tool-result'
+              AND json_type(part.value, '$.toolCallId') = 'text'
+              AND length(json_extract(part.value, '$.toolCallId')) > 0
+        )
+        ELSE NULL
+      END AS tool_call_ids_json
+    FROM transcript_messages AS tm`;
+    const rows =
+      toExclusive === undefined
+        ? this.db
+            .prepare(
+              `${baseSelectSql}
+               WHERE tm.thread_id = ?
+                 AND tm.sequence >= ?
+               ORDER BY tm.sequence ASC`,
+            )
+            .all(threadId, fromInclusive)
+        : this.db
+            .prepare(
+              `${baseSelectSql}
+               WHERE tm.thread_id = ?
+                 AND tm.sequence >= ?
+                 AND tm.sequence < ?
+               ORDER BY tm.sequence ASC`,
+            )
+            .all(threadId, fromInclusive, toExclusive);
+    const nodes: TranscriptTurnContextNode[] = [];
+    for (const row of rows) {
+      if (!isTranscriptTurnContextNodeRow(row)) {
+        continue;
+      }
+      nodes.push({
+        sequence: row.sequence,
+        role: row.role,
+        createdAt: row.created_at,
+        toolCallIds: parseToolCallIdsJson(row.tool_call_ids_json),
+      });
+    }
+    return nodes;
   }
 
   getLatestCheckpoint(threadId: string): CompactionCheckpoint | undefined {
@@ -3426,4 +3762,57 @@ function discardFailedThreadLibraryBackup(backupPath: string, error: unknown): n
     );
   }
   throw error;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isToolExecutionTimestampRow(value: unknown): value is ToolExecutionTimestampRow {
+  return (
+    isObjectRecord(value) &&
+    typeof value.sequence === "number" &&
+    typeof value.tool_call_id === "string" &&
+    typeof value.created_at === "string" &&
+    (value.transcript_sequence === null || typeof value.transcript_sequence === "number")
+  );
+}
+
+function isTranscriptTurnBoundaryRow(value: unknown): value is TranscriptTurnBoundaryRow {
+  return (
+    isObjectRecord(value) &&
+    typeof value.sequence === "number" &&
+    typeof value.created_at === "string"
+  );
+}
+
+function isTranscriptTurnContextNodeRow(value: unknown): value is TranscriptTurnContextNodeRow {
+  return (
+    isObjectRecord(value) &&
+    typeof value.sequence === "number" &&
+    typeof value.role === "string" &&
+    typeof value.created_at === "string" &&
+    (value.tool_call_ids_json === null || typeof value.tool_call_ids_json === "string")
+  );
+}
+
+function parseToolCallIdsJson(raw: string | null): readonly string[] {
+  if (raw === null || raw.length === 0) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const seen = new Set<string>();
+    for (const item of parsed) {
+      if (typeof item === "string" && item.length > 0) {
+        seen.add(item);
+      }
+    }
+    return [...seen];
+  } catch {
+    return [];
+  }
 }

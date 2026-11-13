@@ -23,8 +23,10 @@ import type {
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SKILL_TOOL_ID, type SkillLibrary } from "../skills/contracts.ts";
-import { getFileChangeDisplay } from "@roll-agent/protocol";
+import { getFileChangeDisplay, threadIdSchema } from "@roll-agent/protocol";
 import { AgentSession } from "./agent-session.ts";
+import { ThreadStore } from "../store/thread-store.ts";
+import { RuntimeService, type RuntimeServiceEngine } from "../service/runtime-service.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
 import {
@@ -7019,4 +7021,165 @@ test("AgentSession 把非 Error 的流错误对象渲染成可读信息而不是
   assert.ok(secondError && secondError.type === "error");
   assert.equal(secondError.message.includes("[object Object]"), false);
   assert.match(secondError.message, /overloaded/u);
+});
+
+test("AgentSession 多步工具调用按真实步骤因果单调记录每条消息与工具 createdAt", async () => {
+  const persistedBatches: Array<{
+    readonly messages: readonly ModelMessage[];
+    readonly messageCreatedAt: readonly string[] | undefined;
+  }> = [];
+  const toolRecords: ToolExecutionRecord[] = [];
+  const stepWithTextAndCall = (
+    text: string,
+    toolCallId: string,
+    toolName: string,
+    input: unknown,
+  ): LanguageModelV4StreamPart[] => [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: `text-${toolCallId}` },
+    { type: "text-delta", id: `text-${toolCallId}`, delta: text },
+    { type: "text-end", id: `text-${toolCallId}` },
+    { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
+    { type: "finish", usage: usage(), finishReason: TOOL_CALLS },
+  ];
+
+  const model = sequencedModel([
+    stepWithTextAndCall("先检查第一个配置", "call-step-1", "demo__inspect", { step: 1 }),
+    stepWithTextAndCall("再检查第二个配置", "call-step-2", "demo__inspect", { step: 2 }),
+    textStep("所有检查已完成"),
+  ]);
+  let callCount = 0;
+  const source: AgentToolSource = {
+    agentName: "demo",
+    tools: [
+      {
+        tool: {
+          name: "inspect",
+          description: "inspect step",
+          inputSchema: {
+            type: "object",
+            properties: { step: { type: "number" } },
+            required: ["step"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+    client: {
+      callTool: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          await delay(5);
+        }
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    } as unknown as Client,
+  };
+
+  const storeDir = mkdtempSync(join(tmpdir(), "roll-step-timestamps-"));
+  const store = new ThreadStore(storeDir);
+  const threadId = store.createThread({ id: "00000000-0000-4000-8000-000000000999" });
+
+  const session = new AgentSession({
+    id: threadId,
+    model,
+    sources: [source],
+    maxSteps: 5,
+    policy: allowToolPolicy,
+    onToolExecution: (record) => {
+      toolRecords.push(record);
+      store.appendToolExecution(threadId, record);
+    },
+    onPersist: (messages, options) => {
+      persistedBatches.push({
+        messages: [...messages],
+        messageCreatedAt: options?.messageCreatedAt ? [...options.messageCreatedAt] : undefined,
+      });
+      store.appendMessages(threadId, messages, options);
+    },
+  });
+
+  try {
+    await collect(session.send("开始排查"));
+    assert.equal(toolRecords.length, 2);
+    assert.equal(persistedBatches.length, 2);
+
+    const userBatch = persistedBatches[0];
+    const turnBatch = persistedBatches[1];
+    assert.equal(userBatch?.messages.length, 1);
+    assert.equal(userBatch?.messageCreatedAt?.length, 1);
+    assert.equal(turnBatch?.messages.length, 5);
+    assert.equal(turnBatch?.messageCreatedAt?.length, 5);
+
+    const userMs = Date.parse(userBatch?.messageCreatedAt?.[0] ?? "");
+    const assistant1Ms = Date.parse(turnBatch?.messageCreatedAt?.[0] ?? "");
+    const toolMsg1Ms = Date.parse(turnBatch?.messageCreatedAt?.[1] ?? "");
+    const assistant2Ms = Date.parse(turnBatch?.messageCreatedAt?.[2] ?? "");
+    const toolMsg2Ms = Date.parse(turnBatch?.messageCreatedAt?.[3] ?? "");
+    const assistantFinalMs = Date.parse(turnBatch?.messageCreatedAt?.[4] ?? "");
+    const tool1Ms = Date.parse(toolRecords[0]?.createdAt ?? "");
+    const tool2Ms = Date.parse(toolRecords[1]?.createdAt ?? "");
+
+    assert.ok(userMs <= assistant1Ms, "用户消息不晚于第一步模型消息");
+    assert.ok(assistant1Ms <= tool1Ms, "第一步模型消息不晚于其触发的工具执行");
+    assert.ok(tool1Ms <= toolMsg1Ms, "第一步工具结果消息不早于其工具执行记录");
+    assert.ok(tool1Ms < assistant2Ms, "第二步模型消息必须严格晚于前一步工具执行（避免同毫秒倒置）");
+    assert.ok(assistant2Ms <= tool2Ms, "第二步模型消息不晚于其触发的工具执行");
+    assert.ok(tool2Ms <= toolMsg2Ms, "第二步工具结果消息不早于其工具执行记录");
+    assert.ok(tool2Ms < assistantFinalMs, "总结模型消息必须严格晚于最后一步工具执行");
+
+    const inertEngine: RuntimeServiceEngine = {
+      createSession: async () => {
+        throw new Error("unexpected createSession");
+      },
+      resumeSession: async () => {
+        throw new Error("unexpected resumeSession");
+      },
+    };
+    const service = new RuntimeService(inertEngine, store);
+    try {
+      const snapshot = service.snapshotThread({
+        threadId: threadIdSchema.parse(threadId),
+        limit: 100,
+      });
+      // 新写入消息已满足严格因果单调，snapshotThread 应保持零偏移原样输出
+      assert.deepEqual(
+        snapshot.messages.items.map((item) => item.createdAt),
+        [
+          userBatch?.messageCreatedAt?.[0],
+          turnBatch?.messageCreatedAt?.[0],
+          turnBatch?.messageCreatedAt?.[2],
+          turnBatch?.messageCreatedAt?.[4],
+        ],
+      );
+      const mergedTimeline = [
+        ...snapshot.messages.items.map((item) => ({
+          atMs: Date.parse(item.createdAt),
+          order: -1,
+          label: `${item.role}:${item.parts[0]?.type === "text" ? item.parts[0].text : ""}`,
+        })),
+        ...snapshot.operations.items.map((op) => ({
+          atMs: Date.parse(op.createdAt),
+          order: op.sequence,
+          label: `tool:${op.toolCallId}`,
+        })),
+      ]
+        .sort((a, b) => a.atMs - b.atMs || a.order - b.order)
+        .map((entry) => entry.label);
+      assert.deepEqual(mergedTimeline, [
+        "user:开始排查",
+        "assistant:先检查第一个配置",
+        "tool:call-step-1",
+        "assistant:再检查第二个配置",
+        "tool:call-step-2",
+        "assistant:所有检查已完成",
+      ]);
+    } finally {
+      await service.close();
+    }
+  } finally {
+    await session.close();
+    store.close();
+    rmSync(storeDir, { recursive: true, force: true });
+  }
 });

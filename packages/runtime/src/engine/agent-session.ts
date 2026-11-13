@@ -186,6 +186,7 @@ import {
 import {
   ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS,
   repairActiveToolProtocol,
+  repairActiveToolProtocolEntries,
 } from "./tool-protocol-repair.ts";
 import { buildTranscriptToolset, type TranscriptReader } from "../tool-bridge/transcript-tool.ts";
 import {
@@ -354,15 +355,30 @@ export interface AgentSessionBashSession {
 
 export type SessionSkillSummary = SkillSummary;
 
+interface TimestampedModelMessage {
+  readonly message: ModelMessage;
+  readonly createdAt: string;
+}
+
+interface RememberedCompletedStep {
+  readonly stepKey: string;
+  readonly messages: readonly ModelMessage[];
+}
+
 interface ActiveTurn {
   readonly inputId: string;
   readonly abortController: AbortController;
   readonly execSessionIds: Set<number>;
   readonly pendingToolCalls: Map<string, PendingToolCall>;
-  readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
+  readonly stepAssistantCreatedAtByStepKey: Map<string, string>;
+  readonly stepToolCreatedAtByStepKey: Map<string, string>;
+  readonly completedStepResponses: Map<string, RememberedCompletedStep>;
   readonly canonicalToolOutputs: Map<string, ToolModelOutput>;
   readonly persistedStepKeys: Set<string>;
   readonly toolExecutions: ToolExecutionRecord[];
+  timelineCursorMs: number;
+  hadToolSinceLastAssistant: boolean;
+  userMessageCreatedAt: string;
   expiresAt?: string;
   userMessagePersisted: boolean;
   hadPotentialSideEffects: boolean;
@@ -412,15 +428,21 @@ export type SessionToolExecutionRecordView =
   | (RedactedToolExecutionRecordSummary & { readonly sequence: number });
 
 function createActiveTurn(): ActiveTurn {
+  const nowMs = Date.now();
   return {
     inputId: randomUUID(),
     abortController: new AbortController(),
     execSessionIds: new Set<number>(),
     pendingToolCalls: new Map<string, PendingToolCall>(),
-    completedStepResponses: new Map<string, readonly ModelMessage[]>(),
+    stepAssistantCreatedAtByStepKey: new Map<string, string>(),
+    stepToolCreatedAtByStepKey: new Map<string, string>(),
+    completedStepResponses: new Map<string, RememberedCompletedStep>(),
     canonicalToolOutputs: new Map<string, ToolModelOutput>(),
     persistedStepKeys: new Set<string>(),
     toolExecutions: [],
+    timelineCursorMs: nowMs,
+    hadToolSinceLastAssistant: false,
+    userMessageCreatedAt: new Date(nowMs).toISOString(),
     userMessagePersisted: false,
     hadPotentialSideEffects: false,
     aborted: false,
@@ -434,49 +456,184 @@ function createActiveTurn(): ActiveTurn {
   };
 }
 
+function advanceTurnTimeline(
+  activeTurn: ActiveTurn,
+  options?: { readonly afterTools?: boolean },
+): string {
+  const nowMs = Date.now();
+  const floorMs = activeTurn.timelineCursorMs + (options?.afterTools === true ? 1 : 0);
+  const nextMs = Math.max(nowMs, floorMs);
+  activeTurn.timelineCursorMs = nextMs;
+  return new Date(nextMs).toISOString();
+}
+
+function observeTurnTimestamp(activeTurn: ActiveTurn, isoTimestamp: string): void {
+  const parsedMs = Date.parse(isoTimestamp);
+  if (Number.isFinite(parsedMs) && parsedMs > activeTurn.timelineCursorMs) {
+    activeTurn.timelineCursorMs = parsedMs;
+  }
+}
+
+function ensureStepAssistantCreatedAt(activeTurn: ActiveTurn, stepKey: string): string {
+  const existing = activeTurn.stepAssistantCreatedAtByStepKey.get(stepKey);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const createdAt = advanceTurnTimeline(activeTurn, {
+    afterTools: activeTurn.hadToolSinceLastAssistant,
+  });
+  activeTurn.hadToolSinceLastAssistant = false;
+  activeTurn.stepAssistantCreatedAtByStepKey.set(stepKey, createdAt);
+  return createdAt;
+}
+
+function resolveAssistantStepCreatedAt(
+  activeTurn: ActiveTurn,
+  stepKey: string,
+  message: ModelMessage,
+): string {
+  const recorded = activeTurn.stepAssistantCreatedAtByStepKey.get(stepKey);
+  if (recorded !== undefined) {
+    return recorded;
+  }
+  if (Array.isArray(message.content)) {
+    const callIds = new Set(
+      message.content.flatMap((part) =>
+        typeof part === "object" &&
+        part !== null &&
+        "type" in part &&
+        part.type === "tool-call" &&
+        "toolCallId" in part &&
+        typeof part.toolCallId === "string" &&
+        part.toolCallId.length > 0
+          ? [part.toolCallId]
+          : [],
+      ),
+    );
+    if (callIds.size > 0) {
+      let earliestMs = Number.POSITIVE_INFINITY;
+      let earliestIso: string | undefined;
+      for (const execution of activeTurn.toolExecutions) {
+        if (!callIds.has(execution.toolCallId)) {
+          continue;
+        }
+        const ms = Date.parse(execution.createdAt);
+        if (Number.isFinite(ms) && ms < earliestMs) {
+          earliestMs = ms;
+          earliestIso = execution.createdAt;
+        }
+      }
+      if (earliestIso !== undefined) {
+        activeTurn.stepAssistantCreatedAtByStepKey.set(stepKey, earliestIso);
+        return earliestIso;
+      }
+    }
+  }
+  return ensureStepAssistantCreatedAt(activeTurn, stepKey);
+}
+
 interface CompletedModelStep {
   readonly callId: string;
   readonly stepNumber: number;
   readonly response: { readonly messages: readonly ModelMessage[] };
 }
 
+function completedStepKey(step: Pick<CompletedModelStep, "callId" | "stepNumber">): string {
+  return `${step.callId}:${String(step.stepNumber)}`;
+}
+
 function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep): ModelMessage[] {
-  const key = `${step.callId}:${String(step.stepNumber)}`;
-  const remembered = activeTurn.completedStepResponses.get(key);
-  if (remembered) return [...remembered];
+  const stepKey = completedStepKey(step);
+  const remembered = activeTurn.completedStepResponses.get(stepKey);
+  if (remembered) return [...remembered.messages];
   const canonical = restoreCanonicalObservationOutputs(
     step.response.messages,
     activeTurn.canonicalToolOutputs,
   );
-  activeTurn.completedStepResponses.set(key, canonical);
+  activeTurn.completedStepResponses.set(stepKey, {
+    stepKey,
+    messages: canonical,
+  });
   return canonical;
+}
+
+function materializeTimestampedStep(
+  activeTurn: ActiveTurn,
+  stepKey: string,
+  messages: readonly ModelMessage[],
+): TimestampedModelMessage[] {
+  const assistantMessage = messages.find((message) => message.role === "assistant");
+  const assistantCreatedAt =
+    activeTurn.stepAssistantCreatedAtByStepKey.get(stepKey) ??
+    (assistantMessage !== undefined
+      ? resolveAssistantStepCreatedAt(activeTurn, stepKey, assistantMessage)
+      : ensureStepAssistantCreatedAt(activeTurn, stepKey));
+  let toolCreatedAt = activeTurn.stepToolCreatedAtByStepKey.get(stepKey);
+  return messages.map((message): TimestampedModelMessage => {
+    if (message.role === "assistant") {
+      return {
+        message,
+        createdAt: assistantCreatedAt,
+      };
+    }
+    if (toolCreatedAt === undefined) {
+      toolCreatedAt = advanceTurnTimeline(activeTurn);
+      activeTurn.stepToolCreatedAtByStepKey.set(stepKey, toolCreatedAt);
+    }
+    return {
+      message,
+      createdAt: toolCreatedAt,
+    };
+  });
+}
+
+function canonicalTimestampedMessagesForSteps(
+  activeTurn: ActiveTurn,
+  steps: readonly CompletedModelStep[],
+): TimestampedModelMessage[] {
+  return steps.flatMap((step) =>
+    materializeTimestampedStep(
+      activeTurn,
+      completedStepKey(step),
+      rememberCompletedStep(activeTurn, step),
+    ),
+  );
 }
 
 function canonicalMessagesForSteps(
   activeTurn: ActiveTurn,
   steps: readonly CompletedModelStep[],
 ): ModelMessage[] {
-  return steps.flatMap(
-    (step) =>
-      activeTurn.completedStepResponses.get(`${step.callId}:${String(step.stepNumber)}`) ??
-      restoreCanonicalObservationOutputs(step.response.messages, activeTurn.canonicalToolOutputs),
-  );
+  return steps.flatMap((step) => {
+    const remembered = activeTurn.completedStepResponses.get(completedStepKey(step));
+    return remembered !== undefined
+      ? [...remembered.messages]
+      : restoreCanonicalObservationOutputs(step.response.messages, activeTurn.canonicalToolOutputs);
+  });
 }
 
 function completedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
-  return [...activeTurn.completedStepResponses.values()].flatMap((messages) => [...messages]);
+  return [...activeTurn.completedStepResponses.values()].flatMap((remembered) => [
+    ...remembered.messages,
+  ]);
+}
+
+function unpersistedStepEntries(activeTurn: ActiveTurn): TimestampedModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, remembered]) =>
+      materializeTimestampedStep(activeTurn, remembered.stepKey, remembered.messages),
+    );
 }
 
 function unpersistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
-  return [...activeTurn.completedStepResponses.entries()]
-    .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
-    .flatMap(([, messages]) => [...messages]);
+  return unpersistedStepEntries(activeTurn).map((entry) => entry.message);
 }
 
 function persistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
   return [...activeTurn.completedStepResponses.entries()]
     .filter(([key]) => activeTurn.persistedStepKeys.has(key))
-    .flatMap(([, messages]) => [...messages]);
+    .flatMap(([, remembered]) => [...remembered.messages]);
 }
 
 function markTurnSegmentPersisted(activeTurn: ActiveTurn): void {
@@ -677,6 +834,17 @@ function stripReasoningMessages(messages: readonly ModelMessage[]): ModelMessage
     }
     return [{ ...message, content }];
   });
+}
+
+function stripReasoningTimestampedMessages(
+  entries: readonly TimestampedModelMessage[],
+): TimestampedModelMessage[] {
+  return entries.flatMap((entry) =>
+    stripReasoningMessages([entry.message]).map((message) => ({
+      message,
+      createdAt: entry.createdAt,
+    })),
+  );
 }
 
 function markToolRole(
@@ -1392,14 +1560,22 @@ export class AgentSession {
       const rawUserMessage: UserModelMessage = { role: "user", content: userMessageContent };
       let inputSequence: number;
       try {
+        let userCreatedAt: string;
         if (this.onAcceptInput !== undefined) {
-          inputSequence = this.onAcceptInput(activeTurn.inputId, rawUserMessage).transcriptSequence;
+          const accepted = this.onAcceptInput(activeTurn.inputId, rawUserMessage);
+          inputSequence = accepted.transcriptSequence;
+          userCreatedAt = accepted.createdAt;
+          observeTurnTimestamp(activeTurn, userCreatedAt);
         } else {
           // Legacy persistence cannot share coverage: a new user prompt is not Tool evidence.
           inputSequence = (this.listCompactionTranscriptEvidence().at(-1)?.sequence ?? -1) + 1;
-          this.onPersist?.([rawUserMessage]);
+          userCreatedAt = advanceTurnTimeline(activeTurn);
+          this.onPersist?.([rawUserMessage], { messageCreatedAt: [userCreatedAt] });
         }
-        this.recordPersistedMessagesInMemory([rawUserMessage]);
+        activeTurn.userMessageCreatedAt = userCreatedAt;
+        this.recordPersistedMessagesInMemory([
+          { message: rawUserMessage, createdAt: userCreatedAt },
+        ]);
         this.messages.push(rawUserMessage);
         activeTurn.userMessagePersisted = true;
         turnStart = this.messages.length;
@@ -1558,6 +1734,8 @@ export class AgentSession {
         let dispatchedBudget: RequestBudgetSnapshot | undefined;
         let streamMeasuredUsage: SessionTokenUsage | undefined;
         let providerStepFinished = false;
+        const streamCallIds: string[] = [];
+        const streamStepAssistantCreatedAt: string[] = [];
         const guardedModel = wrapLanguageModel({
           model: this.model,
           middleware: {
@@ -1733,7 +1911,18 @@ export class AgentSession {
               );
               return undefined;
             },
-            onLanguageModelCallStart: ({ callId }) => this.toolCoordinator.startBatch(callId),
+            onLanguageModelCallStart: ({ callId }) => {
+              const callIndex = streamCallIds.length;
+              streamCallIds.push(callId);
+              const startedAt = streamStepAssistantCreatedAt[callIndex];
+              if (startedAt !== undefined) {
+                activeTurn.stepAssistantCreatedAtByStepKey.set(
+                  completedStepKey({ callId, stepNumber: callIndex }),
+                  startedAt,
+                );
+              }
+              this.toolCoordinator.startBatch(callId);
+            },
             onLanguageModelCallEnd: ({ callId, content, usage, finishReason }) => {
               // Seal the actual finish chunk, not the reader's look-ahead state. A later
               // stream failure must not leave already admitted SDK executions waiting forever.
@@ -1848,6 +2037,7 @@ export class AgentSession {
           // One native chunk can produce several reasoning deltas, even across SDK block IDs.
           let nativeDeltas: readonly string[] | undefined;
           let nativeIndex = 0;
+          let activeConsumerStepIndex: number | undefined;
           for await (const part of result.fullStream) {
             if (this.closed) {
               activeTurn.aborted = true;
@@ -1860,10 +2050,25 @@ export class AgentSession {
               this.debug(queue, "model", "first stream event", turnStartedAt, { part: part.type });
             }
             switch (part.type) {
-              case "start-step":
+              case "start-step": {
                 nativeDeltas = undefined;
+                const stepIndex = streamStepAssistantCreatedAt.length;
+                const stepCreatedAt = advanceTurnTimeline(activeTurn, {
+                  afterTools: activeTurn.hadToolSinceLastAssistant,
+                });
+                activeTurn.hadToolSinceLastAssistant = false;
+                streamStepAssistantCreatedAt.push(stepCreatedAt);
+                activeConsumerStepIndex = stepIndex;
+                const knownCallId = streamCallIds[stepIndex];
+                if (knownCallId !== undefined) {
+                  activeTurn.stepAssistantCreatedAtByStepKey.set(
+                    completedStepKey({ callId: knownCallId, stepNumber: stepIndex }),
+                    stepCreatedAt,
+                  );
+                }
                 if (recoveryPolicy !== undefined) queue.push({ type: "model-step-start" });
                 break;
+              }
               case "tool-input-start":
                 toolInputActivity.start(part.id, part.toolName);
                 break;
@@ -1948,6 +2153,7 @@ export class AgentSession {
                   toolName: route?.toolName ?? part.toolName,
                   input: pending?.input,
                   result,
+                  createdAt: advanceTurnTimeline(activeTurn),
                 });
                 this.persistToolExecution(record, activeTurn);
                 const canonicalObservation =
@@ -2027,6 +2233,7 @@ export class AgentSession {
                   toolName: route?.toolName ?? part.toolName,
                   input: toolInput,
                   result,
+                  createdAt: advanceTurnTimeline(activeTurn),
                 });
                 this.persistToolExecution(record, activeTurn);
                 if (
@@ -2055,6 +2262,28 @@ export class AgentSession {
               case "finish-step": {
                 toolInputActivity.clear();
                 if (recoveryPolicy !== undefined && streamError !== undefined) break;
+                const finishedStepIndex = activeConsumerStepIndex;
+                const finishedCallId =
+                  finishedStepIndex === undefined ? undefined : streamCallIds[finishedStepIndex];
+                if (finishedStepIndex !== undefined && finishedCallId !== undefined) {
+                  const stepKey = completedStepKey({
+                    callId: finishedCallId,
+                    stepNumber: finishedStepIndex,
+                  });
+                  const startedAt = streamStepAssistantCreatedAt[finishedStepIndex];
+                  if (
+                    startedAt !== undefined &&
+                    !activeTurn.stepAssistantCreatedAtByStepKey.has(stepKey)
+                  ) {
+                    activeTurn.stepAssistantCreatedAtByStepKey.set(stepKey, startedAt);
+                  }
+                  if (!activeTurn.stepToolCreatedAtByStepKey.has(stepKey)) {
+                    activeTurn.stepToolCreatedAtByStepKey.set(
+                      stepKey,
+                      advanceTurnTimeline(activeTurn),
+                    );
+                  }
+                }
                 const stepUsage = toSessionUsage(part.usage);
                 if (stepUsage.inputTokens !== undefined) {
                   contextInputTokens = stepUsage.inputTokens;
@@ -2154,9 +2383,9 @@ export class AgentSession {
             });
             return;
           }
-          const settled = stripReasoningMessages(unpersistedStepMessages(activeTurn));
-          this.messages.push(...settled);
-          if (settled.length > 0) this.persistMessages(settled, "raw_transcript");
+          const settled = stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn));
+          this.messages.push(...settled.map((entry) => entry.message));
+          if (settled.length > 0) this.persistTimestampedMessages(settled, "raw_transcript");
           markTurnSegmentPersisted(activeTurn);
           turnStart = this.messages.length;
           activeTurn.completedStepCount += stepCount;
@@ -2279,9 +2508,11 @@ export class AgentSession {
             // settlement failures must stop before batch retirement or another model request.
             if (!NoOutputGeneratedError.isInstance(error) && error !== rawStreamError) throw error;
           }
-          const settled = stripReasoningMessages(unpersistedStepMessages(activeTurn));
+          const settledEntries = stripReasoningTimestampedMessages(
+            unpersistedStepEntries(activeTurn),
+          );
           const coveredResults = new Map<string, number>();
-          for (const message of settled) {
+          for (const { message } of settledEntries) {
             if (message.role !== "tool") continue;
             for (const part of message.content) {
               if (part.type === "tool-result") {
@@ -2307,9 +2538,9 @@ export class AgentSession {
             // fullStream and result.steps have drained SDK toolApproval/execute callbacks.
             this.toolCoordinator.finishTurn();
             // Commit completed steps before cancelling unexecuted calls so coverage stays truthful.
-            if (settled.length > 0) {
-              this.persistMessages(settled, "raw_transcript");
-              this.messages.push(...settled);
+            if (settledEntries.length > 0) {
+              this.persistTimestampedMessages(settledEntries, "raw_transcript");
+              this.messages.push(...settledEntries.map((entry) => entry.message));
             }
             markTurnSegmentPersisted(activeTurn);
             turnStart = this.messages.length;
@@ -2402,7 +2633,7 @@ export class AgentSession {
           return;
         }
 
-        let responseMessages: ModelMessage[];
+        let responseEntries: TimestampedModelMessage[];
         this.debug(queue, "model", "awaiting response messages", turnStartedAt);
         const responseTimer = this.scheduleDebug(
           queue,
@@ -2412,7 +2643,7 @@ export class AgentSession {
         );
         try {
           const steps = await result.steps;
-          responseMessages = canonicalMessagesForSteps(activeTurn, steps);
+          responseEntries = canonicalTimestampedMessagesForSteps(activeTurn, steps);
         } catch (error) {
           this.clearDebugTimer(responseTimer);
           if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
@@ -2476,7 +2707,7 @@ export class AgentSession {
           this.clearDebugTimer(responseTimer);
         }
         this.debug(queue, "model", "response messages ready", turnStartedAt, {
-          responseMessages: responseMessages.length,
+          responseMessages: responseEntries.length,
         });
 
         if (this.isTurnAborted(activeTurn)) {
@@ -2488,19 +2719,27 @@ export class AgentSession {
           return;
         }
 
-        const visibleResponseMessages = stripReasoningMessages(responseMessages);
-        this.messages.push(...visibleResponseMessages);
+        const visibleResponseEntries = stripReasoningTimestampedMessages(responseEntries);
+        this.messages.push(...visibleResponseEntries.map((entry) => entry.message));
         const stopMessage = userRejectionMessage ?? invalidScheduleRetryGuard.message;
         if (stopMessage !== undefined) {
           const delta = text.length === 0 ? stopMessage : `\n${stopMessage}`;
           text += delta;
           queue.push({ type: "text-delta", delta });
-          this.messages.push({ role: "assistant", content: stopMessage });
+          const stopMessageEntry: TimestampedModelMessage = {
+            message: { role: "assistant", content: stopMessage },
+            createdAt: advanceTurnTimeline(activeTurn, {
+              afterTools: activeTurn.hadToolSinceLastAssistant,
+            }),
+          };
+          activeTurn.hadToolSinceLastAssistant = false;
+          visibleResponseEntries.push(stopMessageEntry);
+          this.messages.push(stopMessageEntry.message);
         }
         this.debug(queue, "persist", "persisting messages", turnStartedAt, {
           appendedMessages: this.messages.length - turnStart,
         });
-        this.persistMessages(this.messages.slice(turnStart), "raw_transcript");
+        this.persistTimestampedMessages(visibleResponseEntries, "raw_transcript");
         markTurnSegmentPersisted(activeTurn);
         turnStart = this.messages.length;
         this.debug(queue, "persist", "messages persisted", turnStartedAt, {
@@ -2588,34 +2827,37 @@ export class AgentSession {
     }
   }
 
-  private persistMessages(
-    messages: readonly ModelMessage[],
+  private persistTimestampedMessages(
+    entries: readonly TimestampedModelMessage[],
     representation: ToolExecutionContextRepresentation,
   ): void {
+    const messages = entries.map((entry) => entry.message);
+    const messageCreatedAt = entries.map((entry) => entry.createdAt);
     const executionIds = [...this.uncoveredToolExecutions.keys()];
-    const options: AppendMessagesOptions | undefined =
-      executionIds.length === 0
-        ? undefined
+    const options: AppendMessagesOptions = {
+      messageCreatedAt,
+      ...(executionIds.length === 0
+        ? {}
         : {
             toolExecutionCoverage: {
               executionIds,
               representation,
             },
-          };
+          }),
+    };
     this.onPersist?.(messages, options);
-    this.recordPersistedMessagesInMemory(messages);
+    this.recordPersistedMessagesInMemory(entries);
     for (const executionId of executionIds) {
       this.uncoveredToolExecutions.delete(executionId);
     }
   }
 
-  private recordPersistedMessagesInMemory(messages: readonly ModelMessage[]): void {
+  private recordPersistedMessagesInMemory(entries: readonly TimestampedModelMessage[]): void {
     if (this.listPersistedTranscriptMessages !== undefined) {
       return;
     }
     let sequence = (this.inMemoryTranscript.at(-1)?.sequence ?? -1) + 1;
-    const createdAt = new Date().toISOString();
-    for (const message of messages) {
+    for (const { message, createdAt } of entries) {
       if (isDerivedCompactionReminderMessage(message)) {
         continue;
       }
@@ -2633,7 +2875,13 @@ export class AgentSession {
     if (this.recoverPersistedToolExecutionContext !== undefined) {
       const recoveredMessages = this.recoverPersistedToolExecutionContext();
       this.messages.push(...recoveredMessages);
-      this.recordPersistedMessagesInMemory(recoveredMessages);
+      const recoveredAt =
+        this.activeTurn === undefined
+          ? new Date().toISOString()
+          : advanceTurnTimeline(this.activeTurn);
+      this.recordPersistedMessagesInMemory(
+        recoveredMessages.map((message) => ({ message, createdAt: recoveredAt })),
+      );
       this.uncoveredToolExecutions.clear();
       return;
     }
@@ -2641,11 +2889,26 @@ export class AgentSession {
     if (records.length === 0) {
       return;
     }
+    const latestRecordMs = records.reduce(
+      (maxMs, record) => Math.max(maxMs, Date.parse(record.createdAt)),
+      Number.NEGATIVE_INFINITY,
+    );
+    const nowMs = Date.now();
+    const recoveryMs = Number.isFinite(latestRecordMs)
+      ? Math.max(nowMs, latestRecordMs + 1)
+      : nowMs;
+    const recoveryCreatedAt = new Date(recoveryMs).toISOString();
+    if (this.activeTurn !== undefined) {
+      observeTurnTimestamp(this.activeTurn, recoveryCreatedAt);
+    }
     const rollbackTo = this.messages.length;
     const recovery = createToolLedgerGapRecoveryMessage(records);
     this.messages.push(recovery);
     try {
-      this.persistMessages([recovery], "recovery_evidence");
+      this.persistTimestampedMessages(
+        [{ message: recovery, createdAt: recoveryCreatedAt }],
+        "recovery_evidence",
+      );
     } catch (error) {
       this.messages.splice(rollbackTo);
       throw error;
@@ -2689,14 +2952,25 @@ export class AgentSession {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
     const uncoveredRecords = [...this.uncoveredToolExecutions.values()];
+    const markerCreatedAt = advanceTurnTimeline(activeTurn, {
+      afterTools: activeTurn.hadToolSinceLastAssistant || uncoveredRecords.length > 0,
+    });
+    activeTurn.hadToolSinceLastAssistant = false;
     this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
-      messages: [
-        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+      entries: [
+        ...(activeTurn.userMessagePersisted
+          ? []
+          : [{ message: userMessage, createdAt: activeTurn.userMessageCreatedAt }]),
         ...(uncoveredRecords.length === 0
           ? []
-          : [createToolLedgerGapRecoveryMessage(uncoveredRecords)]),
-        { role: "assistant", content: notes.join("") },
+          : [
+              {
+                message: createToolLedgerGapRecoveryMessage(uncoveredRecords),
+                createdAt: markerCreatedAt,
+              },
+            ]),
+        { message: { role: "assistant", content: notes.join("") }, createdAt: markerCreatedAt },
       ],
       debugLabel: "persisting context-overflow marker",
       debugDetails: { hadToolActivity, producedText },
@@ -2721,25 +2995,37 @@ export class AgentSession {
     if (!hadProgress) {
       return;
     }
-    const unpersistedMessages = repairActiveToolProtocol(
-      stripReasoningMessages(unpersistedStepMessages(activeTurn)),
-    ).messages;
+    const unpersistedEntries = repairActiveToolProtocolEntries(
+      stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn)),
+    );
     if (
       !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
     ) {
       return;
     }
+    const markerCreatedAt = advanceTurnTimeline(activeTurn, {
+      afterTools: activeTurn.hadToolSinceLastAssistant,
+    });
+    activeTurn.hadToolSinceLastAssistant = false;
     this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
-      messages: [
-        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
-        ...unpersistedMessages,
-        createCancelledTurnRecoveryMessage({
-          context: this.failedTurnContextMessage(activeTurn),
-          completedMessages,
-          toolExecutions: activeTurn.toolExecutions,
-        }),
-        { role: "assistant", content: this.failedTurnDisplayMessage(activeTurn) },
+      entries: [
+        ...(activeTurn.userMessagePersisted
+          ? []
+          : [{ message: userMessage, createdAt: activeTurn.userMessageCreatedAt }]),
+        ...unpersistedEntries,
+        {
+          message: createCancelledTurnRecoveryMessage({
+            context: this.failedTurnContextMessage(activeTurn),
+            completedMessages,
+            toolExecutions: activeTurn.toolExecutions,
+          }),
+          createdAt: markerCreatedAt,
+        },
+        {
+          message: { role: "assistant", content: this.failedTurnDisplayMessage(activeTurn) },
+          createdAt: markerCreatedAt,
+        },
       ],
       debugLabel: "persisting failed turn",
       failureLabel: "失败状态持久化失败",
@@ -2769,7 +3055,8 @@ export class AgentSession {
     turnStartedAt: number,
     input: {
       readonly rollbackTo: number;
-      readonly messages: readonly ModelMessage[];
+      readonly entries?: readonly TimestampedModelMessage[];
+      readonly messages?: readonly ModelMessage[];
       readonly debugLabel: string;
       readonly debugDetails?: Record<string, unknown>;
       readonly failureLabel: string;
@@ -2783,13 +3070,17 @@ export class AgentSession {
       });
       return false;
     }
-    this.messages.push(...input.messages);
+    const fallbackCreatedAt = new Date().toISOString();
+    const resolvedEntries: readonly TimestampedModelMessage[] =
+      input.entries ??
+      (input.messages ?? []).map((message) => ({ message, createdAt: fallbackCreatedAt }));
+    this.messages.push(...resolvedEntries.map((entry) => entry.message));
     this.debug(queue, "persist", input.debugLabel, turnStartedAt, {
       appendedMessages: this.messages.length - input.rollbackTo,
       ...input.debugDetails,
     });
     try {
-      this.persistMessages(this.messages.slice(input.rollbackTo), "recovery_evidence");
+      this.persistTimestampedMessages(resolvedEntries, "recovery_evidence");
       return true;
     } catch (error) {
       this.messages.splice(input.rollbackTo);
@@ -2809,6 +3100,8 @@ export class AgentSession {
     this.inMemoryToolExecutions.push(record);
     activeTurn.toolExecutions.push(record);
     this.uncoveredToolExecutions.set(record.id, record);
+    observeTurnTimestamp(activeTurn, record.createdAt);
+    activeTurn.hadToolSinceLastAssistant = true;
   }
 
   private interactionDeadlineMs(activeTurn: ActiveTurn, now: number): number {
@@ -3151,17 +3444,21 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
       activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
+      const recordCreatedAt = advanceTurnTimeline(activeTurn, {
+        afterTools: activeTurn.hadToolSinceLastAssistant,
+      });
+      activeTurn.hadToolSinceLastAssistant = false;
       const records = this.cancellationRecordMessages(
         activeTurn,
         completedStepMessages(activeTurn),
-      );
+      ).map((message) => ({ message, createdAt: recordCreatedAt }));
       activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
         queue,
         activeTurn,
         turnStartedAt,
         {
           rollbackTo: this.messages.length,
-          messages: records,
+          entries: records,
           debugLabel: "persisting paused turn cancellation",
           failureLabel: "取消状态持久化失败",
         },
@@ -3649,15 +3946,16 @@ export class AgentSession {
     turnStartedAt: number,
   ): void {
     const turnStart = this.messages.length;
-    if (!activeTurn.userMessagePersisted) {
-      this.messages.push(userMessage);
-    }
+    const prependEntries: readonly TimestampedModelMessage[] = activeTurn.userMessagePersisted
+      ? []
+      : [{ message: userMessage, createdAt: activeTurn.userMessageCreatedAt }];
     this.persistCancelledTurn(
       queue,
       activeTurn,
       turnStart,
       turnStartedAt,
       INTERRUPTED_STEP_POLICIES.ledgerOnly,
+      prependEntries,
     );
   }
 
@@ -3667,6 +3965,7 @@ export class AgentSession {
     turnStart: number,
     turnStartedAt: number,
     stepPolicy: InterruptedStepPolicy = INTERRUPTED_STEP_POLICIES.keepRaw,
+    prependEntries: readonly TimestampedModelMessage[] = [],
   ): void {
     if (
       !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
@@ -3687,22 +3986,29 @@ export class AgentSession {
       // turnStart is now the response boundary; accepted input is already durable before it.
       this.messages.splice(turnStart);
       const keepRaw = stepPolicy === INTERRUPTED_STEP_POLICIES.keepRaw;
-      const appendedStepMessages = keepRaw
-        ? repairActiveToolProtocol(stripReasoningMessages(unpersistedStepMessages(activeTurn)))
-            .messages
+      const appendedStepEntries = keepRaw
+        ? repairActiveToolProtocolEntries(
+            stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn)),
+          )
         : [];
       const visibleStepMessages = keepRaw
         ? completedStepMessages(activeTurn)
         : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
-      const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
+      const recordCreatedAt = advanceTurnTimeline(activeTurn, {
+        afterTools: activeTurn.hadToolSinceLastAssistant,
+      });
+      activeTurn.hadToolSinceLastAssistant = false;
+      const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages).map(
+        (message) => ({ message, createdAt: recordCreatedAt }),
+      );
       activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
         queue,
         activeTurn,
         turnStartedAt,
         {
           rollbackTo: turnStart,
-          messages: [...appendedStepMessages, ...records],
+          entries: [...prependEntries, ...appendedStepEntries, ...records],
           debugLabel: "persisting cancelled turn",
           failureLabel: "取消状态持久化失败",
         },
@@ -3752,7 +4058,7 @@ export class AgentSession {
     queue: AsyncEventQueue<SessionEvent>,
     activeTurn: ActiveTurn,
   ): void {
-    const messages: ModelMessage[] = [];
+    const entries: TimestampedModelMessage[] = [];
     for (const pending of activeTurn.pendingToolCalls.values()) {
       const result = createToolResult(
         {
@@ -3762,12 +4068,14 @@ export class AgentSession {
         },
         "模型连接中断，本工具调用确定未执行；重新生成的调用仍需正常校验与审批。",
       );
+      const cancelledCreatedAt = advanceTurnTimeline(activeTurn);
       const record = createToolExecutionRecord({
         toolCallId: pending.toolCallId,
         agentName: pending.agentName,
         toolName: pending.toolName,
         input: pending.input,
         result,
+        createdAt: cancelledCreatedAt,
       });
       this.persistToolExecution(record, activeTurn);
       queue.push({
@@ -3782,25 +4090,41 @@ export class AgentSession {
         isError: true,
       });
       const toolName = `${pending.agentName}__${pending.toolName}`;
-      messages.push(
+      entries.push(
         {
-          role: "assistant",
-          content: [
-            { type: "tool-call", toolCallId: pending.toolCallId, toolName, input: pending.input },
-          ],
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: pending.toolCallId,
+                toolName,
+                input: pending.input,
+              },
+            ],
+          },
+          createdAt: cancelledCreatedAt,
         },
         {
-          role: "tool",
-          content: [
-            { type: "tool-result", toolCallId: pending.toolCallId, toolName, output: result.model },
-          ],
+          message: {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: pending.toolCallId,
+                toolName,
+                output: result.model,
+              },
+            ],
+          },
+          createdAt: cancelledCreatedAt,
         },
       );
       activeTurn.pendingToolCalls.delete(pending.toolCallId);
     }
-    if (messages.length > 0) {
-      this.persistMessages(messages, "raw_transcript");
-      this.messages.push(...messages);
+    if (entries.length > 0) {
+      this.persistTimestampedMessages(entries, "raw_transcript");
+      this.messages.push(...entries.map((entry) => entry.message));
     }
   }
 
@@ -3839,6 +4163,7 @@ export class AgentSession {
         toolName: pending.toolName,
         input: pending.input,
         result,
+        createdAt: advanceTurnTimeline(activeTurn),
       });
       this.persistToolExecution(record, activeTurn);
       queue.push({
