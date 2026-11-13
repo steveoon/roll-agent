@@ -17,7 +17,10 @@ import {
   type CommitCompactionInput,
   type ReadCheckpointTranscriptOptions,
 } from "./thread-store.ts";
-import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+import {
+  createToolExecutionRecord,
+  type ToolExecutionRecord,
+} from "../tool-bridge/tool-execution-record.ts";
 import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
 import { UnsupportedCompactionCheckpointVersionError } from "../engine/compaction-checkpoint.ts";
 
@@ -2406,6 +2409,230 @@ test("ThreadStore future schema 不会被静默降级", () => {
     database.exec("PRAGMA user_version = 99;");
     database.close();
     assert.throws(() => new ThreadStore(dir), /schema v99/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore appendMessages 支持 messageCreatedAt 逐消息时间戳并校验长度与格式", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+
+    assert.throws(
+      () =>
+        store.appendMessages(threadId, [{ role: "user", content: "hi" }], {
+          messageCreatedAt: ["2026-08-01T10:00:00.000Z", "2026-08-01T10:00:01.000Z"],
+        }),
+      /messageCreatedAt 长度必须与 messages 一致/u,
+    );
+    assert.throws(
+      () =>
+        store.appendMessages(threadId, [{ role: "user", content: "hi" }], {
+          messageCreatedAt: ["not-a-timestamp"],
+        }),
+      /Invalid ISO|timestamp|datetime/iu,
+    );
+    assert.equal(store.countTranscriptMessages(threadId), 0);
+
+    store.appendMessages(
+      threadId,
+      [
+        { role: "assistant", content: "第一步" },
+        { role: "assistant", content: "第二步" },
+      ],
+      {
+        messageCreatedAt: ["2026-08-01T18:00:01.100+08:00", "2099-01-01T00:00:02.500Z"],
+      },
+    );
+
+    const transcript = store.listTranscriptMessages(threadId);
+    assert.deepEqual(
+      transcript.map((entry) => entry.createdAt),
+      ["2026-08-01T10:00:01.100Z", "2099-01-01T00:00:02.500Z"],
+    );
+    assert.equal(store.getThread(threadId)?.updatedAt, "2099-01-01T00:00:02.500Z");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore listToolExecutionTimestampsByCallIds 在可写与只读模式下返回分块有序索引元数据", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const baseMs = Date.now() - 60_000;
+    const expectedFirstCreatedAt = new Date(baseMs).toISOString();
+    const expectedLastCreatedAt = new Date(baseMs + 204 * 10).toISOString();
+    const executionIds: ToolExecutionRecord["id"][] = [];
+    const callIds: string[] = [];
+    for (let index = 0; index < 205; index += 1) {
+      const callId = `call_${String(index)}`;
+      callIds.push(callId);
+      const record = createToolExecutionRecord({
+        toolCallId: callId,
+        agentName: "demo-agent",
+        toolName: "lookup",
+        input: { index },
+        result: successfulToolResult(`ok-${String(index)}`),
+        createdAt: new Date(baseMs + index * 10).toISOString(),
+      });
+      executionIds.push(record.id);
+      store.appendToolExecution(threadId, record);
+    }
+    store.appendMessages(threadId, [{ role: "assistant", content: "done" }], {
+      toolExecutionCoverage: {
+        executionIds,
+        representation: "raw_transcript",
+      },
+    });
+
+    assert.deepEqual(store.listToolExecutionTimestampsByCallIds(threadId, []), []);
+    const writableResult = store.listToolExecutionTimestampsByCallIds(
+      threadId,
+      [...callIds].reverse(),
+    );
+    assert.equal(writableResult.length, 205);
+    assert.equal(writableResult[0]?.sequence, 0);
+    assert.equal(writableResult[0]?.toolCallId, "call_0");
+    assert.equal(writableResult[0]?.coverageTranscriptSequence, 0);
+    assert.equal(writableResult[204]?.sequence, 204);
+    assert.equal(writableResult[204]?.toolCallId, "call_204");
+    store.close();
+
+    const readOnlyStore = new ThreadStore(dir, { readOnly: true });
+    try {
+      const readOnlyResult = readOnlyStore.listToolExecutionTimestampsByCallIds(threadId, [
+        "call_204",
+        "call_0",
+        "missing_call",
+      ]);
+      assert.deepEqual(readOnlyResult, [
+        {
+          sequence: 0,
+          toolCallId: "call_0",
+          createdAt: expectedFirstCreatedAt,
+          coverageTranscriptSequence: 0,
+        },
+        {
+          sequence: 204,
+          toolCallId: "call_204",
+          createdAt: expectedLastCreatedAt,
+          coverageTranscriptSequence: 0,
+        },
+      ]);
+    } finally {
+      readOnlyStore.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore hasAnyToolExecutions 与 readTranscriptTurnContext 在可写及只读模式下精准定位完整轮次边界", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const emptyThreadId = store.createThread();
+    assert.equal(store.hasAnyToolExecutions(emptyThreadId), false);
+
+    const threadId = store.createThread();
+    const baseMs = Date.now() - 60_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+
+    const op1 = createToolExecutionRecord({
+      toolCallId: "call_alpha",
+      agentName: "demo",
+      toolName: "lookup",
+      input: {},
+      result: successfulToolResult("ok"),
+      createdAt: at(1_000),
+    });
+    store.appendMessages(threadId, [{ role: "user", content: "第一轮提问" }], {
+      messageCreatedAt: [at(0)],
+    });
+    store.appendToolExecution(threadId, op1);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: '提到字面量 "tool-call" 但属于普通文本段' },
+            { type: "tool-call", toolCallId: "call_alpha", toolName: "lookup", input: {} },
+            { type: "tool-call", toolCallId: "call_alpha", toolName: "lookup", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_alpha",
+              toolName: "lookup",
+              output: { type: "text", value: "x".repeat(32_768) },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: '第一轮纯字符串总结，内含 "tool-call" 字样但不应提取 ID',
+        },
+      ],
+      {
+        messageCreatedAt: [at(1_000), at(1_000), at(2_000)],
+        toolExecutionCoverage: {
+          executionIds: [op1.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+    store.appendMessages(
+      threadId,
+      [
+        { role: "user", content: "第二轮提问" },
+        { role: "assistant", content: "第二轮直接回答" },
+      ],
+      {
+        messageCreatedAt: [at(10_000), at(11_000)],
+      },
+    );
+
+    assert.equal(store.hasAnyToolExecutions(threadId), true);
+    // 窗口仅取 seq=2 (tool) 时，前向补齐 seq 0..1，后向补齐 seq 3 且停在下一轮 user (seq 4)
+    const midTurnContext = store.readTranscriptTurnContext(threadId, 2, 2);
+    assert.deepEqual(midTurnContext, {
+      leadingTurnNodes: [
+        { sequence: 0, role: "user", createdAt: at(0), toolCallIds: [] },
+        { sequence: 1, role: "assistant", createdAt: at(1_000), toolCallIds: ["call_alpha"] },
+      ],
+      trailingTurnNodes: [
+        { sequence: 3, role: "assistant", createdAt: at(2_000), toolCallIds: [] },
+      ],
+      nextUserAfterWindow: { sequence: 4, createdAt: at(10_000) },
+    });
+    store.close();
+
+    const readOnlyStore = new ThreadStore(dir, { readOnly: true });
+    try {
+      assert.equal(readOnlyStore.hasAnyToolExecutions(emptyThreadId), false);
+      assert.equal(readOnlyStore.hasAnyToolExecutions(threadId), true);
+      const summaryOnlyContext = readOnlyStore.readTranscriptTurnContext(threadId, 3, 3);
+      assert.deepEqual(summaryOnlyContext, {
+        leadingTurnNodes: [
+          { sequence: 0, role: "user", createdAt: at(0), toolCallIds: [] },
+          { sequence: 1, role: "assistant", createdAt: at(1_000), toolCallIds: ["call_alpha"] },
+          { sequence: 2, role: "tool", createdAt: at(1_000), toolCallIds: ["call_alpha"] },
+        ],
+        trailingTurnNodes: [],
+        nextUserAfterWindow: { sequence: 4, createdAt: at(10_000) },
+      });
+    } finally {
+      readOnlyStore.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

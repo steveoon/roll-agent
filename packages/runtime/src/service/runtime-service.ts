@@ -74,9 +74,13 @@ import {
   RuntimeEventCursorExpiredError,
   RuntimeEventCursorGapError,
   ThreadStore,
+  type ReadTranscriptTurnContextOptions,
   type StoredRuntimeEvent,
   type SequencedToolExecutionRecord,
   type ThreadRecord,
+  type ToolExecutionTimestampEntry,
+  type TranscriptTurnBoundary,
+  type TranscriptTurnContext,
 } from "../store/thread-store.ts";
 
 export type { RuntimeModelConfigHost } from "./model-config-controller.ts";
@@ -514,6 +518,417 @@ function toUiMessage(
   };
 }
 
+function messageToolCallIds(message: ModelMessage): readonly string[] {
+  if (!Array.isArray(message.content)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  if (message.role === "assistant") {
+    for (const part of message.content) {
+      if (part.type === "tool-call" && part.toolCallId.length > 0) {
+        seen.add(part.toolCallId);
+      }
+    }
+  } else if (message.role === "tool") {
+    for (const part of message.content) {
+      if (part.type === "tool-result" && part.toolCallId.length > 0) {
+        seen.add(part.toolCallId);
+      }
+    }
+  }
+  return [...seen];
+}
+
+interface SnapshotProjectionDeps {
+  readonly hasAnyToolExecutions: () => boolean;
+  readonly readTurnContext: (
+    firstSequence: number,
+    lastSequence: number,
+    options: ReadTranscriptTurnContextOptions,
+  ) => TranscriptTurnContext;
+  readonly lookupToolTimestamps: (
+    toolCallIds: readonly string[],
+  ) => readonly ToolExecutionTimestampEntry[];
+}
+
+interface SnapshotProjectionNode {
+  readonly sequence: number;
+  readonly role: string;
+  readonly storedMs: number;
+  readonly toolCallIds: readonly string[];
+  readonly pageUiMessage: UiMessageV14 | undefined;
+}
+
+interface TurnToolInvocationSlot {
+  readonly callNodeSequence: number;
+  resultNodeSequence: number | undefined;
+  matchedMs: number | undefined;
+}
+
+interface TurnProjectionSegment {
+  readonly nodes: readonly SnapshotProjectionNode[];
+  readonly turnUserMs: number | undefined;
+  readonly nextUserSequence: number;
+  readonly nextUserMs: number | undefined;
+}
+
+const UI_MESSAGE_ROLES = ["user", "assistant"] as const;
+type UiMessageRole = (typeof UI_MESSAGE_ROLES)[number];
+
+function isUiMessageRole(role: string): role is UiMessageRole {
+  return role === UI_MESSAGE_ROLES[0] || role === UI_MESSAGE_ROLES[1];
+}
+
+function buildTurnProjectionSegments(
+  allNodes: readonly SnapshotProjectionNode[],
+  nextUserAfterWindow: TranscriptTurnBoundary | undefined,
+): TurnProjectionSegment[] {
+  const segments: TurnProjectionSegment[] = [];
+  let currentNodes: SnapshotProjectionNode[] = [];
+  let currentTurnUserMs: number | undefined;
+  for (const node of allNodes) {
+    if (node.role === "user") {
+      if (currentNodes.length > 0) {
+        segments.push({
+          nodes: currentNodes,
+          turnUserMs: currentTurnUserMs,
+          nextUserSequence: node.sequence,
+          nextUserMs: Number.isFinite(node.storedMs) ? node.storedMs : undefined,
+        });
+      }
+      currentNodes = [node];
+      currentTurnUserMs = Number.isFinite(node.storedMs) ? node.storedMs : undefined;
+    } else {
+      currentNodes.push(node);
+    }
+  }
+  if (currentNodes.length > 0) {
+    const afterMs =
+      nextUserAfterWindow === undefined ? undefined : Date.parse(nextUserAfterWindow.createdAt);
+    segments.push({
+      nodes: currentNodes,
+      turnUserMs: currentTurnUserMs,
+      nextUserSequence: nextUserAfterWindow?.sequence ?? Number.POSITIVE_INFINITY,
+      nextUserMs: afterMs !== undefined && Number.isFinite(afterMs) ? afterMs : undefined,
+    });
+  }
+  return segments;
+}
+
+function matchSegmentToolBounds(
+  segment: TurnProjectionSegment,
+  timestampsByCallId: ReadonlyMap<string, readonly ToolExecutionTimestampEntry[]>,
+): ({ readonly minMs: number; readonly maxMs: number } | undefined)[] {
+  const { nodes } = segment;
+  const firstNode = nodes[0];
+  if (firstNode === undefined) {
+    return [];
+  }
+  const segmentFirstSequence = firstNode.sequence;
+  const slotsByCallId = new Map<string, TurnToolInvocationSlot[]>();
+  const pendingSlotsByCallId = new Map<string, TurnToolInvocationSlot[]>();
+  const nodeSlots: (readonly TurnToolInvocationSlot[])[] = nodes.map((node) => {
+    if ((node.role !== "assistant" && node.role !== "tool") || node.toolCallIds.length === 0) {
+      return [];
+    }
+    return node.toolCallIds.map((toolCallId) => {
+      let allSlots = slotsByCallId.get(toolCallId);
+      if (allSlots === undefined) {
+        allSlots = [];
+        slotsByCallId.set(toolCallId, allSlots);
+      }
+      let pending = pendingSlotsByCallId.get(toolCallId);
+      if (pending === undefined) {
+        pending = [];
+        pendingSlotsByCallId.set(toolCallId, pending);
+      }
+      if (node.role === "assistant") {
+        // Any prior unmatched call with the same ID from an earlier assistant message is dangling.
+        pending.length = 0;
+        const slot: TurnToolInvocationSlot = {
+          callNodeSequence: node.sequence,
+          resultNodeSequence: undefined,
+          matchedMs: undefined,
+        };
+        allSlots.push(slot);
+        pending.push(slot);
+        return slot;
+      }
+      const openSlot = pending.shift();
+      if (openSlot !== undefined) {
+        openSlot.resultNodeSequence = node.sequence;
+        return openSlot;
+      }
+      const orphanSlot: TurnToolInvocationSlot = {
+        callNodeSequence: node.sequence,
+        resultNodeSequence: node.sequence,
+        matchedMs: undefined,
+      };
+      allSlots.push(orphanSlot);
+      return orphanSlot;
+    });
+  });
+
+  const consumedSequences = new Set<number>();
+  for (const [toolCallId, slots] of slotsByCallId) {
+    const bucket = timestampsByCallId.get(toolCallId);
+    if (bucket === undefined || slots.length === 0) {
+      continue;
+    }
+    const candidates = bucket.flatMap((item) => {
+      if (consumedSequences.has(item.sequence)) {
+        return [];
+      }
+      const itemMs = Date.parse(item.createdAt);
+      if (!Number.isFinite(itemMs)) {
+        return [];
+      }
+      if (item.coverageTranscriptSequence !== null) {
+        return item.coverageTranscriptSequence >= segmentFirstSequence &&
+          item.coverageTranscriptSequence < segment.nextUserSequence
+          ? [{ item, itemMs }]
+          : [];
+      }
+      if (segment.turnUserMs !== undefined && itemMs < segment.turnUserMs) {
+        return [];
+      }
+      if (segment.nextUserMs !== undefined && itemMs >= segment.nextUserMs) {
+        return [];
+      }
+      return [{ item, itemMs }];
+    });
+    if (candidates.length === 0) {
+      continue;
+    }
+    const completedSlots = slots.filter((slot) => slot.resultNodeSequence !== undefined);
+    const effectiveSlots =
+      completedSlots.length > 0 && candidates.length <= completedSlots.length
+        ? completedSlots
+        : slots;
+    const matchableCandidates = candidates.flatMap((candidate) => {
+      const covSeq = candidate.item.coverageTranscriptSequence;
+      if (covSeq === null) {
+        return [{ ...candidate, maxSlotIndex: effectiveSlots.length - 1 }];
+      }
+      let maxSlotIndex = -1;
+      for (let slotIndex = 0; slotIndex < effectiveSlots.length; slotIndex += 1) {
+        const slot = effectiveSlots[slotIndex];
+        if (slot !== undefined && slot.callNodeSequence <= covSeq) {
+          maxSlotIndex = slotIndex;
+        }
+      }
+      return maxSlotIndex >= 0 ? [{ ...candidate, maxSlotIndex }] : [];
+    });
+    let slotCursor = effectiveSlots.length - 1;
+    for (
+      let candidateIndex = matchableCandidates.length - 1;
+      candidateIndex >= 0 && slotCursor >= 0;
+      candidateIndex -= 1
+    ) {
+      const candidate = matchableCandidates[candidateIndex];
+      if (candidate === undefined) {
+        continue;
+      }
+      slotCursor = Math.min(slotCursor, candidate.maxSlotIndex);
+      const targetSlot = effectiveSlots[slotCursor];
+      if (targetSlot !== undefined) {
+        consumedSequences.add(candidate.item.sequence);
+        targetSlot.matchedMs = candidate.itemMs;
+      }
+      slotCursor -= 1;
+    }
+  }
+
+  return nodeSlots.map((slotsForNode) => {
+    let minMs = Number.POSITIVE_INFINITY;
+    let maxMs = Number.NEGATIVE_INFINITY;
+    for (const slot of slotsForNode) {
+      if (slot.matchedMs !== undefined) {
+        minMs = Math.min(minMs, slot.matchedMs);
+        maxMs = Math.max(maxMs, slot.matchedMs);
+      }
+    }
+    return Number.isFinite(minMs) && Number.isFinite(maxMs) ? { minMs, maxMs } : undefined;
+  });
+}
+
+function projectSingleTurnSegment(
+  segment: TurnProjectionSegment,
+  timestampsByCallId: ReadonlyMap<string, readonly ToolExecutionTimestampEntry[]>,
+): UiMessageV14[] {
+  const { nodes } = segment;
+  const matchedToolBounds = matchSegmentToolBounds(segment, timestampsByCallId);
+  const laterAnchorCeilingMs = new Array<number>(nodes.length).fill(Number.POSITIVE_INFINITY);
+  let runningCeilingMs = Number.POSITIVE_INFINITY;
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const node = nodes[index];
+    if (node === undefined) {
+      continue;
+    }
+    if (node.role === "user") {
+      runningCeilingMs = Number.POSITIVE_INFINITY;
+      continue;
+    }
+    laterAnchorCeilingMs[index] = runningCeilingMs;
+    const bounds = matchedToolBounds[index];
+    if (bounds !== undefined) {
+      runningCeilingMs = Math.min(runningCeilingMs, bounds.minMs);
+    }
+  }
+
+  let prevTurnUiMs: number | undefined;
+  let prevTurnToolMaxMs: number | undefined;
+  const projected: UiMessageV14[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (node === undefined) {
+      continue;
+    }
+    const bounds = matchedToolBounds[index];
+    if (!isUiMessageRole(node.role)) {
+      if (bounds !== undefined) {
+        prevTurnToolMaxMs =
+          prevTurnToolMaxMs === undefined
+            ? bounds.maxMs
+            : Math.max(prevTurnToolMaxMs, bounds.maxMs);
+      }
+      continue;
+    }
+    if (node.role === "user") {
+      prevTurnUiMs = Number.isFinite(node.storedMs) ? node.storedMs : undefined;
+      prevTurnToolMaxMs = undefined;
+      if (node.pageUiMessage !== undefined) {
+        projected.push(node.pageUiMessage);
+      }
+      continue;
+    }
+    if (!Number.isFinite(node.storedMs)) {
+      if (node.pageUiMessage !== undefined) {
+        projected.push(node.pageUiMessage);
+      }
+      continue;
+    }
+    const ceilingMs = laterAnchorCeilingMs[index] ?? Number.POSITIVE_INFINITY;
+    let targetMs = node.storedMs;
+    if (bounds !== undefined) {
+      const upperMs = Math.min(bounds.minMs, ceilingMs);
+      targetMs = Math.min(node.storedMs, upperMs);
+      if (prevTurnToolMaxMs !== undefined) {
+        const afterPrevToolMs =
+          prevTurnToolMaxMs + 1 <= upperMs
+            ? prevTurnToolMaxMs + 1
+            : Math.min(prevTurnToolMaxMs, upperMs);
+        targetMs = Math.max(targetMs, afterPrevToolMs);
+      }
+      if (prevTurnUiMs !== undefined) {
+        targetMs = Math.max(targetMs, Math.min(prevTurnUiMs, upperMs));
+      }
+      prevTurnToolMaxMs =
+        prevTurnToolMaxMs === undefined ? bounds.maxMs : Math.max(prevTurnToolMaxMs, bounds.maxMs);
+    } else if (Number.isFinite(ceilingMs) && node.storedMs > ceilingMs) {
+      targetMs = Math.min(node.storedMs, ceilingMs);
+      if (prevTurnToolMaxMs !== undefined) {
+        targetMs = Math.max(targetMs, Math.min(prevTurnToolMaxMs + 1, ceilingMs));
+      }
+      if (prevTurnUiMs !== undefined) {
+        targetMs = Math.max(targetMs, Math.min(prevTurnUiMs, ceilingMs));
+      }
+    } else {
+      if (prevTurnToolMaxMs !== undefined) {
+        targetMs = Math.max(targetMs, prevTurnToolMaxMs + 1);
+      }
+      if (prevTurnUiMs !== undefined) {
+        targetMs = Math.max(targetMs, prevTurnUiMs);
+      }
+    }
+    prevTurnUiMs = targetMs;
+    if (node.pageUiMessage !== undefined) {
+      projected.push(
+        targetMs === node.storedMs
+          ? node.pageUiMessage
+          : {
+              ...node.pageUiMessage,
+              createdAt: new Date(targetMs).toISOString(),
+            },
+      );
+    }
+  }
+  return projected;
+}
+
+function projectSnapshotUiMessages(
+  entries: ReturnType<ThreadStore["listRecentTranscriptMessages"]>["entries"],
+  deps: SnapshotProjectionDeps,
+): UiMessageV14[] {
+  const firstEntry = entries[0];
+  const lastEntry = entries[entries.length - 1];
+  if (firstEntry === undefined || lastEntry === undefined) {
+    return [];
+  }
+  const pageNodes: SnapshotProjectionNode[] = entries.map((entry) => ({
+    sequence: entry.sequence,
+    role: entry.message.role,
+    storedMs: Date.parse(entry.createdAt),
+    toolCallIds: messageToolCallIds(entry.message),
+    pageUiMessage: toUiMessage(entry),
+  }));
+  const defaultMessages = (): UiMessageV14[] =>
+    pageNodes.flatMap((node) => (node.pageUiMessage === undefined ? [] : [node.pageUiMessage]));
+  if (!pageNodes.some((node) => node.pageUiMessage !== undefined)) {
+    return [];
+  }
+  if (!deps.hasAnyToolExecutions()) {
+    return defaultMessages();
+  }
+  const includeLeadingTurn = firstEntry.message.role !== "user";
+  const includeTrailingTurn = lastEntry.message.role !== "user";
+  if (!includeLeadingTurn && !includeTrailingTurn && pageNodes.length === 1) {
+    return defaultMessages();
+  }
+  const turnContext = deps.readTurnContext(firstEntry.sequence, lastEntry.sequence, {
+    includeLeadingTurn,
+    includeTrailingTurn,
+  });
+  const allNodes: SnapshotProjectionNode[] = [
+    ...turnContext.leadingTurnNodes.map((node) => ({
+      sequence: node.sequence,
+      role: node.role,
+      storedMs: Date.parse(node.createdAt),
+      toolCallIds: node.toolCallIds,
+      pageUiMessage: undefined,
+    })),
+    ...pageNodes,
+    ...turnContext.trailingTurnNodes.map((node) => ({
+      sequence: node.sequence,
+      role: node.role,
+      storedMs: Date.parse(node.createdAt),
+      toolCallIds: node.toolCallIds,
+      pageUiMessage: undefined,
+    })),
+  ];
+  const allToolCallIds = allNodes.flatMap((node) => node.toolCallIds);
+  if (allToolCallIds.length === 0) {
+    return defaultMessages();
+  }
+
+  const timestampsByCallId = new Map<string, ToolExecutionTimestampEntry[]>();
+  for (const record of deps.lookupToolTimestamps(allToolCallIds)) {
+    const existing = timestampsByCallId.get(record.toolCallId);
+    if (existing === undefined) {
+      timestampsByCallId.set(record.toolCallId, [record]);
+    } else {
+      existing.push(record);
+    }
+  }
+  if (timestampsByCallId.size === 0) {
+    return defaultMessages();
+  }
+
+  return buildTurnProjectionSegments(allNodes, turnContext.nextUserAfterWindow).flatMap((segment) =>
+    projectSingleTurnSegment(segment, timestampsByCallId),
+  );
+}
+
 function toOperationView(
   record: SequencedToolExecutionRecord,
   appOutput: AppOutputDescriptor = { status: "not_provided" },
@@ -880,9 +1295,17 @@ export class RuntimeService {
     return {
       thread: toThreadSummary(this.store, record),
       messages: {
-        items: messagePage.entries.flatMap((entry) => {
-          const projected = toUiMessage(entry);
-          return projected === undefined ? [] : [projected];
+        items: projectSnapshotUiMessages(messagePage.entries, {
+          hasAnyToolExecutions: () => this.store.hasAnyToolExecutions(params.threadId),
+          readTurnContext: (firstSequence, lastSequence, options) =>
+            this.store.readTranscriptTurnContext(
+              params.threadId,
+              firstSequence,
+              lastSequence,
+              options,
+            ),
+          lookupToolTimestamps: (toolCallIds) =>
+            this.store.listToolExecutionTimestampsByCallIds(params.threadId, toolCallIds),
         }),
         nextBeforeSequence: messagePage.nextBeforeSequence ?? null,
       },

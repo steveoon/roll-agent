@@ -149,11 +149,17 @@ export { stripCancelledTurnRecoveryMessages } from "./engine/cancelled-turn-reco
 export type { AcceptedTurnInput, TurnInputSkillCheckpoint } from "./store/turn-input.ts";
 export type { ThreadStoreOptions } from "./store/thread-store.ts";
 export type {
+  AppendMessagesOptions,
+  ReadTranscriptTurnContextOptions,
   ThreadRecord,
   CreateThreadInput,
   ListThreadsOptions,
   ThreadSnapshot,
   ForkThreadSnapshotInput,
+  ToolExecutionTimestampEntry,
+  TranscriptTurnBoundary,
+  TranscriptTurnContext,
+  TranscriptTurnContextNode,
 } from "./store/thread-store.ts";
 export {
   THREAD_ORIGIN_KINDS,

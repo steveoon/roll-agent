@@ -2712,3 +2712,1083 @@ test("private text belongs to the original subscription, even when a callback is
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function mergeClientSnapshotTimeline(
+  snapshot: ReturnType<RuntimeService["snapshotThread"]>,
+): string[] {
+  const rows: Array<{
+    readonly label: string;
+    readonly at: string;
+    readonly order: number;
+  }> = [
+    ...snapshot.messages.items.map((message) => {
+      const textPart = message.parts.find((part) => part.type === "text");
+      return {
+        label: `${message.role}:${textPart?.text ?? ""}`,
+        at: message.createdAt,
+        order: -1,
+      };
+    }),
+    ...snapshot.operations.items.map((operation) => ({
+      label: `tool:${operation.toolCallId}:${operation.toolName}`,
+      at: operation.createdAt,
+      order: operation.sequence,
+    })),
+  ];
+  return rows
+    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at) || left.order - right.order)
+    .map((row) => row.label);
+}
+
+test("snapshotThread 在可写与只读历史浏览下将存量回合末统一盖戳消息对齐回真实工具因果穿插顺序", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  let storeClosed = false;
+  try {
+    const baseMs = Date.now() - 120_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+    const threadId = store.createThread({ id: IDS.thread, title: "legacy-interleaved" });
+    store.appendMessages(threadId, [{ role: "user", content: "排查服务故障" }], {
+      messageCreatedAt: [at(0)],
+    });
+
+    const op1 = createToolExecutionRecord({
+      toolCallId: "call_1",
+      agentName: "shell",
+      toolName: "check_port",
+      input: { port: 3000 },
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "port 3000 closed"),
+      createdAt: at(2_000),
+    });
+    const op2 = createToolExecutionRecord({
+      toolCallId: "call_2",
+      agentName: "shell",
+      toolName: "read_logs",
+      input: { lines: 50 },
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "EADDRINUSE"),
+      createdAt: at(5_000),
+    });
+    // 故意让最后一个工具与整轮落盘处于同一毫秒（+10_000ms），检验总结消息不会因 order=-1 排到工具前面
+    const op3 = createToolExecutionRecord({
+      toolCallId: "call_3",
+      agentName: "shell",
+      toolName: "check_pid",
+      input: { pid: 1234 },
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "alive"),
+      createdAt: at(10_000),
+    });
+    store.appendToolExecution(threadId, op1);
+    store.appendToolExecution(threadId, op2);
+    store.appendToolExecution(threadId, op3);
+
+    // 模拟历史存量数据：整轮所有 assistant / tool 消息共享回合末同一个提交时间戳
+    const legacyBatchCommitAt = at(10_000);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "我先检查 3000 端口状态。" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "shell__check_port", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              toolName: "shell__check_port",
+              output: { type: "text", value: "port 3000 closed" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "端口未监听，我再同时读取日志并核对进程。" },
+            { type: "tool-call", toolCallId: "call_2", toolName: "shell__read_logs", input: {} },
+            { type: "tool-call", toolCallId: "call_3", toolName: "shell__check_pid", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_2",
+              toolName: "shell__read_logs",
+              output: { type: "text", value: "EADDRINUSE" },
+            },
+            {
+              type: "tool-result",
+              toolCallId: "call_3",
+              toolName: "shell__check_pid",
+              output: { type: "text", value: "alive" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: "定位完成：旧进程 1234 占用了端口导致重启失败。",
+        },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => legacyBatchCommitAt),
+        toolExecutionCoverage: {
+          executionIds: [op1.id, op2.id, op3.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const expectedOrder = [
+      "user:排查服务故障",
+      "assistant:我先检查 3000 端口状态。",
+      "tool:call_1:check_port",
+      "assistant:端口未监听，我再同时读取日志并核对进程。",
+      "tool:call_2:read_logs",
+      "tool:call_3:check_pid",
+      "assistant:定位完成：旧进程 1234 占用了端口导致重启失败。",
+    ];
+
+    const writableService = new RuntimeService(createFixture(store).engine, store);
+    try {
+      const snapshot = writableService.snapshotThread({
+        threadId: threadIdSchema.parse(IDS.thread),
+        limit: 100,
+      });
+      assert.doesNotThrow(() =>
+        parseRuntimeMethodResultForVersion("1.6", "thread.snapshot", {
+          ...snapshot,
+          pendingInteractions: [],
+        }),
+      );
+      assert.equal(snapshot.messages.items.length, 4);
+      assert.deepEqual(mergeClientSnapshotTimeline(snapshot), expectedOrder);
+    } finally {
+      await writableService.close();
+    }
+    store.close();
+    storeClosed = true;
+
+    const readOnlyStore = new ThreadStore(dir, { readOnly: true });
+    const inertEngine: RuntimeServiceEngine = {
+      createSession: async () => {
+        throw new Error("unexpected createSession");
+      },
+      resumeSession: async () => {
+        throw new Error("unexpected resumeSession");
+      },
+    };
+    const readOnlyService = new RuntimeService(inertEngine, readOnlyStore);
+    try {
+      const readOnlySnapshot = readOnlyService.snapshotThread({
+        threadId: threadIdSchema.parse(IDS.thread),
+        limit: 100,
+      });
+      assert.deepEqual(mergeClientSnapshotTimeline(readOnlySnapshot), expectedOrder);
+    } finally {
+      await readOnlyService.close();
+      readOnlyStore.close();
+    }
+  } finally {
+    if (!storeClosed) {
+      store.close();
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotThread 在跨轮复用相同 toolCallId 及旧工具缺失时依靠 coverage 边界保持因果不串轮", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const service = new RuntimeService(createFixture(store).engine, store);
+  try {
+    const baseMs = Date.now() - 120_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+    const threadId = store.createThread({ id: IDS.thread, title: "duplicate-call-ids" });
+
+    // 第一轮：call_1（假设其工具记录后来被淘汰/清理，后面还有同批 call_2 存活）
+    const turn1KeptTool = createToolExecutionRecord({
+      toolCallId: "call_2",
+      agentName: "fs",
+      toolName: "read_b",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "b"),
+      createdAt: at(4_000),
+    });
+    store.appendMessages(threadId, [{ role: "user", content: "第一轮问题" }], {
+      messageCreatedAt: [at(0)],
+    });
+    store.appendToolExecution(threadId, turn1KeptTool);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第一轮先调已过期的 call_1。" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "fs__read_a", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              toolName: "fs__read_a",
+              output: { type: "text", value: "a" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第一轮再调仍在保留期的 call_2。" },
+            { type: "tool-call", toolCallId: "call_2", toolName: "fs__read_b", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_2",
+              toolName: "fs__read_b",
+              output: { type: "text", value: "b" },
+            },
+          ],
+        },
+        { role: "assistant", content: "第一轮总结。" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(8_000)),
+        toolExecutionCoverage: {
+          executionIds: [turn1KeptTool.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    // 第二轮：兼容模型再次复用同名 toolCallId "call_1"
+    const turn2Tool = createToolExecutionRecord({
+      toolCallId: "call_1",
+      agentName: "fs",
+      toolName: "read_c",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "c"),
+      createdAt: at(62_000),
+    });
+    store.appendMessages(threadId, [{ role: "user", content: "第二轮问题" }], {
+      messageCreatedAt: [at(60_000)],
+    });
+    store.appendToolExecution(threadId, turn2Tool);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第二轮复用 call_1。" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "fs__read_c", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              toolName: "fs__read_c",
+              output: { type: "text", value: "c" },
+            },
+          ],
+        },
+        { role: "assistant", content: "第二轮总结。" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 3 }, () => at(65_000)),
+        toolExecutionCoverage: {
+          executionIds: [turn2Tool.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const snapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 100,
+    });
+    assert.deepEqual(mergeClientSnapshotTimeline(snapshot), [
+      "user:第一轮问题",
+      "assistant:第一轮先调已过期的 call_1。",
+      "assistant:第一轮再调仍在保留期的 call_2。",
+      "tool:call_2:read_b",
+      "assistant:第一轮总结。",
+      "user:第二轮问题",
+      "assistant:第二轮复用 call_1。",
+      "tool:call_1:read_c",
+      "assistant:第二轮总结。",
+    ]);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotThread 对静默无文本工具步骤与分页截断在 tool 消息处的末尾总结仍严格晚于工具", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const service = new RuntimeService(createFixture(store).engine, store);
+  try {
+    const baseMs = Date.now() - 120_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+    const threadId = store.createThread({ id: IDS.thread, title: "silent-tool-and-page-cut" });
+
+    store.appendMessages(threadId, [{ role: "user", content: "检查配置" }], {
+      messageCreatedAt: [at(0)],
+    });
+    const op1 = createToolExecutionRecord({
+      toolCallId: "call_1",
+      agentName: "fs",
+      toolName: "read_a",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "a"),
+      createdAt: at(2_000),
+    });
+    // 第二步是无文本的静默工具调用，且与整轮提交处于同一毫秒（+5_000ms）
+    const opSilent = createToolExecutionRecord({
+      toolCallId: "call_silent",
+      agentName: "fs",
+      toolName: "read_b",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "b"),
+      createdAt: at(5_000),
+    });
+    store.appendToolExecution(threadId, op1);
+    store.appendToolExecution(threadId, opSilent);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "我先读取配置 A。" },
+            { type: "tool-call", toolCallId: "call_1", toolName: "fs__read_a", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              toolName: "fs__read_a",
+              output: { type: "text", value: "a" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_silent", toolName: "fs__read_b", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_silent",
+              toolName: "fs__read_b",
+              output: { type: "text", value: "b" },
+            },
+          ],
+        },
+        { role: "assistant", content: "两份配置均已核对无误。" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(5_000)),
+        toolExecutionCoverage: {
+          executionIds: [op1.id, opSilent.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const fullSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 100,
+    });
+    assert.deepEqual(mergeClientSnapshotTimeline(fullSnapshot), [
+      "user:检查配置",
+      "assistant:我先读取配置 A。",
+      "tool:call_1:read_a",
+      "assistant:",
+      "tool:call_silent:read_b",
+      "assistant:两份配置均已核对无误。",
+    ]);
+
+    // 分页截断边界：limit=2 时 transcript 页面只含 [tool(call_silent), assistant(总结)]，总结仍须排在 call_silent 之后
+    const tailPageSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 2,
+    });
+    assert.deepEqual(mergeClientSnapshotTimeline(tailPageSnapshot), [
+      "tool:call_1:read_a",
+      "tool:call_silent:read_b",
+      "assistant:两份配置均已核对无误。",
+    ]);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotThread 在跨轮复用同一 toolCallId 且分页切在下一轮 user 之前时不会借用下一轮工具时间", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const service = new RuntimeService(createFixture(store).engine, store);
+  try {
+    const baseMs = Date.now() - 180_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+    const threadId = store.createThread({ id: IDS.thread, title: "cross-turn-dup-call-id-page" });
+
+    // 第一轮（seq 0..3）：工具在 +2_000ms 完成，整轮响应在 +3_000ms 持久化
+    store.appendMessages(threadId, [{ role: "user", content: "第一轮问题" }], {
+      messageCreatedAt: [at(0)],
+    });
+    const turn1Tool = createToolExecutionRecord({
+      toolCallId: "call_dup",
+      agentName: "fs",
+      toolName: "read_turn1",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "v1"),
+      createdAt: at(2_000),
+    });
+    store.appendToolExecution(threadId, turn1Tool);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第一轮先读文件。" },
+            { type: "tool-call", toolCallId: "call_dup", toolName: "fs__read_turn1", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_dup",
+              toolName: "fs__read_turn1",
+              output: { type: "text", value: "v1" },
+            },
+          ],
+        },
+        { role: "assistant", content: "第一轮总结。" },
+      ],
+      {
+        messageCreatedAt: [at(3_000), at(3_000), at(3_000)],
+        toolExecutionCoverage: {
+          executionIds: [turn1Tool.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    // 第二轮（seq 4..7）：复用同一 toolCallId="call_dup"，工具在 +62_000ms 完成
+    store.appendMessages(threadId, [{ role: "user", content: "第二轮问题" }], {
+      messageCreatedAt: [at(60_000)],
+    });
+    const turn2Tool = createToolExecutionRecord({
+      toolCallId: "call_dup",
+      agentName: "fs",
+      toolName: "read_turn2",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "v2"),
+      createdAt: at(62_000),
+    });
+    store.appendToolExecution(threadId, turn2Tool);
+    store.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第二轮再读文件。" },
+            { type: "tool-call", toolCallId: "call_dup", toolName: "fs__read_turn2", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_dup",
+              toolName: "fs__read_turn2",
+              output: { type: "text", value: "v2" },
+            },
+          ],
+        },
+        { role: "assistant", content: "第二轮总结。" },
+      ],
+      {
+        messageCreatedAt: [at(63_000), at(63_000), at(63_000)],
+        toolExecutionCoverage: {
+          executionIds: [turn2Tool.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const fullSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 100,
+    });
+    const turn1SummaryFull = fullSnapshot.messages.items.find((item) => item.sequence === 3);
+    assert.equal(turn1SummaryFull?.createdAt, at(3_000));
+
+    // 关键边界：页面仅含第一轮 seq 0..3（下一轮 user seq=4 不在当前页内）
+    const turn1Page = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 4,
+      messageBeforeSequence: 4,
+    });
+    assert.deepEqual(
+      turn1Page.messages.items,
+      fullSnapshot.messages.items.filter((item) => item.sequence < 4),
+    );
+    const turn1SummaryPaged = turn1Page.messages.items.find((item) => item.sequence === 3);
+    assert.equal(turn1SummaryPaged?.createdAt, at(3_000));
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotThread 在同一轮内复用同一 toolCallId（含前序记录已过期裁剪）时 call/result 共享配对且不串位", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const service = new RuntimeService(createFixture(store).engine, store);
+  try {
+    const baseMs = Date.now() - 180_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+
+    // 线程 1：同轮两次调用同一 toolCallId="call_repeat"，两条工具记录均存活
+    const bothAliveId = store.createThread({ id: IDS.thread, title: "same-turn-repeat-alive" });
+    store.appendMessages(bothAliveId, [{ role: "user", content: "检查两次" }], {
+      messageCreatedAt: [at(0)],
+    });
+    const step1Op = createToolExecutionRecord({
+      toolCallId: "call_repeat",
+      agentName: "fs",
+      toolName: "step_one",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "one"),
+      createdAt: at(1_000),
+    });
+    const step2Op = createToolExecutionRecord({
+      toolCallId: "call_repeat",
+      agentName: "fs",
+      toolName: "step_two",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "two"),
+      createdAt: at(5_000),
+    });
+    store.appendToolExecution(bothAliveId, step1Op);
+    store.appendToolExecution(bothAliveId, step2Op);
+    store.appendMessages(
+      bothAliveId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第一次检查。" },
+            { type: "tool-call", toolCallId: "call_repeat", toolName: "fs__step_one", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_one",
+              output: { type: "text", value: "one" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "第二次检查。" },
+            { type: "tool-call", toolCallId: "call_repeat", toolName: "fs__step_two", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_two",
+              output: { type: "text", value: "two" },
+            },
+          ],
+        },
+        { role: "assistant", content: "两次检查总结。" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(5_000)),
+        toolExecutionCoverage: {
+          executionIds: [step1Op.id, step2Op.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const bothAliveSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 100,
+    });
+    assert.deepEqual(
+      bothAliveSnapshot.messages.items.map((item) => [item.sequence, item.createdAt]),
+      [
+        [0, at(0)],
+        [1, at(1_000)],
+        [3, at(5_000)],
+        [5, at(5_001)],
+      ],
+    );
+    assert.deepEqual(mergeClientSnapshotTimeline(bothAliveSnapshot), [
+      "user:检查两次",
+      "assistant:第一次检查。",
+      "tool:call_repeat:step_one",
+      "assistant:第二次检查。",
+      "tool:call_repeat:step_two",
+      "assistant:两次检查总结。",
+    ]);
+
+    // 线程 2：同轮两次调用同一 toolCallId="call_repeat"，但第一次记录已因 TTL 裁剪缺失，仅剩第二次记录
+    const prunedFirstId = store.createThread({ title: "same-turn-repeat-pruned-first" });
+    store.appendMessages(prunedFirstId, [{ role: "user", content: "重试检查" }], {
+      messageCreatedAt: [at(10_000)],
+    });
+    const survivingSecondOp = createToolExecutionRecord({
+      toolCallId: "call_repeat",
+      agentName: "fs",
+      toolName: "step_two_only",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "two"),
+      createdAt: at(14_000),
+    });
+    store.appendToolExecution(prunedFirstId, survivingSecondOp);
+    store.appendMessages(
+      prunedFirstId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "早先已裁剪的第一次调用。" },
+            {
+              type: "tool-call",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_one_pruned",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_one_pruned",
+              output: { type: "text", value: "one" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "仍在保留期的第二次调用。" },
+            {
+              type: "tool-call",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_two_only",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "fs__step_two_only",
+              output: { type: "text", value: "two" },
+            },
+          ],
+        },
+        { role: "assistant", content: "裁剪后总结。" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(14_000)),
+        toolExecutionCoverage: {
+          executionIds: [survivingSecondOp.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    const prunedSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(prunedFirstId),
+      limit: 100,
+    });
+    assert.deepEqual(mergeClientSnapshotTimeline(prunedSnapshot), [
+      "user:重试检查",
+      "assistant:早先已裁剪的第一次调用。",
+      "assistant:仍在保留期的第二次调用。",
+      "tool:call_repeat:step_two_only",
+      "assistant:裁剪后总结。",
+    ]);
+
+    // 线程 3：前导未闭合 dangling call 后紧跟同 ID 逐 step 落盘调用，随后还有一次无账本的同 ID 调用
+    const stepScopedId = store.createThread({ title: "same-turn-dangling-and-step-scoped" });
+    store.appendMessages(
+      stepScopedId,
+      [
+        { role: "user", content: "混合异常历史" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "未执行的悬空调用。" },
+            { type: "tool-call", toolCallId: "call_repeat", toolName: "fs__dangling", input: {} },
+          ],
+        },
+      ],
+      {
+        messageCreatedAt: [at(20_000), at(20_500)],
+      },
+    );
+    const stepScopedOp = createToolExecutionRecord({
+      toolCallId: "call_repeat",
+      agentName: "fs",
+      toolName: "recorded_step",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "recorded"),
+      createdAt: at(22_000),
+    });
+    store.appendToolExecution(stepScopedId, stepScopedOp);
+    store.appendMessages(
+      stepScopedId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "已记账的调用。" },
+            {
+              type: "tool-call",
+              toolCallId: "call_repeat",
+              toolName: "fs__recorded_step",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "fs__recorded_step",
+              output: { type: "text", value: "recorded" },
+            },
+          ],
+        },
+      ],
+      {
+        messageCreatedAt: [at(22_000), at(22_000)],
+        toolExecutionCoverage: {
+          executionIds: [stepScopedOp.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+    store.appendMessages(
+      stepScopedId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "未写工具账本的内建调用。" },
+            { type: "tool-call", toolCallId: "call_repeat", toolName: "roll__skill", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_repeat",
+              toolName: "roll__skill",
+              output: { type: "text", value: "skill-doc" },
+            },
+          ],
+        },
+        { role: "assistant", content: "混合异常总结。" },
+      ],
+      {
+        messageCreatedAt: [at(22_000), at(22_000), at(22_000)],
+      },
+    );
+
+    const stepScopedSnapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(stepScopedId),
+      limit: 100,
+    });
+    assert.deepEqual(mergeClientSnapshotTimeline(stepScopedSnapshot), [
+      "user:混合异常历史",
+      "assistant:未执行的悬空调用。",
+      "assistant:已记账的调用。",
+      "tool:call_repeat:recorded_step",
+      "assistant:未写工具账本的内建调用。",
+      "assistant:混合异常总结。",
+    ]);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshotThread 在任意分页步长（含 limit=1 仅总结页与只读存储）下保持严格分页不变性", async () => {
+  const dir = tempDir();
+  const writableStore = new ThreadStore(dir);
+  let writableClosed = false;
+  try {
+    const baseMs = Date.now() - 240_000;
+    const at = (offsetMs: number): string => new Date(baseMs + offsetMs).toISOString();
+    const threadId = writableStore.createThread({
+      id: IDS.thread,
+      title: "pagination-invariance",
+    });
+
+    // 第 1 轮：多步（普通工具 + 静默工具 + 同毫秒总结）
+    writableStore.appendMessages(threadId, [{ role: "user", content: "轮次一" }], {
+      messageCreatedAt: [at(0)],
+    });
+    const t1Op1 = createToolExecutionRecord({
+      toolCallId: "shared_id",
+      agentName: "fs",
+      toolName: "t1_op1",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "ok"),
+      createdAt: at(1_000),
+    });
+    const t1Op2 = createToolExecutionRecord({
+      toolCallId: "silent_id",
+      agentName: "fs",
+      toolName: "t1_op2",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "ok"),
+      createdAt: at(3_000),
+    });
+    writableStore.appendToolExecution(threadId, t1Op1);
+    writableStore.appendToolExecution(threadId, t1Op2);
+    writableStore.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "轮次一步骤一" },
+            { type: "tool-call", toolCallId: "shared_id", toolName: "fs__t1_op1", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "shared_id",
+              toolName: "fs__t1_op1",
+              output: { type: "text", value: "ok" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "silent_id", toolName: "fs__t1_op2", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "silent_id",
+              toolName: "fs__t1_op2",
+              output: { type: "text", value: "ok" },
+            },
+          ],
+        },
+        { role: "assistant", content: "轮次一同毫秒总结" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(3_000)),
+        toolExecutionCoverage: {
+          executionIds: [t1Op1.id, t1Op2.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    // 第 2 轮：纯文本对话（无工具）
+    writableStore.appendMessages(
+      threadId,
+      [
+        { role: "user", content: "轮次二纯文本" },
+        { role: "assistant", content: "轮次二直接回复" },
+      ],
+      {
+        messageCreatedAt: [at(20_000), at(21_000)],
+      },
+    );
+
+    // 第 3 轮：跨轮复用 shared_id 且同轮连续调用两次 shared_id，末尾同毫秒总结
+    writableStore.appendMessages(threadId, [{ role: "user", content: "轮次三" }], {
+      messageCreatedAt: [at(40_000)],
+    });
+    const t3Op1 = createToolExecutionRecord({
+      toolCallId: "shared_id",
+      agentName: "fs",
+      toolName: "t3_op1",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "ok1"),
+      createdAt: at(42_000),
+    });
+    const t3Op2 = createToolExecutionRecord({
+      toolCallId: "shared_id",
+      agentName: "fs",
+      toolName: "t3_op2",
+      input: {},
+      result: createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "ok2"),
+      createdAt: at(45_000),
+    });
+    writableStore.appendToolExecution(threadId, t3Op1);
+    writableStore.appendToolExecution(threadId, t3Op2);
+    writableStore.appendMessages(
+      threadId,
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "轮次三第一次调 shared_id" },
+            { type: "tool-call", toolCallId: "shared_id", toolName: "fs__t3_op1", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "shared_id",
+              toolName: "fs__t3_op1",
+              output: { type: "text", value: "ok1" },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "轮次三第二次调 shared_id" },
+            { type: "tool-call", toolCallId: "shared_id", toolName: "fs__t3_op2", input: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "shared_id",
+              toolName: "fs__t3_op2",
+              output: { type: "text", value: "ok2" },
+            },
+          ],
+        },
+        { role: "assistant", content: "轮次三最终总结" },
+      ],
+      {
+        messageCreatedAt: Array.from({ length: 5 }, () => at(45_000)),
+        toolExecutionCoverage: {
+          executionIds: [t3Op1.id, t3Op2.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+    writableStore.close();
+    writableClosed = true;
+
+    const readOnlyStore = new ThreadStore(dir, { readOnly: true });
+    const readOnlyService = new RuntimeService(createFixture(readOnlyStore).engine, readOnlyStore);
+    try {
+      const parsedThreadId = threadIdSchema.parse(IDS.thread);
+      const fullSnapshot = readOnlyService.snapshotThread({
+        threadId: parsedThreadId,
+        limit: 100,
+      });
+      // 确认 limit=1 单独读取最后一轮末尾总结时，依然借助页外同轮工具锚点推进到了 +45_001ms
+      const lastSummaryOnly = readOnlyService.snapshotThread({
+        threadId: parsedThreadId,
+        limit: 1,
+      });
+      assert.equal(lastSummaryOnly.messages.items.length, 1);
+      assert.equal(lastSummaryOnly.messages.items[0]?.createdAt, at(45_001));
+
+      // 遍历各种分页大小从尾逐页翻到头，验证合并后的每个 sequence 与全量快照逐毫秒恒等
+      for (const pageSize of [1, 2, 3, 4, 5, 6, 7, 13, 20]) {
+        const collectedPages: (typeof fullSnapshot.messages.items)[] = [];
+        let cursor: number | undefined;
+        for (let guard = 0; guard < 50; guard += 1) {
+          const page = readOnlyService.snapshotThread({
+            threadId: parsedThreadId,
+            limit: pageSize,
+            ...(cursor !== undefined ? { messageBeforeSequence: cursor } : {}),
+          });
+          collectedPages.push(page.messages.items);
+          if (page.messages.nextBeforeSequence === null) {
+            break;
+          }
+          cursor = page.messages.nextBeforeSequence;
+        }
+        const mergedItems = collectedPages.reverse().flat();
+        assert.deepEqual(
+          mergedItems,
+          fullSnapshot.messages.items,
+          `pageSize=${String(pageSize)} 分页回翻结果必须与全量快照完全一致`,
+        );
+      }
+    } finally {
+      await readOnlyService.close();
+      readOnlyStore.close();
+    }
+  } finally {
+    if (!writableClosed) {
+      writableStore.close();
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
