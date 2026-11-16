@@ -1,3 +1,4 @@
+import type { TerminalAgentStatus } from "../terminal-agent-status.ts";
 import type { ChatConnection } from "../../../runtime-host/chatgpt-connection.ts";
 import type { ChatFastModeControl } from "../fast-mode.ts";
 import { createElement as h } from "react";
@@ -41,6 +42,7 @@ export interface InkReplStore extends Partial<TranscriptHistoryStore> {
 }
 
 export interface RunInkReplOptions {
+  readonly terminalAgentStatus?: TerminalAgentStatus;
   readonly getStatus?: () => string;
   readonly viewConversation?: (threadId: string) => string;
   readonly workspace?: string;
@@ -186,6 +188,9 @@ export async function runInkRepl(
         ...(options.connection ? { connection: options.connection } : {}),
         ...(options.fastMode ? { fastMode: options.fastMode } : {}),
         ...(options.beforeSend ? { beforeSend: options.beforeSend } : {}),
+        ...(options.terminalAgentStatus
+          ? { terminalAgentStatus: options.terminalAgentStatus }
+          : {}),
         ...(options.getStatus ? { getStatus: options.getStatus } : {}),
         ...(options.viewConversation ? { viewConversation: options.viewConversation } : {}),
         ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+本文件提供仓库级工程约定。先遵守核心规则，再按当前任务读取相关专题；详细契约见下方入口。
 
 ## Project Overview
 
@@ -9,6 +9,30 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 `@roll-agent/core` 负责 CLI、配置、Agent/MCP 接线与宿主集成；
 `@roll-agent/runtime` 负责 ConversationEngine、ThreadStore、策略、Tool Bridge 与 scheduler 账本。
 子 Agent 通过 MCP 协议接入。
+
+## 核心架构与行为约束
+
+- 依赖方向为 **Core → Runtime → Protocol / 第三方基础库**；Runtime 的源码、类型、测试与包依赖不得反向依赖 Core。
+- 通用执行、取消、预算、压缩、审批及持久化归 Runtime；配置、认证、Provider 适配、Registry/MCP 和 OS 进程管理归 Core。宿主能力由 Runtime 定义中立接口，Core 实现并注入。
+- 跨进程契约归 Protocol；Node/Electron 消费者优先使用 client-node。不得把完整配置、认证服务、Registry 或具体 MCP manager 重新传入 Runtime。
+- 参数透传不等于功能生效：Provider 变化验证最终请求，执行规则验证 Runtime 状态与实际副作用；边界改动保留默认值、资源所有权和生命周期验证。
+- 保持现有 CLI 交互契约；`roll chat` 工具确认使用 clack 选择式提示。交互方式变化需用户明确要求或方案先确认。
+- 新增或修改公开行为时同步相关文档；发布型变更按 changeset-workflow 判断版本与 changeset 覆盖。
+
+## 按任务读取
+
+下面的条件指任务实际涉及的行为或契约。修改或审查命中项时，先读取对应文档；跨模块工作读取相关项，范围扩大时补读。纯文字修正按实际需要查阅。
+
+| 任务涉及 | 文档入口 |
+| --- | --- |
+| 包职责、宿主边界、Agent 注册/集成、SDK 公开契约 | [架构与宿主集成](docs/engineering/architecture.md) |
+| 调度状态机、claim/lease、重试/超时、进程树、daemon/service、schedule 命令 | [Scheduler 工程约定](docs/engineering/scheduler.md) |
+| 压缩预算、摘要、checkpoint、历史回查、旧会话与协议兼容 | [上下文压缩契约](docs/engineering/context-compaction.md) |
+| Sampling、Skills、system prompt、工作区指令、Tool Batch、资源锁 | [Chat 与工具执行](docs/engineering/chat-and-tools.md) |
+| 配置发现/迁移、ask 提参、CLI 交互/懒加载、Agent 启动、workspace 依赖 | [Core 接线](docs/engineering/core-integration.md) |
+| 发布、打包、workflow 权限、依赖供应链策略或 npm 发布清单 | [发布供应链约束](docs/engineering/release.md) |
+
+涉及 Changesets、semver、版本 PR 或发布验证时，使用 [changeset-workflow](.agents/skills/changeset-workflow/SKILL.md)。定义或修改类型时，使用下述 typescript-magician。
 
 ## Development Commands
 
@@ -39,130 +63,6 @@ pnpm --filter @roll-agent/smart-reply-agent dev
 **仓库开发环境**：Node.js 下限以根 `package.json#engines` 为准，pnpm 版本以 `package.json#packageManager` 为准；运行命令前核对当前声明与本地工具链。
 发布包大多保持 Node.js ≥22.6.0；Core 启动器会为 Node 22.6–22.12 的 SQLite 命令补
 `--experimental-sqlite`。
-
-## Architecture
-
-### Monorepo 结构（pnpm workspace）
-
-| 包 | 作用 |
-| --- | --- |
-| `packages/core` | CLI（citty）、配置、Registry/Router、MCP/LLM 接线、Runtime/Scheduler/Companion host、React 配置台 |
-| `packages/runtime` | ConversationEngine、AgentSession、ThreadStore、审批策略、Tool Bridge、Runtime Service、scheduler 账本 |
-| `packages/protocol` | Runtime JSON-RPC 协议版本、Schema、事件与交互契约 |
-| `packages/client-node` | Node/Electron Main 使用的 Runtime Client 与 stdio 子进程传输 |
-| `packages/companion` | Local Companion 的 Relay bridge、buffer、Workspace lease 与加密低层库 |
-| `packages/relay-protocol` | Cloud Relay Wire/Control 契约、Schema 与 conformance fixtures |
-| `packages/relay-client` | Browser-safe Relay Client 与短期 session 接入 |
-| `packages/sdk` | 子 Agent 开发 SDK：`defineAgent()` + `defineTool()` |
-| `packages/browser` | 浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore |
-| `packages/reply-authority-client` | Reply Authority 签名 envelope 客户端 |
-| `agents/browser-use` | 浏览器操控 Agent（streamable-http 常驻服务） |
-| `agents/smart-reply` | 智能回复 Agent（stdio 按需模式） |
-| `agents/notify` | 私有通知 Agent（stdio 按需模式） |
-
-### Agent 三层模型
-
-Agent 注册信息由三个维度描述：
-
-- `source`：`local-path` | `git` | `installed-package` | `remote-manifest`
-- `transport`：`stdio` | `streamable-http`
-- `runtime ownership`：`on-demand` | `core-managed` | `external-managed`
-
-Installable Agent 通过 `package.json#rollAgent` 提供 runtime 信息，优先于 `SKILL.md metadata` 的 legacy fallback。
-
-非 Node/TypeScript Agent 的接入说明见：
-
-- `docs/how-to-integrate-non-node-agents.md`
-
-当前推荐：
-
-- 本地工具型 Agent：`stdio + local-path`
-- 常驻服务型 Agent：`streamable-http + external-managed`
-- 非 Node repo 如果不想引入 `package.json`，继续使用 `SKILL.md metadata` 即可
-
-### 双层标准架构
-
-- **描述层**：Agent Skills 标准（SKILL.md frontmatter + body）— 告诉指挥官"我是谁、我会什么"
-- **运行时层**：MCP 协议 — 指挥官实际调用子 Agent（stdio 本地子进程 / Streamable HTTP 服务）
-- **Runtime Manifest**：`package.json#rollAgent` — 告诉指挥官"怎么启动我、怎么连接我"
-
-### CLI 命令树（citty，懒加载子命令）
-
-```
-roll agent add|install|remove|list|start|stop|info|health   Agent 管理
-roll run <agent> <tool> [args]               声明式调用
-roll ask "<message>"                         LLM 智能路由
-roll chat [message]                          会话式入口（Ink TUI；--server 为旧兼容入口）
-roll runtime serve --stdio                   Runtime Protocol stdio 服务
-roll skills list|get|path|install            Skill 发现、读取与安装
-roll browser stop|clear-data                 Browser Runtime 运维
-roll companion <enable|disable|status|...>   Companion daemon / relay 管理
-roll config set|get|init|migrate             配置管理
-roll setup                                   交互式初始配置
-roll ui                                      React 配置台
-roll update [--check]                        更新 roll 及已注册 Agent
-roll schedule add|list|show|remove|pause|resume|run-now|runs|cancel|status|daemon           定时任务
-roll schedule service install|uninstall|restart|status                                      用户级调度服务
-roll doctor                                  系统诊断
-```
-
-### Core 模块
-
-- `cli/` — 命令定义 + 终端 UI 工具（chalk/ora/cli-table3）
-- `registry/` — SKILL.md 解析（gray-matter）、Agent 发现、注册持久化（~/.roll-agent/）
-- `router/` — 声明式路由 + LLM 智能路由
-- `mcp/` — MCP Client 连接池（stdio/HTTP 传输）、Sampling 处理
-- `llm/` — AI SDK Provider 接线与统一模型调用
-- `config/` — roll.config.yaml 加载、Zod 校验、breaking schema migration 检测
-- `runtime-host/` — 动态加载 `@roll-agent/runtime`，把 config/registry/MCP 依赖注入 Runtime
-- `scheduler-host/` — daemon、exec 子进程、进程树探活、用户服务与 admission lock
-- `companion-host/` — Companion daemon、Relay 与本机 Runtime bridge
-- `skills/` — Skill 发现、优先级、渐进式加载与告警
-- `tool-runtime/` — 声明式 Tool 调用、preflight 与参数提取
-- `ui/`、`packages/core/ui/` — 配置台服务端接线与 React 前端
-
-### Runtime / Protocol ownership
-
-Core/Runtime 拆分的目标是让 Runtime 可由不同宿主独立嵌入和测试。Core 是 Roll 的产品与宿主接线层，
-Runtime 是可复用的执行内核；新增功能必须继续保持这个边界。
-
-**代码依赖方向：`Core → Runtime → Protocol / 第三方基础库`。** Runtime 的源码、类型、测试和包依赖
-不得反向依赖 Core。需要宿主能力时，由 Runtime 定义中立契约，Core 实现并注入；Runtime 调用
-注入的宿主接口不构成反向包依赖。
-
-- **Runtime 行为与持久化**放在 `packages/runtime`：Engine、Session、Tool execution、ThreadStore、
-  scheduler state machine。
-- **产品与宿主集成**放在 `packages/core`：CLI/UI、完整配置解析、账号/凭证、Provider 创建与协议适配、
-  模型能力发现、Agent Registry、MCP connection、daemon/service 和 process identity。
-- **进程内注入契约**由 Runtime 的 `host-contracts`、`tool-contracts`、`skills` 等公开出口提供。
-  `ConversationEngine` 接收 `RuntimeSettings`、模型和 `AgentHost` 等依赖；Core 的
-  `runtime-host/engine-factory.ts` 将 `RollConfig` 显式投影为执行设置。不得把完整配置、认证服务、
-  Registry 或具体 MCP manager 重新传入 Runtime。
-- **跨进程公开契约**放在 `packages/protocol`；Node/Electron 消费者优先使用
-  `packages/client-node`，不要直接复刻 JSON-RPC payload。
-
-新增功能按语义归属拆分：
-
-| 变化 | 归属与接线 |
-| --- | --- |
-| 某个 Provider 的认证、能力或请求字段，如 ChatGPT Fast / `service_tier` | Core 校验并适配，通过现有模型与 `providerOptions` 注入 Runtime；不向 Runtime 添加供应商专用分支 |
-| 通用的轮次执行、取消、预算、压缩、审批或持久化规则 | Runtime 实现；需要外部资源时定义宿主契约并由 Core 注入 |
-| CLI/UI 偏好、配置发现与默认值 | Core 维护，再映射成 Runtime 所需的执行参数；`runtime.*` 配置前缀不决定代码包归属 |
-| 宿主间共享的请求、响应和事件格式 | Protocol 定义，宿主通过公开客户端消费 |
-
-参数透传不等于功能已经生效。Provider 功能需验证适配器最终发出的请求；通用执行规则需验证 Runtime
-状态与实际副作用。修改边界时同步更新契约、Core 映射及调用方，并保留默认值等价、资源所有权与生命周期测试。
-API 迁移与宿主约束见 [Runtime 宿主 API 迁移](docs/runtime-core-api-migration.md)，
-依赖迁移依据见 [Core/Runtime 依赖迁移表](docs/core-runtime-dependency-migration.md)。
-
-### SDK 公开 API
-
-```typescript
-import { defineAgent, defineTool } from "@roll-agent/sdk";
-// 类型：AgentContext, ToolDefinition, AgentDefinition, AnyToolDefinition
-```
-
-`AnyToolDefinition` 用于异构 tool 集合（类型擦除），`ToolDefinition<TInput, TOutput>` 保留泛型类型安全。
 
 ## TypeScript 约束
 
@@ -197,232 +97,12 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 - `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts，无 source map）
 - 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
 
-## 关键架构洞察
-
-### `roll schedule` 分层与安全边界
-
-- `packages/runtime/src/scheduler/` 持有 `ScheduleStore`（`schedules.db`）、trigger、claim/lease、
-  retry、单例与终态状态机；不要把业务能力或 OS 进程管理放进 Store。
-- `packages/core/src/scheduler-host/` 持有 daemon、exec spawn、PID/start-token 探活、进程树清场、
-  service metadata 与用户级 admission lock；CLI 命令只做参数/展示与 host 编排。
-- scheduler 不补齐所有错过周期：最多触发一次并从 claim 时刻重新锚定；同一 schedule 的 scheduled
-  与 manual invocation 共用单例门禁。
-- 终态与单例释放必须 fail-closed：executor/tree 为 `alive`、`descendants-alive`、`unknown` 或
-  metadata 无法解析时保持占用；只有证明 tree dead/settled 或显式 `--abandon` 才释放。
-- `retry + 未清进程树` 仍占单例。Service restart/update 必须通过用户级 admission 阻止新 claim，
-  replacement 以 `installing + replacementFrom + generation` 持久化恢复身份。
-- `roll schedule add --max-run` 是每任务上限（60s–24h，缺省 1h）；timeout 终态重分类必须使用
-  original attempt + `timedOutAtMs` CAS，避免覆盖时限内成功或后续 attempt。
-- Scheduler 的完整操作与平台边界见 `docs/how-to-schedule-tasks.md`。
-
-### Sampling Handler（子 Agent 借用指挥官 LLM）
-
-子 Agent 通过 MCP Sampling 协议回调指挥官的 LLM。流程：
-1. 指挥官在 `McpClientManager` 连接子 Agent 时注册 `CreateMessageRequestSchema` handler
-2. 子 Agent 调用 `server.createMessage()` → MCP 协议转发到指挥官
-3. 指挥官的 `sampling-handler.ts` 用 AI SDK `generateText()` 完成推理，返回结果
-
-这使子 Agent 无需自带 LLM 配置，解耦了 LLM 提供商与子 Agent。
-
-### SKILL.md body 参与 LLM 路由
-
-SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `llm-router.ts` 拼入 Agent 能力描述，供 LLM 理解 Agent 具体能做什么。编写 SKILL.md 时需注意 body 质量。
-
-### roll chat 的 Skills 接入与 system prompt
-
-chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll 私有约定）：
-
-- **发现**：`packages/core/src/skills/library.ts` 的 `createSkillLibrary()` 自动发现项目级 `.agents/skills/*/SKILL.md`（从 cwd 向上查找）+ 用户级 `~/.agents/skills/` + 已注册 Agent 的 SKILL.md + config `skills.dirs` 补充目录；重名按 agent > project > user > config 优先级去重
-- **加载告警**：`roll chat` 普通 CLI 与 `--server` JSON-RPC 模式都必须传 `onSkillLibraryIssue`，把 malformed SKILL.md、重名或读取失败等问题写到 stderr，不能静默丢 skill
-- **渐进式披露**：`ConversationEngine` 把 skill 目录（name + description）注入 system prompt，模型按需调用内建只读工具 `roll__skill`（`packages/runtime/src/tool-bridge/skill-tool.ts`）加载正文或 `references/` 文件；skill 工具不经 policy 确认门
-- **手动指定**：Ink TUI 的 `/` 弹窗把内置命令和可加载 skill 合并展示；`/skills` 列出全部 skill；`/<skill-name> [/<skill-name> ...] 用户请求` 由 `AgentSession` 在首次推理前直接加载主 Skill，并作为仅模型可见的 user/context 内容注入，核心 system prompt 权限不变，用户历史仍保留原始 slash 输入；同一 Turn 的 context-overflow 重放复用同一份 Skill 快照。主文档不再浪费一次 `roll__skill` Tool Call，只有按需读取 `references/` 时才调用该工具；未知 Skill 在模型调用前失败。基础 REPL 也支持 `/skills` 和 skill 前缀
-- **system prompt**：`packages/runtime/src/engine/system-prompt.ts` 的 `buildChatSystemPrompt()` 组装身份、工具接地纪律（禁止无工具结果声称完成）、任务推进、Skills 目录、输出通道规则。修改 chat 行为指导时改这里，不要在 `agent-session.ts` 里散落字符串
-- **工作区工程约定**：`packages/runtime/src/engine/workspace-instructions.ts` 从 cwd 向上找最近一层 `AGENTS.md`（优先）/ `CLAUDE.md`，每轮按 mtime/size 缓存刷新；`system-prompt.ts` 的 `# 工作区工程约定` 段在 `# 输出` 之后；`ConversationEngine` 按 `chat.instructions`（auto | off | path）构造 source，三入口共用；告警走 `onWorkspaceInstructionsIssue` → stderr
-- **测试封闭性**：引擎/会话测试需传 `skillLibrary: null`（引擎）或不传 `skillLibrary`（会话）避免读取真实 `~/.agents/skills`；需要隔离工作区约定时引擎传 `workspaceInstructions: null`（会话不传 `workspaceInstructions`）
-
-### 长上下文压缩契约
-
-- 默认压缩路径是有界任务摘要、近期原文与按需历史回查。摘要是有损历史上下文，不是 system 指令、审批凭据或工具执行事实源。
-- 每次维护最多一次摘要调用，禁用隐式重试；保留当前用户输入和完整 Tool call/result 步骤。超时、取消、空摘要或候选没有实际缩减时不替换原上下文。
-- 完整 SDK 请求决定预算准入。75% 为软触发阈值；失败后仍能满足硬预算则继续，不能满足则明确结束本轮。整轮 deadline、maxSteps 和已完成工具执行不重置。
-- V3 checkpoint 与 active messages 经事务/CAS 原子提交；必须用最终待提交 checkpoint 验证完整变化投影确实缩小。原始 transcript 与 Tool ledger 保留，遵循既有脱敏/retention。
-- `roll__transcript` 是只读、按需回查工具；按 checkpoint 分页，长条目用 sequence/offset/maxChars，跟进 nextOffset。较早片段通过 previousCheckpointId 继续回查。没有 ready、receipt 或恢复门禁。
-- V1/V2 会话复用有界 checkpoint 提示打开，首次压缩复用普通 V3 摘要路径；不拼接或要求完整旧上下文。旧 checkpoint、账本与恢复备注通过 `roll__transcript` 的 `legacy_context` 分页/分块回查，沿 previousCheckpointId 访问。仅把将移出 active 且尚未存入 transcript 的旧摘要片段原子补存为 legacy_snapshot；旧表不删除。
-- 旧来源因 retention 缺失只影响该记录的回查，不阻断会话打开或正常压缩；不能据此推断未授权或未执行。数据库仍为 v11，未知高版本拒绝打开、已知损坏 checkpoint 回退与事务失败回滚规则保留。
-- Runtime 1.6 / Relay 1.3 旧事件仍可解析与重放；新会话不广播恢复生命周期，快照 contextRecovery 为 null。Relay Wire 1.3 仍须协调服务端升级，默认保持 1.2。
-
-### 日志输出约定
+## 日志输出约定
 
 - **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）
 - **stderr** — 所有日志、状态信息、彩色输出（chalk/ora）
 
 这是为了避免 stdio 模式下日志干扰 MCP 协议通信。SDK 的 `AgentLogger` 也遵循此规则。
-
-### `roll chat` Tool Batch 资源提示
-
-`AgentSession` 会先按模型返回顺序完成整批 Tool 的参数校验、policy 与用户确认，再并行执行无资源冲突的调用。MCP Tool 可通过 `_meta["roll/resourceHints"]` 显式声明输入字段对应的资源：
-
-```json
-{
-  "_meta": {
-    "roll/resourceHints": [
-      { "field": "path", "kind": "file" },
-      { "field": "sessionId", "kind": "browser-session" },
-      { "field": "conversationId", "kind": "conversation" }
-    ]
-  }
-}
-```
-
-使用 `@roll-agent/sdk` 时优先直接在 `defineTool()` 中声明等价的 `resourceHints`；SDK 会把它透传为上述 MCP `_meta`：
-
-```ts
-defineTool({
-  // ...
-  annotations: { destructiveHint: true },
-  resourceHints: [{ field: "path", kind: "file", mode: "write" }],
-});
-```
-
-- `field` 只读取 tool input 的顶层字段，值可为单个字符串/数字或数组
-- `file` 会先转为规范化绝对路径；stdio Agent 的相对路径以其 `installPath` 为基准，无法确定远端基准时回退 Agent 级锁
-- `browser-session`、`conversation` 按稳定 ID 建锁；`custom` 还需提供 `namespace`
-- `mode` 可显式设为 `read` / `write`；省略时按 MCP `readOnlyHint` / `destructiveHint` 推导
-- 未声明提示或运行时没有解析出资源值时，保守回退为 `agent:<name>` 级锁；不会猜测任意业务字段
-
-后台 `exec_command` 的进程在 Tool 返回后仍可能继续运行，P0 锁只覆盖 Tool 调用生命周期，不承诺跨后台进程生命周期的文件隔离；长生命周期副作用恢复属于 Semantic WAL 范围。
-
-### CLI 交互约定
-
-- 不要随意改变已有 CLI 交互方式；交互形态也是产品契约的一部分。
-- `roll chat` 的工具确认交互应保持 `clack` 选择式提示（键盘方向键选择，回车确认），不要改成裸 `y/N` 输入，除非用户明确要求或方案已先确认。
-- 如果为了 REPL/stdin 复用重构确认逻辑，必须保持用户可见交互不变，并补充测试覆盖确认后输入流仍可继续使用。
-
-### 配置文件发现链
-
-`loadConfig()` 按以下优先级查找配置：
-1. `--config` 显式路径
-2. 从 `cwd` 向上逐级查找 `roll.config.yaml` / `roll.config.yml`
-3. 回退到内置默认配置
-
-加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 迁移检测（命中则提示 `roll config migrate`）→ 深度合并默认值 → Zod 校验 → `~/` 路径展开。
-
-Agent 管理命令（start/stop/health/list 等）使用 `loadAgentsConfig()` 只解析 `agents` 段，不应被无关的全局 schema breaking change 误伤。
-
-### 配置迁移（Breaking Schema Change）
-
-- breaking config schema change 不恢复旧字段兼容，而是通过 `config/migration.ts` 注册迁移规则
-- `roll config migrate` 负责备份原文件并应用最小自动迁移
-- `roll doctor` 与 `roll update --check` 会报告“配置需要迁移”状态
-- `roll update` 不隐式改写用户配置，只在升级前后输出高可见提醒
-
-### `roll ask` 两阶段调用与 Tool Schema 语义不可篡改原则
-
-`roll ask` 将自然语言转为 tool 调用，分两阶段：
-
-1. **路由阶段**（`llm-router.ts`）— LLM 只选择 agent + tool，不提取参数
-2. **提参阶段**（`extraction-schema.ts` / `argument-extractor.ts`）— LLM 按 tool `inputSchema` 提取参数，preflight 校验后再调用
-
-**核心原则：extraction schema 不得改写原始 tool `inputSchema` 的类型语义。**
-
-- 原始 `inputSchema` 是 MCP tool 的契约，preflight 和 `callTool()` 始终以它为准
-- extraction schema 只做“适配 LLM structured output”的变换，例如 `additionalProperties: false`、provider 兼容的 `required` 处理
-- **不可提取的字段必须剔除，不得降级类型**。例如 `z.record()` 这类开放 object 无法从自然语言可靠提取，应从 extraction schema 中移除，让 preflight 返回 `needs_input` / `requires_explicit_input`
-- 这类参数由 `roll run --input-json` 或上层编排器显式提供
-
-**禁止的反模式：** 为兼容某个 provider 的 structured output 限制，把合法 tool 输入的 schema 类型从 `object` 改成 `string`。这会导致 extraction 产出的类型与 preflight 期望的类型前后不一致，让一整类合法 MCP tool 在 `roll ask` 下不可用。
-
-### CLI 懒加载
-
-citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。
-
-#### CLI 懒加载发布坑（必读）
-
-- 历史问题：全局安装后执行 `roll agent health` 报错 `Cannot find module .../agent-health.ts`
-- 本质原因：`tsc` 的 `rewriteRelativeImportExtensions` 对动态 `import()` 的改写并不总是可靠，某些懒加载写法会在 `dist` 中残留 `.ts` specifier，运行时（只存在 `.js`）直接崩溃
-- 编码规则：不要在懒加载点直接写死 `import("./xxx.ts")`；统一用 helper 根据 `import.meta.url` 推断当前后缀（`.ts/.js`），再拼接并 `import()`
-- 发布前校验：必须执行 `pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js agent health`，无已注册 agent 时输出“暂无已注册 Agent”即通过
-
-### 本地开发态启动回退（Dev Spawn Fallback）
-
-`pnpm dev` 下 roll-core spawn 子 Agent 时读 `package.json#rollAgent.start`（`node dist/index.js`），但 workspace 内 SDK exports 指向 `.ts` 源码，裸 `node` 无法处理。`registry/dev-spawn.ts` 在 spawn 前自动检测并回退：
-
-- 仅 `local-path` / `git` source 生效；`installed-package` / `remote-manifest` 跳过
-- 仅 `node` + 单参数 `dist/*.js` + 对应 `src/*.ts` 存在时触发
-- 覆盖 on-demand stdio（run/ask/update）和 core-managed（process-manager）两条路径
-
-## Workspace 依赖解析
-
-SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 `smart-reply-agent`）无需先构建 SDK 即可获得类型。
-
-## Configuration
-
-`roll.config.yaml` — YAML 格式，支持 `${ENV_VAR}` 环境变量引用。Zod schema 定义在 `packages/core/src/config/schema.ts`。
-
-## Release & Versioning
-
-使用 [Changesets](https://github.com/changesets/changesets) 管理版本和发布：
-
-```bash
-pnpm changeset
-pnpm version-packages
-pnpm release-packages
-pnpm release-github-releases
-```
-
-工作流：功能 PR 附带 `.changeset/*.md` → 合入 `main` → GitHub Action 自动创建 release PR（通常标题为 `chore: version packages`）→ 合并该 PR → 自动 publish → 自动创建 GitHub Releases。
-
-### 发布供应链防护检查清单
-
-每个新的 package version 被 publish 前，都必须按以下链路检查：
-
-```
-声明层 -> CI 权限层 -> 依赖解析层 -> 构建层 -> tarball 审计层 -> npm 发布层 -> GitHub Release 层
-```
-
-| 层级 | 必查点 | 代码/配置位置 | 失败处理 |
-|------|------|------|------|
-| 声明层 | 发布包必须属于当前 npm scope，权威白名单由 `scripts/published-packages.mjs` 统一维护；当前包含 `@roll-agent/core`、`@roll-agent/runtime`、`@roll-agent/protocol`、`@roll-agent/relay-protocol`、`@roll-agent/relay-client`、`@roll-agent/client-node`、`@roll-agent/companion`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/published-packages.mjs`、`scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；新增发布包必须同步 tarball 审计 |
-| CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
-| CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release_pr` 只给 `contents: write` + `pull-requests: write`；`npm_publish` 只给 `contents: read` + `id-token: write`；`github_releases` 只给 `contents: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限；不要把 OIDC 与 GitHub 写权限塞进同一 job |
-| CI 权限层 | npm 发布使用 Trusted Publishing（OIDC），`npm_publish` 必须持有 `id-token: write`；workflow 不得注入 `NPM_TOKEN` / `NODE_AUTH_TOKEN` | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | publish job 禁止 `setup-node` 的 `registry-url`（会写入空 `_authToken` 并短路 OIDC） |
-| token 暴露层 | install/build/test/verify/publish 全程不得注入长期 npm publish token；`release-packages.mjs` 必须剥离 `NPM_TOKEN` / `NODE_AUTH_TOKEN` 等密钥后再跑 | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | 发现 token 回流时立刻移除 |
-| token 暴露层 | GitHub Release 创建必须放在 npm publish 成功后的独立 job，只注入 GitHub token，不能注入 npm 凭证 | `.github/workflows/release.yml`、`scripts/create-github-releases.mjs` | 不把 npm 发布权限和 GitHub 写权限交给同一个 job / 第三方 action |
-| 依赖解析层 | 使用 `pnpm install --frozen-lockfile`，发布前不能隐式刷新 lockfile | `.github/workflows/*.yml` | lockfile 不一致时先本地审查依赖变化 |
-| 依赖解析层 | `minimumReleaseAge: 10080` 必须保留，新解析依赖至少发布满 7 天 | `pnpm-workspace.yaml` | 不能为了临时升级绕过冷却期 |
-| 依赖解析层 | `blockExoticSubdeps: true` 必须保留，阻断传递依赖使用 git/tarball 等 exotic source | `pnpm-workspace.yaml` | 需要例外时先做人工供应链审计 |
-| 依赖解析层 | `savePrefix: ""` 必须保留，新加依赖默认保存精确版本 | `pnpm-workspace.yaml` | 不机械移除既有 range，但新增依赖应 exact |
-| 依赖解析层 | 依赖 denylist 必须包含已知恶意坐标，包括 Shai-Hulud `keyv` 家族坏版本（如 `keyv@6.0.0`） | `scripts/verify-dependency-denylist.mjs` | 命中即失败；不能为了升级依赖而删坐标 |
-| build script 层 | `strictDepBuilds: true` 必须保留，未审查的 dependency lifecycle 安装失败；`allowBuilds` denylist 必须显式拒绝当前已知 dependency build scripts，例如 `esbuild`、`unrs-resolver` | `pnpm-workspace.yaml` | 新增 build script 先审计再决定是否允许 |
-| 发布 job 层 | `release_pr` / `npm_publish` / `github_releases` 均不能启用 `cache: pnpm`；`quality` job 可以保留 cache | `.github/workflows/release.yml` | 发布相关 job 发现缓存时必须删除 |
-| 发布命令层 | CI publish 必须走 `pnpm release-packages` / `node scripts/release-packages.mjs`，不能直接裸跑 `changeset publish` | `package.json`、`scripts/release-packages.mjs` | 保证 publish 前置校验不会被跳过 |
-| 发布命令层 | `scripts/release-packages.mjs` 仅允许在 GitHub Actions OIDC 环境发布（校验 `GITHUB_ACTIONS` + `ACTIONS_ID_TOKEN_*`）；不得再写临时 `.npmrc` token | `scripts/release-packages.mjs` | 本地只能 `--dry-run`；真实发布走 Trusted Publisher |
-| GitHub Release 层 | npm publish 成功后必须运行 `node scripts/create-github-releases.mjs`，为当前已发布包版本补齐 GitHub Release | `.github/workflows/release.yml`、`scripts/create-github-releases.mjs` | 不能只发布 npm 而丢失 GitHub Releases |
-| tarball 审计层 | packed manifest 禁止 `preinstall`、`install`、`postinstall`、`prepare` lifecycle | `scripts/verify-published-packages.mjs` | 命中即失败，禁止发布 |
-| tarball 审计层 | packed files 禁止已知可疑文件名：`router_init.js`、`router_runtime.js`、`tanstack_runner.js`、`setup.mjs`、`Math_Symbol.js`、`math_init.js`、`gh-token-monitor` | `scripts/verify-published-packages.mjs` | 命中即失败，先定位来源 |
-| tarball 审计层 | packed text 必须扫描已知 IoC：`IfYouRevoke`、`toJSON(secrets)`、`.claude/settings`、`.vscode/tasks`、`@tanstack/setup`、`filev2.getsession` | `scripts/verify-published-packages.mjs` | 命中即失败，不能人工忽略 |
-
-发布前最小验证命令：
-
-```bash
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm test:scripts
-pnpm test:e2e
-pnpm build
-pnpm verify:published-packages
-node scripts/release-packages.mjs --dry-run
-node scripts/create-github-releases.mjs --dry-run
-```
-
-边界条件：
-
-- 这套防护不替代 npm Trusted Publisher 配置、org 2FA enforcement、GitHub App 权限收敛和分支保护。每个发布包都需在 npm 单独配置 Trusted Publisher（workflow=`release.yml`）。
-- 这套防护不要求每次发布新增人工审批，`Changesets -> release PR -> merge -> OIDC npm publish -> GitHub Releases` 体验保持不变。
-- 这套防护不要求机械移除所有既有 `^` / `~`，但新增依赖默认必须 exact。
-- 这套防护不覆盖发布后的 runtime 行为审计；它只阻断 CI 依赖解析、发布 job、packed tarball 和 npm publish 链路中的高风险入口。
 
 ## Testing
 
@@ -435,10 +115,16 @@ node scripts/create-github-releases.mjs --dry-run
 - ESM Only：`"type": "module"`，使用 `import.meta.dirname` 替代 `__dirname`
 - CLI 参数命名一律使用 `kebab-case`（如 `--input-json`、`--input-file`），citty 内部自动转为 camelCase 访问。`--help` 输出中呈现的参数名必须是 kebab-case
 
+## 维护这些约定
+
+- 根文件保留稳定的核心规则、常用命令和任务入口；实现细节与完整示例维护在对应专题。
+- 新增或搬移约定时同步入口与相对链接，核对规则没有遗漏，并检查根文件字节数，为加载预算留余量。
+- 专题是按需读取的完整契约；不要把同一份详细清单复制到多处。可自动检查的规则优先由现有 lint、测试或 CI 执行。
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (36722 symbols, 102116 relationships, 1047 execution flows).
+This project is indexed by GitNexus as **roll-agent**. Check the live index for freshness and statistics.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 

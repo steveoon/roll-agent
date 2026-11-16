@@ -1,0 +1,147 @@
+{
+  "date": "2026-11-13",
+  "environment": {
+    "platform": "darwin",
+    "node": "v24.22.3",
+    "pnpm": "11.24.0",
+    "hc": "0.1.21",
+    "herdrApp": "0.1.15"
+  },
+  "driver": "packages/core/src/cli/chat/ink/fixtures/herdr-review.e2e-harness.ts",
+  "scope": "Real AgentSession and production frontends/reporter with offline MockLanguageModelV4; not a real Provider test. Values below are selected fields read from hc get and herdr-app ls, not reconstructed OSC writes.",
+  "timeoutMatrix": [
+    {
+      "terminal": "t8",
+      "frontend": "ink",
+      "scenario": "model",
+      "submittedStatusMs": 1794564670962,
+      "finalStatusMs": 1794564675977,
+      "finalState": "error",
+      "turn": 1,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t9",
+      "frontend": "ink",
+      "scenario": "permission",
+      "submittedStatusMs": 1794564671201,
+      "blockedStatusMs": 1794564671242,
+      "finalStatusMs": 1794564676215,
+      "finalState": "error",
+      "turn": 2,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t10",
+      "frontend": "basic",
+      "scenario": "model",
+      "submittedStatusMs": 1794564671436,
+      "finalStatusMs": 1794564676458,
+      "finalState": "error",
+      "turn": 1,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t11",
+      "frontend": "basic",
+      "scenario": "permission",
+      "submittedStatusMs": 1794564671674,
+      "blockedStatusMs": 1794564671710,
+      "finalStatusMs": 1794564676706,
+      "finalState": "error",
+      "turn": 2,
+      "exitCode": 0,
+      "exitRootStatus": null
+    }
+  ],
+  "finalSourceTimeoutRepeat": [
+    {
+      "terminal": "t14",
+      "frontend": "ink",
+      "scenario": "model",
+      "finalStatusMs": 1794565486744,
+      "finalState": "error",
+      "turn": 1,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t15",
+      "frontend": "ink",
+      "scenario": "permission",
+      "finalStatusMs": 1794565486973,
+      "finalState": "error",
+      "turn": 2,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t16",
+      "frontend": "basic",
+      "scenario": "model",
+      "finalStatusMs": 1794565487178,
+      "finalState": "error",
+      "turn": 1,
+      "exitCode": 0,
+      "exitRootStatus": null
+    },
+    {
+      "terminal": "t17",
+      "frontend": "basic",
+      "scenario": "permission",
+      "finalStatusMs": 1794565487400,
+      "finalState": "error",
+      "turn": 2,
+      "exitCode": 0,
+      "exitRootStatus": null
+    }
+  ],
+  "userCancellation": {
+    "terminal": "t13",
+    "frontend": "ink",
+    "input": "Esc during real pending inference",
+    "statusMs": 1794564760359,
+    "rootStatus": { "app": "roll", "state": "idle" },
+    "turn": 1,
+    "exitCode": 0,
+    "exitRootStatus": null
+  },
+  "sameTurnViewing": [
+    {
+      "observedAt": "2026-11-13T10:12:55.684997Z",
+      "terminal": "t12",
+      "turn": 1,
+      "rootStatusMs": 1794564765739,
+      "rootStatus": { "app": "roll", "state": "done" },
+      "herdrSeen": "0",
+      "appStatus": "done",
+      "focusedTerminal": "t13",
+      "visual": "Done 1 group, blue dot on roll-review-success tab and Agent row"
+    },
+    {
+      "observedAt": "2026-11-13T10:13:12.377237Z",
+      "terminal": "t12",
+      "turn": 1,
+      "rootStatusMs": 1794564765739,
+      "rootStatus": { "app": "roll", "state": "done" },
+      "herdrSeen": "1",
+      "appStatus": "idle",
+      "focusedTerminal": "t12",
+      "visual": "Success row moves to Idle; blue dot cleared"
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "herdr-2026-11-13-unseen-full.png",
+      "sha256": "cce0d4420c0e8062b8091f944b9f064cb06868f7733d87e351097f3cce92c6a6"
+    },
+    {
+      "path": "herdr-2026-11-13-viewed-full.png",
+      "sha256": "b93268dc391c33acc2db63c62e978be32febed747d1af0241448b4c795d36dd3"
+    }
+  ],
+  "cleanup": "t8 through t17 exited with code 0 and root status null before removal. Original tab and t3 focus restored. No user terminal received test keys."
+}

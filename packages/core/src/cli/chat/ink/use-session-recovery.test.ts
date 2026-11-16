@@ -8,6 +8,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { AgentSession } from "@roll-agent/runtime";
 import { useSession } from "./use-session.ts";
+import { createTerminalAgentStatus } from "../terminal-agent-status.ts";
 
 afterEach(() => cleanup());
 
@@ -54,9 +55,20 @@ test("useSession flushes buffered deltas before recovery and never resurrects th
     maxSteps: 4,
     modelRecovery: { isRecoverable: (error) => error === offline, prepare: async () => {} },
   });
+  const statuses: string[] = [];
+  const terminalAgentStatus = createTerminalAgentStatus({
+    enabled: true,
+    write: (s) => {
+      statuses.push(s);
+    },
+  });
   let current: ReturnType<typeof useSession> | undefined;
   function Harness() {
-    current = useSession(session, { model: "fixture", contextWindow: undefined });
+    current = useSession(session, {
+      model: "fixture",
+      contextWindow: undefined,
+      terminalAgentStatus,
+    });
     return null;
   }
   const view = render(h(Harness));
@@ -74,6 +86,10 @@ test("useSession flushes buffered deltas before recovery and never resurrects th
     assert.equal(current.state.history.filter((item) => item.kind === "user").length, 1);
     assert.equal(current.state.history.filter((item) => item.kind === "error").length, 0);
     assert.match(JSON.stringify(current.state.history), /final-answer/);
+    assert.deepEqual(statuses, [
+      "\u001B]7501;state=working:app=roll\u001B\\",
+      "\u001B]7501;state=done:app=roll\u001B\\",
+    ]);
   } finally {
     view.unmount();
     await session.close();

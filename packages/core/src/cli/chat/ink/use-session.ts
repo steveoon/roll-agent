@@ -1,3 +1,9 @@
+import {
+  terminalAgentOutcomeAfterEvent,
+  type TerminalAgentStatus,
+  type TerminalAgentTurn,
+  type TerminalAgentOutcome,
+} from "../terminal-agent-status.ts";
 import { randomUUID } from "node:crypto";
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { AgentSession, SessionAttachment, SessionEvent } from "@roll-agent/runtime";
@@ -16,6 +22,7 @@ import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
+  readonly terminalAgentStatus?: TerminalAgentStatus;
   readonly beforeSend?: (signal: AbortSignal) => Promise<void>;
   readonly onPreparationCancelled?: () => void;
   readonly model: string;
@@ -85,6 +92,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
   const preparationRef = useRef<AbortController | undefined>(undefined);
+  const terminalAgentStatus = options.terminalAgentStatus;
   const beforeSend = options.beforeSend;
   const onPreparationCancelled = options.onPreparationCancelled;
 
@@ -92,6 +100,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     session.setUserInputAvailable?.(true);
     return () => {
       preparationRef.current?.abort();
+      decisionRef.current?.({ approved: false });
       userInputDecisionRef.current?.resolve({
         status: "cancelled",
         reason: "用户输入界面已关闭",
@@ -102,7 +111,12 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   }, [session]);
 
   const drive = useCallback(
-    async (iterable: AsyncIterable<SessionEvent>) => {
+    async (
+      iterable: AsyncIterable<SessionEvent>,
+      statusTurn: TerminalAgentTurn | undefined,
+      preparationSignal?: AbortSignal,
+    ) => {
+      let outcome: TerminalAgentOutcome = "completed";
       let pendingDelta: StreamDeltaEvent | undefined;
       let flushTimer: ReturnType<typeof setTimeout> | undefined;
       const flushPending = () => {
@@ -141,6 +155,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
       };
       try {
         for await (const event of iterable) {
+          outcome = terminalAgentOutcomeAfterEvent(outcome, event);
           if (event.type === "debug") {
             log.debug(formatDebugEvent(event));
             continue;
@@ -151,17 +166,57 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           }
           flushPending();
           if (event.type === "confirmation-required") {
+            const deadlineMs =
+              event.expiresAt === undefined ? undefined : Date.parse(event.expiresAt);
+            if (deadlineMs !== undefined && !Number.isFinite(deadlineMs)) {
+              session.reject(event.approvalId, "审批请求截止时间无效");
+              continue;
+            }
+            if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+              session.reject(event.approvalId, "审批请求已超时");
+              continue;
+            }
             if (autoModeRef.current) {
               session.approve(event.approvalId);
               continue;
             }
+            let expired = false;
             const decisionPromise = new Promise<ConfirmDecision>((resolve) => {
-              decisionRef.current = resolve;
+              let settled = false;
+              let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+              const settle = (decision: ConfirmDecision): void => {
+                if (settled) return;
+                settled = true;
+                expired = deadlineMs !== undefined && Date.now() >= deadlineMs;
+                if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+                if (decisionRef.current === settle) decisionRef.current = null;
+                resolve(expired ? { approved: false } : decision);
+              };
+              const scheduleExpiry = (): void => {
+                if (deadlineMs === undefined) return;
+                const remainingMs = deadlineMs - Date.now();
+                if (remainingMs <= 0) settle({ approved: false });
+                else {
+                  // Wake just after the millisecond ISO boundary, not before the
+                  // Runtime's own deadline; settle still rejects exact-boundary Yes.
+                  expiryTimer = setTimeout(
+                    scheduleExpiry,
+                    Math.min(remainingMs + 1, 2_147_483_647),
+                  );
+                }
+              };
+              decisionRef.current = settle;
+              scheduleExpiry();
             });
-            dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
+            if (!expired) {
+              dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
+              statusTurn?.wait("permission");
+            }
             const decision = await decisionPromise;
-            decisionRef.current = null;
-            if (decision.approved) {
+            statusTurn?.resume();
+            if (expired || (deadlineMs !== undefined && Date.now() >= deadlineMs)) {
+              session.reject(event.approvalId, "审批请求已超时");
+            } else if (decision.approved) {
               session.approve(event.approvalId, decision.scope);
             } else {
               session.reject(event.approvalId, "用户取消");
@@ -192,7 +247,9 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
                 requestId: event.requestId,
                 resolve: settle,
               };
+              if (remainingMs > 0) statusTurn?.wait("question");
             });
+            statusTurn?.resume();
             if (userInputDecisionRef.current?.requestId === event.requestId) {
               userInputDecisionRef.current = null;
             }
@@ -207,6 +264,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       } catch (error) {
+        outcome = preparationSignal?.aborted === true ? "cancelled" : "failed";
         flushPending();
         dispatch({
           type: "session-event",
@@ -218,6 +276,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         flushPending();
         dispatch({ type: "turn-end" });
         busyRef.current = false;
+        statusTurn?.finish(outcome);
       }
     },
     [session],
@@ -229,6 +288,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         return;
       }
       busyRef.current = true;
+      const statusTurn = terminalAgentStatus?.beginTurn();
       dispatch({
         type: "submit-user",
         id: randomUUID(),
@@ -248,7 +308,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             }
           : text;
       if (!beforeSend) {
-        drive(session.send(input)).catch(() => undefined);
+        drive(session.send(input), statusTurn).catch(() => undefined);
         return;
       }
       const preparation = new AbortController();
@@ -266,9 +326,9 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         }
         yield* session.send(input);
       }
-      drive(preparedTurn()).catch(() => undefined);
+      drive(preparedTurn(), statusTurn, preparation.signal).catch(() => undefined);
     },
-    [drive, session, beforeSend, onPreparationCancelled],
+    [drive, session, beforeSend, onPreparationCancelled, terminalAgentStatus],
   );
 
   const compact = useCallback(() => {
@@ -277,8 +337,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     }
     busyRef.current = true;
     dispatch({ type: "start-compaction" });
-    drive(session.compact("manual")).catch(() => undefined);
-  }, [drive, session]);
+    drive(session.compact("manual"), terminalAgentStatus?.beginTurn()).catch(() => undefined);
+  }, [drive, session, terminalAgentStatus]);
 
   const cancel = useCallback(() => {
     if (!busyRef.current) {
@@ -290,6 +350,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
       return;
     }
     if (session.cancel()) {
+      decisionRef.current?.({ approved: false });
       dispatch({ type: "cancel-requested" });
     }
   }, [session]);

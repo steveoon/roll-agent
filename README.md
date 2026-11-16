@@ -80,7 +80,7 @@ roll --help
 - `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
 - 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
 - `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
-- `roll chat` 已提供 experimental 多轮会话：支持 Agent tool 编排、session 持久化/恢复、Skills、thinking 档位切换与执行中 Esc 中断。
+- `roll chat` 已提供 experimental 多轮会话：支持 Agent tool 编排、session 持久化/恢复、Skills、thinking 档位切换与执行中 Esc 中断。在 Herdr 中可自动上报 Agent 状态，详见 [Herdr 集成说明](docs/how-to-use-herdr.md)。
 - `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
 
 ### 1. 初始化配置

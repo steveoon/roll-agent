@@ -1,3 +1,4 @@
+import type { TerminalAgentStatus } from "../terminal-agent-status.ts";
 import { ConnectionNotice } from "./connection-notice.ts";
 import { runFastModeCommand, type ChatFastModeControl } from "../fast-mode.ts";
 import type { ChatNotice } from "../notice.ts";
@@ -102,6 +103,7 @@ export interface ChatModelSwitching {
 }
 
 export interface ChatAppProps {
+  readonly terminalAgentStatus?: TerminalAgentStatus;
   readonly getStatus?: () => string;
   readonly viewConversation?: (threadId: string) => string;
   readonly fastMode?: ChatFastModeControl;
@@ -256,6 +258,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
             setPicker(undefined);
             return;
           }
+          props.terminalAgentStatus?.resetSession();
           retiringRef.current = activeSession;
           setSessionHistory(
             props.historySource ? undefined : messagesToHistory(next.getMessages()),
@@ -271,7 +274,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         },
       );
     },
-    [sessionSwitching, activeSession, props.historySource],
+    [sessionSwitching, activeSession, props.historySource, props.terminalAgentStatus],
   );
 
   return h(ChatSessionView, {
@@ -297,6 +300,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.connection ? { connection: props.connection } : {}),
     ...(props.fastMode ? { fastMode: props.fastMode } : {}),
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    ...(props.terminalAgentStatus ? { terminalAgentStatus: props.terminalAgentStatus } : {}),
     ...(props.getStatus ? { getStatus: props.getStatus } : {}),
     ...(props.viewConversation ? { viewConversation: props.viewConversation } : {}),
     ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
@@ -306,6 +310,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onPickerCancel: cancelPicker,
     onModelChanged: modelChanged,
     onScheduleContinue: (next: AgentSession) => {
+      props.terminalAgentStatus?.resetSession();
       retiringRef.current = activeSession;
       setSessionHistory(props.historySource ? undefined : messagesToHistory(next.getMessages()));
       setActiveSession(next);
@@ -350,6 +355,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     commitHistory,
   } = useSession(session, {
     ...(props.beforeSend ? { beforeSend: props.beforeSend } : {}),
+    ...(props.terminalAgentStatus ? { terminalAgentStatus: props.terminalAgentStatus } : {}),
     onPreparationCancelled: () => setAttachments(submittedAttachments.current),
     model,
     contextWindow,
@@ -362,6 +368,11 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+  // Child input effects have mounted before this parent effect runs. A render() return
+  // alone is not readiness; do not announce idle before keyboard listeners exist.
+  useEffect(() => {
+    props.terminalAgentStatus?.ready();
+  }, [props.terminalAgentStatus]);
   const displayHistory = useMemo(
     () => [...archivedHistory.items, ...state.history],
     [archivedHistory.items, state.history],

@@ -1,3 +1,10 @@
+import {
+  createInteractiveTerminalAgentStatus,
+  terminalAgentOutcomeAfterEvent,
+  type TerminalAgentStatus,
+  type TerminalAgentTurn,
+  type TerminalAgentOutcome,
+} from "../chat/terminal-agent-status.ts";
 import { loadChatConfigBinding } from "../../runtime-host/chat-config-binding.ts";
 import { resolveChatWorkspace } from "../../runtime-host/workspace-identity.ts";
 import { withReadOnlyChatHistory, readOnlyConversationText } from "../chat/read-only-history.ts";
@@ -12,7 +19,7 @@ import { createChatGptSessionPreparation } from "../../runtime-host/chatgpt-sess
 import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import { isCancel, select } from "@clack/prompts";
-import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
+import type { AgentSession, EngineModelSwitch, SessionEvent } from "@roll-agent/runtime";
 import { thinkingProviderOptions, UnsupportedThinkingLevelError } from "../../llm/providers.ts";
 import {
   assertChatGptFastModeSupported,
@@ -121,6 +128,7 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
+  readonly terminalAgentStatus?: TerminalAgentStatus;
   readonly getStatus?: () => string;
   readonly workspace?: string;
   readonly allProjects?: boolean;
@@ -391,24 +399,40 @@ export async function runRepl(
 ): Promise<void> {
   const rl = createInterface({ input: io.input, output: io.output });
   rl.on("SIGINT", () => rl.close());
-  const confirmFn: ChatConfirm =
+  let statusTurn: TerminalAgentTurn | undefined;
+  const confirmSource: ChatConfirm =
     io.confirm ??
-    (async (message, signal) => {
+    (async (message, signal, fullDiff) => {
       log.debug("chat.repl input waiting · confirm");
       rl.pause();
-      const approved = await clackConfirm(message, signal);
+      const approved = await clackConfirm(message, signal, fullDiff);
       log.debug(`chat.repl input received · confirm · approved=${String(approved)}`);
       return approved;
     });
+  const confirmFn: ChatConfirm = async (message, signal, fullDiff) => {
+    const waiting = signal?.aborted !== true;
+    if (waiting) statusTurn?.wait("permission");
+    try {
+      return await confirmSource(message, signal, fullDiff);
+    } finally {
+      if (waiting) statusTurn?.resume();
+    }
+  };
   const userInputPromptSource =
     io.userInputPrompt ?? createClackUserInputPrompt({ input: io.input, output: io.output });
   const userInputPrompt: ChatUserInputPrompt = {
     async request(form, signal) {
       log.debug("chat.repl input waiting · user-input");
       rl.pause();
-      const result = await userInputPromptSource.request(form, signal);
-      log.debug(`chat.repl input received · user-input · status=${result.status}`);
-      return result;
+      const waiting = signal?.aborted !== true;
+      if (waiting) statusTurn?.wait("question");
+      try {
+        const result = await userInputPromptSource.request(form, signal);
+        log.debug(`chat.repl input received · user-input · status=${result.status}`);
+        return result;
+      } finally {
+        if (waiting) statusTurn?.resume();
+      }
     },
   };
   let renderer = new ChatRenderer(
@@ -417,6 +441,32 @@ export async function runRepl(
     io.signal,
     userInputPrompt,
   );
+  const runTurn = async (
+    events: () => AsyncIterable<SessionEvent>,
+    prepare = false,
+  ): Promise<void> => {
+    const turn = io.terminalAgentStatus?.beginTurn();
+    statusTurn = turn;
+    let outcome: TerminalAgentOutcome = "completed";
+    let preparing = prepare;
+    try {
+      if (prepare) {
+        await io.beforeSend?.(io.signal);
+        io.signal?.throwIfAborted();
+      }
+      preparing = false;
+      for await (const event of events()) {
+        outcome = terminalAgentOutcomeAfterEvent(outcome, event);
+        await renderer.handle(event, session);
+      }
+    } catch (error) {
+      outcome = preparing && io.signal?.aborted === true ? "cancelled" : "failed";
+      log.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      statusTurn = undefined;
+      turn?.finish(outcome);
+    }
+  };
   let availableSkills = session.getSkillSummaries();
   session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
@@ -437,6 +487,7 @@ export async function runRepl(
   let titled = !isNewSession;
   const initial = { id: session.id, isNew: isNewSession, submitted: false };
   try {
+    io.terminalAgentStatus?.ready();
     while (true) {
       const answer = await readReplLine(rl, chalk.green("› "), "prompt", io.signal);
       if (answer === undefined) {
@@ -479,13 +530,7 @@ export async function runRepl(
       }
       if (input === "/compact") {
         log.debug("chat.repl manual compact requested");
-        try {
-          for await (const event of session.compact("manual")) {
-            await renderer.handle(event, session);
-          }
-        } catch (error) {
-          log.error(error instanceof Error ? error.message : String(error));
-        }
+        await runTurn(() => session.compact("manual"));
         log.debug("chat.repl manual compact completed");
         continue;
       }
@@ -522,6 +567,7 @@ export async function runRepl(
         if (next !== undefined) {
           const previous = session;
           session = next;
+          io.terminalAgentStatus?.resetSession();
           io.onActiveSessionChange?.(session);
           previous.setUserInputAvailable(false);
           const settled = await previous
@@ -603,6 +649,7 @@ export async function runRepl(
           store.deleteThread(previous.id, { onlyIfEmpty: true });
         }
         session = next;
+        io.terminalAgentStatus?.resetSession();
         session.setUserInputAvailable(true);
         const previousDiffDisplay = renderer.diffDisplay;
         renderer = new ChatRenderer(
@@ -638,12 +685,7 @@ export async function runRepl(
         initial.submitted = true;
       }
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
-      try {
-        await io.beforeSend?.(io.signal);
-        for await (const event of session.send(input)) await renderer.handle(event, session);
-      } catch (error) {
-        log.error(error instanceof Error ? error.message : String(error));
-      }
+      await runTurn(() => session.send(input), true);
       log.debug("chat.repl send completed");
     }
   } finally {
@@ -923,6 +965,7 @@ export default defineCommand({
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
     let sessionPreparation: ReturnType<typeof createChatGptSessionPreparation> | undefined;
+    let terminalAgentStatus: TerminalAgentStatus | undefined;
     try {
       backfillScheduledThreads(config, runtime, store);
       if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
@@ -1108,6 +1151,7 @@ export default defineCommand({
           await renderer.handle(event, session);
         }
       } else {
+        terminalAgentStatus = createInteractiveTerminalAgentStatus(!args.json && !args.server);
         const isNewSession = !args.session && !args.last && fromRun === undefined;
         const summary = await engine.getContextSummary();
         const banner: BannerInfo = {
@@ -1130,6 +1174,7 @@ export default defineCommand({
               inkReplSpecifier
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
+              terminalAgentStatus,
               fastMode,
               getStatus,
               workspace,
@@ -1289,6 +1334,7 @@ export default defineCommand({
             `${renderBannerText(buildBannerLines(banner, process.stdout.columns || 80))}\n`,
           );
           await runRepl(session, store, isNewSession, {
+            terminalAgentStatus,
             fastMode,
             getStatus,
             workspace,
@@ -1315,6 +1361,7 @@ export default defineCommand({
         process.exitCode = 1;
       }
     } finally {
+      terminalAgentStatus?.dispose();
       sessionPreparation?.dispose();
       chatConnection.dispose();
       catalogRefreshController.abort();
