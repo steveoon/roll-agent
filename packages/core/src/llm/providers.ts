@@ -11,6 +11,7 @@ import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/go
 import { createXai } from "@ai-sdk/xai";
 import { wrapLanguageModel } from "ai";
 import { projectAnthropicStrictToolSchema } from "./anthropic-tool-schema.ts";
+import { applyOpenAiResponsesToolStrictDefaults } from "./openai-tool-strict.ts";
 import {
   requireLegacyThinkingLevel,
   type LegacyThinkingLevel,
@@ -213,7 +214,15 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   },
   openai: (modelName, { apiKey, baseURL }) => {
     const provider = createOpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    return provider(modelName);
+    return wrapLanguageModel({
+      model: provider(modelName),
+      middleware: {
+        transformParams: async ({ params }) => {
+          const tools = applyOpenAiResponsesToolStrictDefaults(params.tools);
+          return tools === undefined || tools === params.tools ? params : { ...params, tools };
+        },
+      },
+    });
   },
   deepseek: (modelName, { apiKey, baseURL }) => {
     const provider = createDeepSeek({ apiKey, ...(baseURL ? { baseURL } : {}) });

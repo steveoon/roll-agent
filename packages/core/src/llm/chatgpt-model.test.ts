@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { generateText, Output } from "ai";
+import { generateText, Output, streamText, tool } from "ai";
 import { z } from "zod";
 import { APICallError } from "@ai-sdk/provider";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
+import {
+  AgentSession,
+  buildAgentToolset,
+  buildScheduleToolset,
+  SCHEDULE_CREATE_TOOL_ID,
+  ToolRegistry,
+} from "@roll-agent/runtime";
 import { createChatGptModel } from "./chatgpt-model.ts";
 import { isRecoverableChatGptError } from "./chatgpt-recovery.ts";
 import { chatGptThinkingOptions } from "../runtime-host/chatgpt-resolution.ts";
@@ -360,6 +367,7 @@ describe("ChatGPT subscription Responses adapter", () => {
     assert.ok(Array.isArray(captured.tools[0].tools));
     assert.ok(isRecord(captured.tools[0].tools[0]));
     assert.equal(captured.tools[0].tools[0].name, "roll__read");
+    assert.equal(captured.tools[0].tools[0].strict, false);
     assert.deepEqual(captured.tools[0].tools[0].parameters, schema);
     assert.ok(
       result.warnings.some(
@@ -925,5 +933,153 @@ describe("ChatGPT subscription Responses adapter", () => {
       /local function tools only/,
     );
     assert.equal(tokenReads, 0);
+  });
+
+  it("defaults omitted function strict to false while preserving explicit true/false and roll namespace in generateText, streamText and AgentSession", async () => {
+    const scheduleTools = buildScheduleToolset(
+      {
+        sessionCwd: process.cwd(),
+        port: {
+          captureCreate: () => {
+            throw new Error("must not call admission");
+          },
+          create: () => {
+            throw new Error("must not create schedule");
+          },
+          list: () => {
+            throw new Error("must not list schedules");
+          },
+        },
+      },
+      new ToolRegistry(),
+      { requestApproval: async () => ({ approved: false }) },
+    );
+    const mcpBuilt = buildAgentToolset(
+      [
+        {
+          agentName: "mcp",
+          client: { callTool: async () => ({ content: [] }) },
+          tools: [
+            {
+              tool: {
+                name: "search",
+                description: "MCP search with optional paging",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string" },
+                    cursor: { type: "string" },
+                    limit: { type: "integer", minimum: 1, maximum: 20 },
+                  },
+                  required: ["query"],
+                  additionalProperties: false,
+                },
+              },
+              annotations: undefined,
+            },
+          ],
+        },
+      ],
+      { requestApproval: async () => ({ approved: false }) },
+      new ToolRegistry(),
+    );
+    const explicitFalseTool = tool({
+      description: "Explicit non-strict tool",
+      inputSchema: z.object({ q: z.string(), page: z.number().int().optional() }).strict(),
+      strict: false,
+      execute: async () => "ok",
+    });
+    const tools = {
+      ...mcpBuilt.tools,
+      ...scheduleTools.createTools,
+      ...scheduleTools.listTools,
+      explicit_non_strict: explicitFalseTool,
+    };
+
+    const capturedBodies: unknown[] = [];
+    const model = createChatGptModel({
+      modelId: "gpt-5.4",
+      getAccessToken: async () => "fixture-token",
+      fetch: async (url, init) => {
+        assert.equal(String(url), "https://api.openai.com/v1/responses");
+        capturedBodies.push(JSON.parse(String(init?.body)));
+        return sse(events("ok"));
+      },
+    });
+
+    const genResult = await generateText({ model, prompt: "probe", tools });
+    assert.equal(genResult.text, "ok");
+
+    const streamResult = streamText({ model, prompt: "probe", tools });
+    assert.equal(await streamResult.text, "ok");
+
+    const session = new AgentSession({
+      id: "chatgpt-transcript-wire",
+      model,
+      sources: [],
+      maxSteps: 2,
+      readCheckpointTranscript: () => {
+        throw new Error("must not read transcript during wire schema probe");
+      },
+    });
+    try {
+      for await (const event of session.send("hello")) {
+        if (event.type === "error") throw new Error(event.message);
+      }
+    } finally {
+      await session.close();
+    }
+
+    assert.equal(capturedBodies.length, 3);
+    for (const body of capturedBodies.slice(0, 2)) {
+      assert.ok(isRecord(body) && Array.isArray(body.tools));
+      assert.equal(body.tools.length, 1);
+      const ns = body.tools[0];
+      assert.ok(isRecord(ns));
+      assert.equal(ns.type, "namespace");
+      assert.equal(ns.name, "roll");
+      assert.equal(
+        ns.description,
+        "Local tools executed by Roll with its existing approval policy.",
+      );
+      assert.ok(Array.isArray(ns.tools));
+
+      const byName = new Map<string, Record<string, unknown>>();
+      for (const entry of ns.tools) {
+        assert.ok(isRecord(entry) && entry.type === "function" && typeof entry.name === "string");
+        byName.set(entry.name, entry);
+      }
+
+      const mcpWire = byName.get("mcp__search");
+      assert.ok(mcpWire);
+      assert.equal(mcpWire.strict, false);
+      assert.ok(isRecord(mcpWire.parameters));
+      assert.deepEqual(mcpWire.parameters.required, ["query"]);
+
+      const scheduleListWire = byName.get("roll__schedule_list");
+      assert.ok(scheduleListWire);
+      assert.equal(scheduleListWire.strict, false);
+
+      const scheduleCreateWire = byName.get(SCHEDULE_CREATE_TOOL_ID);
+      assert.ok(scheduleCreateWire);
+      assert.equal(scheduleCreateWire.strict, true);
+
+      const explicitFalseWire = byName.get("explicit_non_strict");
+      assert.ok(explicitFalseWire);
+      assert.equal(explicitFalseWire.strict, false);
+    }
+
+    const sessionBody = capturedBodies[2];
+    assert.ok(isRecord(sessionBody) && Array.isArray(sessionBody.tools));
+    const sessionNs = sessionBody.tools[0];
+    assert.ok(isRecord(sessionNs) && Array.isArray(sessionNs.tools));
+    const transcriptWire = sessionNs.tools.find(
+      (entry): entry is Record<string, unknown> =>
+        isRecord(entry) && entry.type === "function" && entry.name === "roll__transcript",
+    );
+    assert.ok(transcriptWire);
+    assert.equal(transcriptWire.strict, false);
+    assert.ok(isRecord(transcriptWire.parameters));
+    assert.deepEqual(transcriptWire.parameters.required, ["checkpointId"]);
   });
 });

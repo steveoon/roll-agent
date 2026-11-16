@@ -1,6 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generateText } from "ai";
+import { generateText, streamText, tool } from "ai";
+import { z } from "zod";
+import {
+  AgentSession,
+  buildAgentToolset,
+  buildScheduleToolset,
+  SCHEDULE_CREATE_TOOL_ID,
+  ToolRegistry,
+} from "@roll-agent/runtime";
 import {
   createProviderModel,
   providerAcceptsToolSchemaIssues,
@@ -77,6 +85,258 @@ describe("createProviderModel", () => {
     const model = createProviderModel("openai", "gpt-5.5", "test-key");
     assert.ok(model);
     assert.equal(model.modelId, "gpt-5.5");
+  });
+
+  it("OpenAI Responses defaults omitted function tool strict to false while preserving explicit true/false and provider tools", async () => {
+    const scheduleRegistry = new ToolRegistry();
+    const scheduleTools = buildScheduleToolset(
+      {
+        sessionCwd: process.cwd(),
+        port: {
+          captureCreate: () => {
+            throw new Error("must not call admission");
+          },
+          create: () => {
+            throw new Error("must not create schedule");
+          },
+          list: () => {
+            throw new Error("must not list schedules");
+          },
+        },
+      },
+      scheduleRegistry,
+      { requestApproval: async () => ({ approved: false }) },
+    );
+    const mcpBuilt = buildAgentToolset(
+      [
+        {
+          agentName: "mcp",
+          client: { callTool: async () => ({ content: [] }) },
+          tools: [
+            {
+              tool: {
+                name: "search",
+                description: "MCP search with optional paging",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string" },
+                    cursor: { type: "string" },
+                    limit: { type: "integer", minimum: 1, maximum: 20 },
+                  },
+                  required: ["query"],
+                  additionalProperties: false,
+                },
+              },
+              annotations: undefined,
+            },
+          ],
+        },
+      ],
+      { requestApproval: async () => ({ approved: false }) },
+      new ToolRegistry(),
+    );
+    const explicitFalseTool = tool({
+      description: "Explicit non-strict tool",
+      inputSchema: z.object({ q: z.string(), page: z.number().int().optional() }).strict(),
+      strict: false,
+      execute: async () => "ok",
+    });
+    const tools = {
+      ...mcpBuilt.tools,
+      ...scheduleTools.createTools,
+      ...scheduleTools.listTools,
+      explicit_non_strict: explicitFalseTool,
+    };
+
+    const originalFetch = globalThis.fetch;
+    const capturedBodies: unknown[] = [];
+    try {
+      globalThis.fetch = async (url, init) => {
+        assert.match(String(url), /\/responses$/u);
+        const parsed: unknown = JSON.parse(String(init?.body));
+        capturedBodies.push(parsed);
+        if (isRecord(parsed) && parsed.stream === true) {
+          const chunks = [
+            {
+              type: "response.created",
+              response: { id: "resp_stream", created_at: 1, model: "gpt-5.4" },
+            },
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: {
+                type: "message",
+                id: "msg_stream",
+                role: "assistant",
+                status: "in_progress",
+                content: [],
+              },
+            },
+            {
+              type: "response.output_text.delta",
+              item_id: "msg_stream",
+              output_index: 0,
+              content_index: 0,
+              delta: "ok",
+            },
+            {
+              type: "response.output_item.done",
+              output_index: 0,
+              item: {
+                type: "message",
+                id: "msg_stream",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "ok", annotations: [] }],
+              },
+            },
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_stream",
+                created_at: 1,
+                model: "gpt-5.4",
+                status: "completed",
+                output: [],
+                usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+              },
+            },
+          ];
+          return new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join(""), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return Response.json({
+          id: "resp_gen",
+          created_at: 1,
+          model: "gpt-5.4",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_gen",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "ok", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        });
+      };
+
+      const model = createProviderModel("openai", "gpt-5.4", "fixture-key");
+      const genResult = await generateText({ model, prompt: "probe", tools });
+      assert.equal(genResult.text, "ok");
+
+      const streamResult = streamText({ model, prompt: "probe", tools });
+      assert.equal(await streamResult.text, "ok");
+
+      const session = new AgentSession({
+        id: "openai-transcript-wire",
+        model,
+        sources: [],
+        maxSteps: 2,
+        readCheckpointTranscript: () => {
+          throw new Error("must not read transcript during wire schema probe");
+        },
+      });
+      try {
+        for await (const event of session.send("hello")) {
+          if (event.type === "error") throw new Error(event.message);
+        }
+      } finally {
+        await session.close();
+      }
+
+      const rawCallTools = [
+        {
+          type: "function" as const,
+          name: "omitted_fn",
+          inputSchema: {
+            type: "object" as const,
+            properties: { id: { type: "string" as const } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+        {
+          type: "provider" as const,
+          id: "openai.web_search" as const,
+          name: "web_search",
+          args: {},
+        },
+      ];
+      await model.doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+        tools: rawCallTools,
+      });
+      const providerStream = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+        tools: rawCallTools,
+      });
+      await providerStream.stream.cancel();
+
+      assert.equal(capturedBodies.length, 5);
+      for (const body of capturedBodies.slice(0, 2)) {
+        assert.ok(isRecord(body) && Array.isArray(body.tools));
+        const byKey = new Map<string, Record<string, unknown>>();
+        for (const entry of body.tools) {
+          assert.ok(isRecord(entry) && typeof entry.type === "string");
+          const key = entry.type === "function" ? String(entry.name) : entry.type;
+          byKey.set(key, entry);
+        }
+
+        const mcpWire = byKey.get("mcp__search");
+        assert.ok(mcpWire);
+        assert.equal(mcpWire.strict, false);
+        assert.ok(isRecord(mcpWire.parameters));
+        assert.deepEqual(mcpWire.parameters.required, ["query"]);
+
+        const scheduleListWire = byKey.get("roll__schedule_list");
+        assert.ok(scheduleListWire);
+        assert.equal(scheduleListWire.strict, false);
+
+        const scheduleCreateWire = byKey.get(SCHEDULE_CREATE_TOOL_ID);
+        assert.ok(scheduleCreateWire);
+        assert.equal(scheduleCreateWire.strict, true);
+
+        const explicitFalseWire = byKey.get("explicit_non_strict");
+        assert.ok(explicitFalseWire);
+        assert.equal(explicitFalseWire.strict, false);
+      }
+
+      const sessionBody = capturedBodies[2];
+      assert.ok(isRecord(sessionBody) && Array.isArray(sessionBody.tools));
+      const transcriptWire = sessionBody.tools.find(
+        (entry): entry is Record<string, unknown> =>
+          isRecord(entry) && entry.type === "function" && entry.name === "roll__transcript",
+      );
+      assert.ok(transcriptWire);
+      assert.equal(transcriptWire.strict, false);
+      assert.ok(isRecord(transcriptWire.parameters));
+      assert.deepEqual(transcriptWire.parameters.required, ["checkpointId"]);
+
+      for (const providerBody of capturedBodies.slice(3, 5)) {
+        assert.ok(isRecord(providerBody) && Array.isArray(providerBody.tools));
+        assert.deepEqual(providerBody.tools, [
+          {
+            type: "function",
+            name: "omitted_fn",
+            parameters: {
+              type: "object",
+              properties: { id: { type: "string" } },
+              required: ["id"],
+              additionalProperties: false,
+            },
+            strict: false,
+          },
+          { type: "web_search" },
+        ]);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("should create a deepseek model", () => {

@@ -24,8 +24,9 @@
 ## 按需回查
 
 模型可调用免审批的只读 `roll__transcript`。checkpoint 提供原始记录范围和历史定位。
-普通分页使用 `checkpointId`、`kind`、`afterSequence`、`limit`。
-长记录可以使用：
+分页与单条分块两种模式互斥（切换模式时直接省略另一组字段，不得混用）：
+- 普通分页最小调用 `{"checkpointId":"<checkpoint UUID>"}`，可选 `kind`、`afterSequence`、`limit`（省略 `sequence`、`offset`、`maxChars`）。
+- 长记录分块最小调用 `{"checkpointId":"<checkpoint UUID>","sequence":<page sequence>}`，可选 `kind`、`offset`、`maxChars`（省略 `afterSequence`、`limit`），例如：
 
 ```json
 {"checkpointId":"<checkpoint UUID>","kind":"message","sequence":12,"offset":0,"maxChars":4000}
