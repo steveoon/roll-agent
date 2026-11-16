@@ -3,8 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JSONValue } from "@ai-sdk/provider";
-import type { ModelMessage, ToolExecutionOptions } from "ai";
+import type {
+  JSONValue,
+  LanguageModelV4CallOptions,
+  LanguageModelV4FinishReason,
+  LanguageModelV4StreamPart,
+} from "@ai-sdk/provider";
+import {
+  generateText,
+  InvalidToolInputError,
+  simulateReadableStream,
+  stepCountIs,
+  streamText,
+  type ModelMessage,
+  type ToolExecutionOptions,
+} from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import {
   ThreadStore,
@@ -478,5 +492,251 @@ test("Transcript 分块通过绑定 thread 的真实 reader 保持 checkpoint �
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+const STOP_REASON: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
+const TOOL_CALLS_REASON: LanguageModelV4FinishReason = {
+  unified: "tool-calls",
+  raw: "tool-calls",
+};
+
+function sdkUsage() {
+  return {
+    inputTokens: { total: 4, noCache: 4, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 2, text: 2, reasoning: 0 },
+  };
+}
+
+function extractToolErrorTexts(prompt: LanguageModelV4CallOptions["prompt"] | undefined): string {
+  if (prompt === undefined) {
+    return "";
+  }
+  const texts: string[] = [];
+  for (const message of prompt) {
+    if (message.role !== "tool") continue;
+    for (const part of message.content) {
+      if (part.type === "tool-result" && part.output.type === "error-text") {
+        texts.push(part.output.value);
+      }
+    }
+  }
+  return texts.join("\n");
+}
+
+function createSingleToolCallModel(
+  rawArgs: unknown,
+  capturedPrompts: LanguageModelV4CallOptions["prompt"][],
+) {
+  const serializedInput = JSON.stringify(rawArgs);
+  let generateCalls = 0;
+  let streamCalls = 0;
+  return new MockLanguageModelV4({
+    doGenerate: async (options) => {
+      capturedPrompts.push(options.prompt);
+      generateCalls += 1;
+      if (generateCalls === 1) {
+        return {
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-sdk-1",
+              toolName: TRANSCRIPT_TOOL_ID,
+              input: serializedInput,
+            },
+          ],
+          finishReason: TOOL_CALLS_REASON,
+          usage: sdkUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: "text", text: "done" }],
+        finishReason: STOP_REASON,
+        usage: sdkUsage(),
+        warnings: [],
+      };
+    },
+    doStream: async (options) => {
+      capturedPrompts.push(options.prompt);
+      streamCalls += 1;
+      const chunks: LanguageModelV4StreamPart[] =
+        streamCalls === 1
+          ? [
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                toolCallId: "call-sdk-stream-1",
+                toolName: TRANSCRIPT_TOOL_ID,
+                input: serializedInput,
+              },
+              { type: "finish", finishReason: TOOL_CALLS_REASON, usage: sdkUsage() },
+            ]
+          : [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "txt-1" },
+              { type: "text-delta", id: "txt-1", delta: "done" },
+              { type: "text-end", id: "txt-1" },
+              { type: "finish", finishReason: STOP_REASON, usage: sdkUsage() },
+            ];
+      return {
+        stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
+      };
+    },
+  });
+}
+
+test("buildTranscriptToolset 描述包含最小分页与单条分块示例且保持非 strict 声明", () => {
+  const toolset = buildTranscriptToolset(() => messagePage(), new ToolRegistry());
+  const registered = toolset[TRANSCRIPT_TOOL_ID];
+  assert.ok(registered);
+  assert.equal(registered.strict, undefined);
+  assert.equal(typeof registered.description, "string");
+  if (typeof registered.description !== "string") {
+    return;
+  }
+  assert.match(registered.description, /\{"checkpointId":"<reminder ID>"\}/u);
+  assert.match(
+    registered.description,
+    /\{"checkpointId":"<reminder ID>","sequence":<page sequence>\}/u,
+  );
+  assert.doesNotMatch(registered.description, new RegExp(CHECKPOINT_ID, "u"));
+});
+
+test("Transcript 经真实 AI SDK 校验：分页与分块成功，互斥冲突带省略指引且与 null 负例均零副作用拒绝", async () => {
+  for (const mode of ["generate", "stream"] as const) {
+    const runSdkTurn = async (rawArgs: unknown, reader: TranscriptReader) => {
+      const toolset = buildTranscriptToolset(reader, new ToolRegistry());
+      const prompts: LanguageModelV4CallOptions["prompt"][] = [];
+      const model = createSingleToolCallModel(rawArgs, prompts);
+      const streamParts: Array<{ type: string; error?: unknown }> = [];
+      if (mode === "generate") {
+        const result = await generateText({
+          model,
+          prompt: "inspect history",
+          tools: toolset,
+          stopWhen: stepCountIs(2),
+        });
+        return { steps: result.steps, prompts, streamParts };
+      }
+      const result = streamText({
+        model,
+        prompt: "inspect history",
+        tools: toolset,
+        stopWhen: stepCountIs(2),
+      });
+      for await (const part of result.fullStream) {
+        if (part.type === "tool-error") {
+          streamParts.push({ type: part.type, error: part.error });
+        }
+      }
+      return { steps: await result.steps, prompts, streamParts };
+    };
+
+    // 1) 合法分页读取
+    let pageReads = 0;
+    const pageTurn = await runSdkTurn({ checkpointId: CHECKPOINT_ID }, (options) => {
+      pageReads += 1;
+      assert.deepEqual(options, { checkpointId: CHECKPOINT_ID, kind: "message", limit: 10 });
+      return messagePage();
+    });
+    assert.equal(pageReads, 1);
+    assert.equal(pageTurn.prompts.length, 2);
+    assert.match(JSON.stringify(pageTurn.prompts[1]), /nextAfterSequence/u);
+
+    // 2) 合法单条分块读取
+    let chunkReads = 0;
+    const chunkTurn = await runSdkTurn(
+      {
+        checkpointId: CHECKPOINT_ID,
+        kind: "tool_execution",
+        sequence: 2,
+        offset: 0,
+        maxChars: 500,
+      },
+      (options) => {
+        chunkReads += 1;
+        assert.deepEqual(options, {
+          checkpointId: CHECKPOINT_ID,
+          kind: "tool_execution",
+          afterSequence: 1,
+          limit: 1,
+        });
+        return toolPage();
+      },
+    );
+    assert.equal(chunkReads, 1);
+    assert.equal(chunkTurn.prompts.length, 2);
+    assert.match(JSON.stringify(chunkTurn.prompts[1]), /visible-model-output/u);
+
+    // 3) 互斥冲突负例：同时指定 sequence 与 afterSequence/limit，或无 sequence 指定 offset
+    for (const conflictingArgs of [
+      {
+        checkpointId: CHECKPOINT_ID,
+        kind: "tool_execution",
+        sequence: 2,
+        afterSequence: 0,
+        limit: 10,
+      },
+      {
+        checkpointId: CHECKPOINT_ID,
+        offset: 0,
+        maxChars: 500,
+      },
+    ]) {
+      let conflictReads = 0;
+      const conflictTurn = await runSdkTurn(conflictingArgs, () => {
+        conflictReads += 1;
+        return toolPage();
+      });
+      assert.equal(conflictReads, 0);
+      const stepCall = conflictTurn.steps[0]?.toolCalls[0];
+      assert.ok(stepCall && "invalid" in stepCall && stepCall.invalid === true);
+      assert.ok("error" in stepCall && InvalidToolInputError.isInstance(stepCall.error));
+      if (mode === "stream") {
+        assert.equal(conflictTurn.streamParts.length, 1);
+        const streamErr = conflictTurn.streamParts[0]?.error;
+        assert.equal(typeof streamErr, "string");
+        if (typeof streamErr === "string") {
+          assert.match(streamErr, /^AI_InvalidToolInputError:/u);
+          assert.match(streamErr, /省略/u);
+          assert.match(streamErr, /数值.*无效|重试无效/u);
+        }
+      }
+      const feedback = extractToolErrorTexts(conflictTurn.prompts[1]);
+      assert.match(feedback, /省略/u);
+      assert.match(feedback, /数值.*无效|重试无效/u);
+    }
+
+    // 4) null 类型负例：拒绝 null 且不触发 reader，仅断言类型拒绝与零副作用
+    for (const [nullArgs, expectedCode] of [
+      [
+        { checkpointId: CHECKPOINT_ID, sequence: 0, afterSequence: null },
+        /"code":\s*"invalid_type"/u,
+      ],
+      [{ checkpointId: CHECKPOINT_ID, kind: null }, /"code":\s*"invalid_value"/u],
+    ] as const) {
+      let nullReads = 0;
+      const nullTurn = await runSdkTurn(nullArgs, () => {
+        nullReads += 1;
+        return messagePage();
+      });
+      assert.equal(nullReads, 0);
+      const stepCall = nullTurn.steps[0]?.toolCalls[0];
+      assert.ok(stepCall && "invalid" in stepCall && stepCall.invalid === true);
+      assert.ok("error" in stepCall && InvalidToolInputError.isInstance(stepCall.error));
+      if (mode === "stream") {
+        assert.equal(nullTurn.streamParts.length, 1);
+        const streamErr = nullTurn.streamParts[0]?.error;
+        assert.equal(typeof streamErr, "string");
+        if (typeof streamErr === "string") {
+          assert.match(streamErr, /^AI_InvalidToolInputError:/u);
+          assert.match(streamErr, expectedCode);
+        }
+      }
+      const feedback = extractToolErrorTexts(nullTurn.prompts[1]);
+      assert.match(feedback, /AI_TypeValidationError/u);
+      assert.match(feedback, expectedCode);
+    }
   }
 });

@@ -7,6 +7,7 @@ import {
   ChatGptStreamInterruptedError,
   guardChatGptResponseBody,
 } from "./chatgpt-recovery.ts";
+import { withDefaultFalseFunctionToolStrict } from "./openai-tool-strict.ts";
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -475,12 +476,13 @@ export function createChatGptModel(options: {
                   if (tool.type !== "function") {
                     throw new Error("Unsupported ChatGPT provider tool.");
                   }
+                  const normalizedTool = withDefaultFalseFunctionToolStrict(tool);
                   return {
-                    ...tool,
+                    ...normalizedTool,
                     providerOptions: {
-                      ...tool.providerOptions,
+                      ...normalizedTool.providerOptions,
                       openai: {
-                        ...tool.providerOptions?.openai,
+                        ...normalizedTool.providerOptions?.openai,
                         namespace: {
                           name: "roll",
                           description:
