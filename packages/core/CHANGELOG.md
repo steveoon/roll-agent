@@ -1,5 +1,11 @@
 # @roll-agent/core
 
+## 2.1.0
+
+### Minor Changes
+
+- [#324](https://github.com/steveoon/roll-agent/pull/324) [`1662bda`](https://github.com/steveoon/roll-agent/commit/1662bdac5599d914a15efab975c197015fe5da1f) Thanks [@steveoon](https://github.com/steveoon)! - 为 Herdr 终端中的交互式 roll chat 增加 OSC 7501 Agent 状态集成，覆盖 Ink 和基础 REPL 的工作、审批/表单等待、完成、取消、错误与退出清理；区分用户取消与超时/运行时异常中止，并让双前端审批等待遵守截止期，防止过期后继续授权或滞留等待；普通终端、管道、单次和 JSON-RPC 模式不输出状态控制序列。
+
 ## 2.0.2
 
 ### Patch Changes
