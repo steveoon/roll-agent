@@ -49,6 +49,17 @@ test("all native builds, assembly and deployment consume the same resolved commi
   assert.ok(jobs.deploy.needs.includes("assemble"));
 });
 
+test("deployment bounds both the job and credential-bearing upload step", () => {
+  const { deploy } = workflow("distribution").jobs;
+  assert.equal(deploy["timeout-minutes"], 20);
+  const upload = deploy.steps.find(
+    (step) => step.run === "bash scripts/distribution/upload.sh publication",
+  );
+  assert.ok(upload);
+  assert.equal(upload["timeout-minutes"], 15);
+  assert.deepEqual(deploy.permissions, { contents: "read" });
+});
+
 test("publication uses release source; previews and credentials retain their boundaries", () => {
   const distribution = workflow("distribution");
   const jobs = distribution.jobs;

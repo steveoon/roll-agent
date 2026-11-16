@@ -192,6 +192,7 @@ jobs:
     needs: [resolve_source, assemble]
     if: github.ref == 'refs/heads/main' && vars.ROLL_DISTRIBUTION_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish == true)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -204,6 +205,7 @@ jobs:
           name: standalone-publication
           path: publication
       - name: Upload verified artifacts and atomically publish stable
+        timeout-minutes: 15
         env:
           ROLL_DIST_SSH_HOST: ${{ secrets.ROLL_DIST_SSH_HOST }}
           ROLL_DIST_SSH_USER: ${{ secrets.ROLL_DIST_SSH_USER }}
