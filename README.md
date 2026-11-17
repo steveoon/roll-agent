@@ -1,628 +1,234 @@
 # 花卷 Agent (Roll)
 
-轻量级 Agent 编排系统。指挥官 + MCP 协议 + 按需加载。
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue.svg)](./LICENSE)
+[![SDK License: MIT](https://img.shields.io/badge/SDK%20%26%20Protocol-MIT-green.svg)](./packages/sdk/LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.6-339933.svg)](./package.json)
 
-```
-roll ask "帮我查看boss直聘上有多少未读消息"
-```
-
-## 核心思路
-
-**指挥官（roll-core）** 提供 LLM 基座、Agent 发现/调度、CLI 交互。**子 Agent** 通过 [MCP 协议](https://modelcontextprotocol.io/) 接入，可以是任意语言实现的本地子进程或远程服务。
-
-```
-用户 ──CLI──→ roll-core（指挥官）
-                ├── Agent Registry（SKILL.md 注册）
-                ├── Router（声明式 / LLM 智能）
-                ├── Runtime Manifest（package.json#rollAgent）
-                ├── MCP Client Manager
-                └── LLM Engine（AI SDK v6 多 Provider）
-                       │
-              ┌────────┴────────┐
-         stdio 本地子进程    HTTP 远程服务
-         (MCP Server)       (MCP Server)
-```
-
-### 双层标准
-
-| 层 | 标准 | 作用 |
-|----|------|------|
-| 描述层 | [Agent Skills](https://agentskills.io/)（SKILL.md） | 告诉指挥官"我是谁、我能做什么" |
-| 运行时层 | [MCP](https://modelcontextprotocol.io/) | 实际调用子 Agent 的通信协议 |
-
-### Sampling：子 Agent 借用指挥官 LLM
-
-子 Agent 不需要自己配置 API Key。通过 MCP Sampling 协议回调指挥官的 LLM Engine 完成推理，实现 LLM 与子 Agent 的完全解耦。
-
-## 安装
-
-普通用户可以选择自带 Node/npm 的独立发行包，或继续使用 npm 全局安装。
-安装命令、平台要求、Agent 安装及双渠道更新见 [安装和更新 Roll](docs/how-to-install-roll.md)。
-独立发行 URL 需在六平台产物通过验证并上线后使用。
-
-### 环境要求
-
-以下要求适用于源码开发；独立发行版自带运行环境：
-
-- Node.js >= 22.13.0
-- pnpm 版本以根 `package.json` 的 `packageManager` 为准
-
-### 从源码安装
+轻量级多模型 Agent 编排系统与终端工作台。支持多轮交互会话、自然语言工具路由、结构化管道执行与无人值守定时任务。
 
 ```bash
-git clone https://github.com/steveoon/roll-agent.git
-cd roll-agent
-pnpm install
+roll chat                                  # 启动交互式多轮 Agent 终端工作台
+roll ask "汇总当前目录测试失败原因"          # 自然语言路由并自动提取工具参数
+roll run ops-agent check_health --json     # 直接调用指定 MCP 工具并输出 JSON
 ```
 
-开发模式（零编译，Node.js Type Stripping 直接运行 .ts）：
+## 设计思想
 
-```bash
-pnpm dev -- --help                      # 查看帮助
-pnpm dev -- agent list                  # 运行子命令
-pnpm dev -- ask "帮我回复候选人"         # LLM 智能路由
+Roll 不把所有工具与重度依赖塞进一个臃肿的单体 Agent，而是围绕 **“统一编排中枢 + 可插拔专业子 Agent + 多形态入口”** 构建：
+
+```text
+       chat (多轮工作台) · ask / run (命令管道) · schedule (定时值守) · Desktop / Web UI
+                               │
+                               ▼
+         ────────────── 编排中枢 (Roll) ──────────────
+         统一模型基座 · 长会话记忆压缩 · 权限与并发控制
+                  │                         ▲
+                  │  MCP Tool Call          │  MCP Sampling
+                  │  (SKILL.md + Schema)    │  (零密钥借用宿主模型)
+                  ▼                         │
+         ──────────── 可插拔专业子 Agent ─────────────
+         浏览器自动化 · 领域业务工具 · Python / Go / Rust 服务
 ```
 
-### 全局安装（构建后）
+- **大脑集中，手脚解耦**：模型接入、会话记忆与安全审批由中枢统一管理；具体领域能力外置为独立的 [MCP](https://modelcontextprotocol.io/) 子 Agent 按需插拔，并可通过 **MCP Sampling** 反向借用宿主模型推理，子 Agent 无需重复配置密钥。
+- **认知与执行分层**：以轻量的 [Agent Skills](https://agentskills.io/)（`SKILL.md`）声明“我是谁、何时调用”，以强 Schema 校验的 MCP Tool 保障参数提取与执行的确定性，避免海量工具塞满上下文。
+- **同一内核，多种入口**：编排内核与交互界面分离——同一套子 Agent 与安全策略，既可用于终端交互协作（`chat`），也可用于脚本自动化管道（`ask` / `run --json`）、后台定时任务（`schedule`）及自定义桌面或 Web 客户端。
+
+## 功能亮点
+
+- **长对话压缩与原文回查**：接近上下文窗口阈值时自动生成摘要，并支持按需分块回查早期对话与工具输出；启动时自动加载项目目录下的 `AGENTS.md` / `CLAUDE.md` 约定。
+- **多模型与订阅支持**：内置支持 Anthropic、OpenAI（含 API Key 与 ChatGPT 订阅账号登录）、Google Gemini、DeepSeek、Qwen、xAI，会话内可随时切换模型与推理强度。
+- **可视化本地配置台**：运行 `roll ui` 即可在本地随机端口启动一次性 Web 控制台，完成模型表单/YAML 配置、ChatGPT 授权、定时任务与远程连接管理。
+- **守护级定时调度**：内置跨重启持久化的定时任务账本与并发租约保护，支持一键安装 macOS / Windows 用户级常驻服务。
+
+## 安装与升级
+
+### npm 全局安装
+
+环境要求：Node.js >= 22.6.0（源码开发需 Node.js >= 22.13.0）。
 
 ```bash
-pnpm build
-cd packages/core
-npm link
+npm install --global @roll-agent/core
 roll --help
+roll doctor
 ```
 
-## 快速开始
+> 免预装 Node.js 的跨平台独立发行包、pnpm / Volta 全局安装方式及升级恢复机制，详见 [安装和更新 Roll](./docs/how-to-install-roll.md)。
 
-## 最近关键改进
-
-- `roll ask` 现在是**两阶段调用**：先路由到 `agent + tool`，再按目标 tool 的真实 `inputSchema` 提取参数，不再让 LLM 自由发明参数名。
-- `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
-- 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
-- `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
-- `roll chat` 已提供 experimental 多轮会话：支持 Agent tool 编排、session 持久化/恢复、Skills、thinking 档位切换与执行中 Esc 中断。在 Herdr 中可自动上报 Agent 状态，详见 [Herdr 集成说明](docs/how-to-use-herdr.md)。
-- `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
-
-### 1. 初始化配置
+### 检查与执行更新
 
 ```bash
-pnpm dev -- config init
+roll update --check    # 仅检查 Roll 本体与已注册 Agent 的可用更新
+roll update            # 更新本体并刷新已注册 Agent 元数据
 ```
 
-会在当前目录生成 `roll.config.yaml`：
+## 5 分钟快速开始
+
+### 1. 初始化环境与模型配置
+
+运行一站式交互向导（引导配置模型、网络、可选内建 Shell 工具与 Agent），或启动本地可视化 Web 配置台：
+
+```bash
+roll setup             # 一键交互式引导（完成后自动运行 roll doctor 自检）
+roll config init       # 仅生成最小 roll.config.yaml 模板
+roll ui                # 在 127.0.0.1 随机端口启动按需 Web 配置台（支持表单对比与 YAML 校验）
+```
+
+最小 `roll.config.yaml` 示例（`${VAR_NAME}` 为环境变量名占位符，切勿将密钥原文填入 `${}` 内）：
 
 ```yaml
 llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers:
     anthropic:
       api-key: ${ANTHROPIC_API_KEY}
-
-ask:
-  confirm-threshold: 0.5
-
-agents:
-  data-dir: ~/.roll-agent/agents
 ```
 
-支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`、`google`（Gemini）。每个 provider
-可配置 `base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
-`XAI_API_KEY` 注入；Google Gemini 默认模型为 `gemini-3.8-flash`（1M context window），API key 可通过
-`GOOGLE_GENERATIVE_AI_API_KEY` 注入。
-
-每个 provider 还可用 `models` 列出可切换的模型 ID；`roll chat` 里输入 `/model` 会列出所有已配置 key 的
-provider 及其模型，选中后仅本次 roll chat 生效（含 `/resume` 切到的会话），并可顺手设为默认写回
-`roll.config.yaml`。选择设为默认时会清除 `runtime.provider` / `runtime.model` 覆盖，确保后续 `roll chat`
-使用新的 `llm.default-provider` / `llm.default-model`；定时任务等无人值守场景同样使用这对默认值。
-
-```yaml
-llm:
-  providers:
-    google:
-      api-key: ${GOOGLE_GENERATIVE_AI_API_KEY}
-      models:
-        - gemini-3.8-flash
-        - gemini-3.1-pro-preview
-```
-
-模型的 context window 按「`runtime.context-window` 覆盖 → models.dev 官方 provider 条目（随包内置快照，
-`~/.roll-agent/cache/model-catalog.json` 每天后台刷新）→ 内置家族规则」解析；`/model` 切换提示里会显示
-`ctx` 与来源。发版前可运行 `pnpm catalog:refresh` 更新内置快照。
-`ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
-
-如果本地还留着旧版 `router:` 配置段：
-
-- `roll doctor` 会提示“配置需要迁移”
-- `roll update --check` / `roll update` 会给出迁移提醒
-- 可直接运行：
+除 API Key 外，也可使用本机浏览器授权 ChatGPT 订阅账号（详见 [ChatGPT 订阅使用说明](./docs/how-to-use-chatgpt-subscription.md)）：
 
 ```bash
-roll config migrate
+roll auth chatgpt login
 ```
 
-它会自动备份原文件，再将已知旧字段迁到新 schema。
-
-> [!IMPORTANT]
-> `api-key: ${...}` 中的 `${...}` 是“环境变量名占位符”，不是 API Key 本身。
->
-> - 正确：`api-key: ${ANTHROPIC_API_KEY}`
-> - 错误：`api-key: ${sk-xxxx}`（这会被当作变量名 `sk-xxxx`，`roll doctor` 会提示 API key 未设置）
->
-> 如果想直接写死 key（不推荐），请写成：`api-key: sk-xxxx`（不要带 `${}`）。
-
-### 2. 注册 Agent
+### 2. 注册子 Agent
 
 ```bash
-# 本地目录（开发态）
-pnpm dev -- agent add ./agents/browser-use
+# 安装并注册已发布的 npm Agent 包
+roll agent install @roll-agent/browser-use-agent
 
-# 已编译 npm 包（分发态）
-pnpm dev -- agent install @roll-agent/browser-use-agent
+# 注册本地源码目录或 Git 仓库 Agent
+roll agent add ./my-local-agent
 
-# Git URL
-pnpm dev -- agent add https://github.com/someone/my-agent.git
+# 注册远程 streamable-http MCP 服务
+roll agent add --remote https://mcp.example.com/mcp --name docs-agent --description "文档检索服务"
 
-# 远程 MCP 服务
-pnpm dev -- agent add --remote https://example.com/mcp --name remote-agent --description "远程 Agent"
+# 查看已注册 Agent、工具契约与本地 Skills
+roll agent list
+roll agent tools browser-use-agent
+roll skills list
 ```
 
-说明：
+若子 Agent 需要专属环境变量，可在 `roll.config.yaml` 的 `agents.env.<agent-name>` 下统一声明，由宿主在启动子进程时按需注入。
 
-- 本地源码目录 / Git 仓库请使用 `roll agent add`
-- `roll agent install` 适用于已编译 npm 包或 `.tgz` 包，不适用于本地源码目录
-- `browser-use-agent` 当前默认使用系统 Chrome，不会在安装时自动下载 Playwright Chromium
-- 如果后续需要显式使用 Playwright 自带 Chromium，再单独补 setup/配置更合理
-
-如果你安装的是 `smart-reply-agent` 这类需要独立环境变量的 Agent，推荐在 `roll.config.yaml` 中通过 `agents.env` 为它单独注入配置：
-
-```yaml
-agents:
-  data-dir: ~/.roll-agent/agents
-  env:
-    smart-reply-agent:
-      REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
-      REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
-```
-
-这样 `roll-core` 在启动 `smart-reply-agent` 的 stdio 子进程时会自动注入这些变量，不需要用户手工在 shell 里 `export` 一大串值。
-
-### 3. 使用 Web 配置台
+### 3. 运行与编排
 
 ```bash
-roll ui
+# 交互式多轮会话（TTY 默认进入全屏 TUI；支持 /model、/resume、/compact、/status）
+roll chat
+roll chat "检查最近一次构建日志并定位报错模块"
+
+# 两阶段自然语言路由（先选定 agent + tool，再严格按目标 inputSchema 提取参数）
+roll ask "抓取 https://example.com 首页标题与正文摘要"
+
+# 确定性调用（适合脚本编排与复杂 JSON 载荷）
+roll run some-agent sync_records --input-json '{"dryRun":true,"batchSize":50}' --json
+roll run some-agent sync_records --input-file ./payload.json
+
+# 登记并管理无人值守定时任务（支持固定间隔或每日/每周日历规则）
+roll schedule add "巡检仓库依赖安全告警并生成摘要" --name daily-audit --every 24h
+roll schedule service install
 ```
 
-`roll ui` 会按配置发现链读取 `roll.config.yaml`，在随机的 `127.0.0.1` 端口启动一次性本地配置台，并自动打开默认浏览器。配置台同时支持结构化表单和 YAML 编辑，保存前会展示校验结果、差异以及生效方式；退出终端进程后服务随即关闭。
+## 生态扩展
 
-```bash
-roll ui --no-open                 # 不自动打开浏览器，改为打印一次性链接
-roll ui --config ./roll.config.yaml
-```
+### 开发子 Agent（`@roll-agent/sdk`，MIT 协议）
 
-配置字段由 `rollConfigSchema` 自动生成，Agent 环境变量由各 Agent 的 `references/env.yaml` 自动生成；CLI 与 Web UI 共用 key 编码、Zod 校验和安全写回链路，但读取视图按用途区分。详细机制、维护边界与生效规则见 [`docs/how-to-use-roll-ui.md`](docs/how-to-use-roll-ui.md)。
-
-### 4. 调用 Agent
-
-```bash
-# 直接调用（明确指定 Agent + MCP tool）
-pnpm dev -- run browser-use-agent zhipin_read_messages --limit 10
-
-# 显式传入结构化 JSON（适合 object / record / 复杂 payload）
-pnpm dev -- run smart-reply-agent generate_reply \
-  --input-json '{"candidateMessage":"你好，请问薪资是多少？","target":{"platform":"zhipin","tenantId":"tenant-001","conversationId":"685501091-0","candidateId":"candidate-123"}}'
-
-# 或从文件读取完整 payload
-pnpm dev -- run some-agent sync_config --input-file ./payload.json
-
-# LLM 智能路由（自然语言，自动选择 Agent + Tool）
-pnpm dev -- ask "帮我查看未读消息"
-
-# 会话式入口（experimental；无 message 时进入交互 TUI）
-pnpm dev -- chat "帮我把这批候选人处理掉"
-```
-
-说明：
-
-- `roll run` 现在同时支持 `--key value`、`--input-json`、`--input-file`
-- `--input-json` / `--input-file` 适合传递复杂对象参数；命令行 `--key value` 更适合简单标量参数
-- `roll ask` 适合“自然语言可以可靠映射到 tool 参数”的场景；如果某个必填字段是开放对象（如 `z.record()` / 任意 JSON payload），`ask` 会返回 `needs_input`，提示改用 `roll run --input-json` 或上层编排器显式提供
-- `roll ask` 不会篡改原始 tool schema 的类型语义；对于无法可靠从自然语言提取的字段，会显式降级为“需要显式输入”，而不是伪造错误类型的参数
-- `roll chat` 支持交互式多轮编排与 session 恢复；仍为 experimental，且不会隐式降级到 `roll ask`
-
-### `roll chat` 终端界面模式
-
-`roll chat` 默认使用 `auto`：普通交互式 TTY（包括普通 tmux pane）进入全屏 TUI；
-CI、非 TTY、`TERM=dumb`、screen reader、Zellij、tmux control mode 或无法确认的 tmux
-环境自动回退到基础 REPL。
-
-```yaml
-chat:
-  screen-mode: auto # auto | fullscreen | inline
-  thinking-display: collapsed # collapsed | expanded
-```
-
-- 临时覆盖：`roll chat --screen-mode fullscreen` 或 `roll chat --screen-mode inline`
-- 思考展示：`thinking-display` 默认 `collapsed`，模型开始正式回复后把已完成的思考折叠为一行痕迹（思考时长与字数）；设为 `expanded` 始终完整显示。思考进行中始终实时展示，会话内可用 `/show-think` 临时切换。基础 REPL 不渲染思考内容，不受此项影响
-- 历史浏览：`PageUp` / `PageDown`，`Ctrl+Home` 跳到最早处，`Ctrl+End` 返回最新内容；全屏模式也支持鼠标滚轮
-- 终端缩放：全屏 TUI 会按最新宽高重排，输入框保持有界，长历史只渲染当前视口附近内容
-- 中文输入法：全屏 TUI 会把真实终端光标锚定到输入位置；受支持终端中的拼音预编辑与候选窗口通常无需额外配置
-- 会话退出：恢复进入 TUI 前的主屏内容，并输出 session ID、消息数和继续命令
-
-`--screen-mode` 只适用于没有起始 message 的交互会话，不能与 `--json`、`--server` 或
-`--list` 同用。显式指定 `fullscreen` 但 stdin/stdout 不具备交互能力时会直接报错。
-
-### 长对话与历史回查
-
-接近 context window 阈值时，Roll 将较早对话整理成任务摘要，保留近期原文和当前输入。
-需要旧路径、标识或工具输出时，模型可用 `roll__transcript` 按需回查，长记录支持分块读取。
-摘要失败不会清空历史或进入强制回查阶段；输入和已完成操作持续保存。
-手动执行 `/compact` 也使用相同的提交检查。配置、边界与迁移行为见
-[上下文压缩说明](docs/how-to-context-compaction.md)。
-
-### `roll chat` 项目会话与配置更新
-
-`--last`、`--list` 和 `/resume` 默认仅选择当前项目；`--all-projects`、`/resume all` 查看全部历史。
-`--view <id>` 只读查看占用中的会话。普通 chat 支持 `--config` / `--config-workspace`，
-通过 `/status` 查看配置来源和当前有效模型；修改配置文件后重启并续聊，新定时任务继承配置绑定。
-会话库 schema 12 的备份迁移与旧客户端升级要求见 [终端项目会话指南](docs/how-to-use-chat-workspaces.md)。
-
-### `roll chat` 工作区工程约定（AGENTS.md / CLAUDE.md）
-
-`roll chat` 启动时从工作目录逐级向上查找最近一层的 `AGENTS.md`（优先）或 `CLAUDE.md`，
-把内容作为独立的「工作区工程约定」段注入 system prompt（标注来源路径）。它不在对话历史里，
-因此不随 compaction 丢失，也无需在提示里手动要求「先读 AGENTS.md」。
-
-```yaml
-chat:
-  instructions: auto # auto | off | <path>
-```
-
-- `auto`（默认）：同目录两者都在取 `AGENTS.md`；只有一个时用存在的那个；都没有时不注入、不提示
-- `off`：关闭注入
-- `<path>`：显式指定约定文件（相对工作目录解析，支持 `~`）；文件缺失时 stderr 提示一次
-- 刷新：每轮开始按文件修改时间 / 大小检查，变化后下一轮生效；恢复会话时按当前工作目录重新发现
-- 上限：超过 32 000 字符会截断并在 stderr 提示一次，请精简约定文件
-- 只注入、不执行：约定内容是给模型的说明，不会被当作命令运行；`roll chat`、`roll chat --server`、全屏 TUI 行为一致，banner 信息行会显示已加载的文件名
-
-## CLI 命令参考
-
-```
-roll agent add <path|url>       注册本地目录或 Git Agent（解析 SKILL.md + 安装依赖）
-roll agent add --remote <url>   注册远程 streamable-http Agent（需配合 --name/--description）
-roll agent install <package>    安装并注册已发布 Agent npm 包（本地源码目录/Git URL 请改用 add）
-roll agent remove <name>        移除 Agent
-roll agent list                 列出所有已注册 Agent
-roll agent tools <name>         查看 Agent 暴露的 MCP tools 及输入 schema
-roll agent start <name>         启动由 Roll 托管的 core-managed Agent
-roll agent stop <name>          停止由 Roll 托管的 core-managed Agent
-roll agent stop <name> --recover 非交互确认恢复可安全验证的中断租约后停止
-roll agent info <name>          查看 Agent 详情（SKILL.md / runtime / env）
-roll agent health               健康检查并报告中断租约（不自动恢复）
-
-roll run <agent> <tool> [args]  直接调用 MCP tool（支持 --key value / --input-json / --input-file）
-roll ask "<message>"            用 LLM 从自然语言中选择 Agent 和 MCP tool
-roll chat [message]             Experimental：多轮会话、Agent tools、Skills 与 session 恢复
-roll update                     检查并更新 roll 及已注册 Agent（对不同来源行为不同）
-roll update --check             仅检查 roll/Agent 更新，不执行安装或刷新
-
-roll config init                交互式初始化配置
-roll config get [key]           查看配置（支持英文句点路径，如 llm.default-model）
-roll config set <key> <value>   修改配置（key 用英文句点分隔，如 ask.confirm-threshold）
-roll config migrate             自动迁移旧版配置（备份原文件 + 写回新格式）
-roll ui                         启动按需本地 Web 配置台（127.0.0.1 随机端口）
-
-roll schedule add <prompt> --name <n> --every <30m>   登记定时任务（--cwd 指定目录，--now 立即触发）
-roll schedule list|show|remove|pause|resume <id>      管理定时任务
-roll schedule run-now <id> [--inline]                 手动触发一次
-roll schedule runs <id>                               查看历次运行与失败原因
-roll schedule cancel <invocation-id> [--kill|--abandon]  取消排队中的一次运行；运行中的需 --kill 并确认退出
-roll schedule status                                  daemon 状态与任务统计
-roll schedule daemon --foreground                     前台运行 daemon
-roll schedule service install|uninstall|restart|status  安装、重启或检查用户级常驻服务
-
-roll doctor                     诊断 Roll 配置、Agent 注册表和运行时状态
-roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）
-```
-
-常用选项：
-
-| 命令 | 选项 | 作用 |
-|------|------|------|
-| `roll agent install` | `--skip-browser-setup` | 跳过 Playwright 浏览器运行时安装/校验 |
-| `roll agent install` | `--no-start` | 安装后不自动启动 `core-managed` Agent |
-| `roll agent stop` | `--recover` | 非交互确认恢复；活动或无法验证的租约仍会拒绝 |
-| `roll update` | `--check` | 仅检查可用更新，不执行安装或刷新 |
-| `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
-| `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |
-| `roll run` | `--input-file <path>` | 从 JSON 文件读取完整 tool 输入对象 |
-| `roll chat` | `--screen-mode <auto\|fullscreen\|inline>` | 选择全屏 TUI、基础 REPL 或自动检测 |
-| `roll ui` | `--no-open` | 不自动打开浏览器，打印一次性认证链接 |
-| `roll ui` | `--config <path>` | 显式指定要编辑的配置文件 |
-| `roll schedule add` | `--every <Ns\|Nm\|Nh\|Nd>` | 运行周期，最短 60s、最长 365d |
-| `roll schedule run-now` | `--inline` | 当前进程内单次执行并等待结果，失败退出码 1 |
-| `roll schedule daemon` | `--data-dir <dir>` / `--max-concurrent-runs <n>` | 固化调度目录与并发数（service install 自动写入） |
-| 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
-
-说明：`--verbose` 可用于全局或 `roll run` / `roll ask` 输出调试日志；`--config <path>`
-目前是 `roll ui` 的稳定命令选项，并不是其他命令通用的全局选项。
-
-## Skill Agent 接入
-
-当 `roll-core` 被当作上层编排器或支持 SKILL 的 coding agent 的一个 CLI skill 使用时，推荐默认调用顺序为：
-
-- 已知 `agent + tool` 时优先 `roll run --json`
-- 只知道自然语言意图时使用 `roll ask --json`
-- 需要人工交互、多轮工具编排或 session 恢复时使用 `roll chat`；自动化与结构化管道仍优先 `roll run --json` / `roll ask --json`
-
-### 招聘回复编排约定
-
-当上层 orch 组合 `browser-use-agent` 与 `smart-reply-agent` 处理 BOSS 直聘聊天时：
-
-- 调 `smart-reply-agent.generate_reply` 前，先尝试从页面读取并透传：
-  - `candidateInfo.communicationPosition`
-  - `candidateInfo.expectedLocation`
-  - `candidateInfo.expectedPosition`
-- `preferredBrand`：`zhipin_get_candidate_info` 在 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`）时自动取第一段透传，例如"肯德基-服务员"→`preferredBrand: "肯德基"`；无分隔符时不输出；服务端也会基于租户配置做品牌解析，两者互补
-- 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名当作 `preferredBrand`
-- `diagnostics.brandResolutionSource="none"` 是合法结果，不是调用失败；是否补问用户或转人工，由 orch 自己决定
-
-可直接参考模板：[openclaw-roll-core-skill-template/SKILL.md](./openclaw-roll-core-skill-template/SKILL.md)。
-
-如果只想单独拉取这个 skill 模板目录，可用 sparse-checkout：
-
-```bash
-git clone --filter=blob:none --no-checkout https://github.com/steveoon/roll-agent.git
-cd roll-agent
-git sparse-checkout init --cone
-git sparse-checkout set openclaw-roll-core-skill-template
-git checkout main
-```
-
-拉取完成后，可直接复制整个目录：
-
-```bash
-cp -R openclaw-roll-core-skill-template /path/to/your/skills/roll-core
-```
-
-## Agent 更新注意事项
-
-- `roll update` 现在会刷新 `git` / `installed-package` / `local-path` Agent 的本地 metadata
-- 对正在运行的 `core-managed` HTTP Agent，`roll update` 会在刷新后自动重启并重新探活
-- 对 `external-managed` 远程服务，代码/工具逻辑更新后仍需要你在外部重启服务
-- 如果改的是 Agent 名称或分发来源，仍建议 `roll agent remove` 后重新注册
-- 如果 `roll update` 同时提示本地配置 schema 需要迁移，它不会阻塞 self-update；升级完成后可执行 `roll config migrate`
-
-完整说明见：[docs/how-to-update-registered-agents.md](./docs/how-to-update-registered-agents.md)。
-
-## 开发子 Agent
-
-### 方式 A：使用 SDK（Node.js / TypeScript）
+使用 TypeScript SDK 可快速定义具备 Zod Schema 校验与并行资源锁提示（`resourceHints`）的 MCP 子 Agent：
 
 ```typescript
 import { defineAgent, defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 
-const greet = defineTool({
-  name: "greet",
-  description: "向用户打招呼",
-  input: z.object({ name: z.string() }),
-  output: z.object({ message: z.string() }),
-  execute: async (input) => {
-    return { message: `你好，${input.name}！` };
-  },
-});
-
-const agent = defineAgent({ name: "greeting-agent", tools: [greet] });
-agent.listen(); // 默认以 stdio MCP Server 启动
-
-// 也支持显式启动为 HTTP MCP 服务
-// await agent.listen({
-//   transport: { type: "http", host: "127.0.0.1", port: 3100 },
-// });
-```
-
-会读写共享资源的 Tool 可以声明 `annotations` 和 `resourceHints`，让 `roll chat` 在同一
-model step 内并行无冲突调用，同时串行化同一资源的读写冲突：
-
-```typescript
-const writeFile = defineTool({
-  name: "write_file",
-  description: "写入工作区文件",
+const writeReport = defineTool({
+  name: "write_report",
+  description: "将分析报告写入工作区文件",
   input: z.object({ path: z.string(), content: z.string() }),
   output: z.object({ written: z.boolean() }),
   annotations: { readOnlyHint: false, destructiveHint: true },
   resourceHints: [{ field: "path", kind: "file", mode: "write" }],
   execute: async ({ path, content }) => {
-    // ...
-    return { written: true };
+    // 执行实际文件写入逻辑
+    return { written: Boolean(path && content) };
   },
 });
+
+const agent = defineAgent({ name: "report-agent", tools: [writeReport] });
+agent.listen(); // 默认以 stdio MCP Server 启动；亦支持 streamable-http
 ```
 
-`field` 必须指向顶层 input 字段；它可以是单个资源 ID 或资源 ID 数组。stdio Agent 的相对
-文件路径以 Agent 安装目录为基准。未提供资源线索的外部副作用 Tool 会按 Agent 级别保守串行。
+Python、Go、Rust、Java 等任意语言实现的标准 MCP Server 均可直接接入，详见 [非 Node.js Agent 接入指南](./docs/how-to-integrate-non-node-agents.md)。
 
-对于 `local-path` / legacy fallback 场景，可在 SKILL.md metadata 中声明运行时信息：
+### 接入自定义桌面与 Web 客户端（MIT 协议）
 
-```markdown
----
-name: greeting-agent
-description: 打招呼 Agent
-metadata:
-  roll-transport: stdio
-  roll-command: node --experimental-strip-types src/index.ts
----
+Roll 支持以无头模式暴露版本化 JSON-RPC Runtime Protocol（`roll runtime serve --stdio`），供第三方 UI 宿主集成：
 
-## Tools
+| 宿主形态 | 推荐依赖包（MIT） | 职责边界 |
+| --- | --- | --- |
+| 本地桌面 / Node 宿主 | `@roll-agent/client-node`、`@roll-agent/protocol` | Electron Main / Node 进程持有客户端连接，前端通过受控 IPC 交互 |
+| 远程浏览器 Web 应用 | `@roll-agent/relay-client`、`@roll-agent/relay-protocol` | 配合本机 `roll companion` 与云端 Relay 安全转发会话与审批事件 |
 
-- `greet` - 向用户打招呼
-```
+## 文档导航
 
-如果 Agent 需要作为 npm installable package 分发，推荐把 runtime 信息迁到 `package.json#rollAgent`，让 `SKILL.md` 只负责名字、描述和工具说明。
+- **使用指南**
+  - [安装和更新 Roll](./docs/how-to-install-roll.md)
+  - [更新已注册的 Agent](./docs/how-to-update-registered-agents.md)
+  - [使用本地 Web 配置台（`roll ui`）](./docs/how-to-use-roll-ui.md)
+  - [使用 ChatGPT 订阅聊天](./docs/how-to-use-chatgpt-subscription.md)
+  - [终端项目会话指南](./docs/how-to-use-chat-workspaces.md)
+  - [上下文压缩与历史回查说明](./docs/how-to-context-compaction.md)
+  - [使用 `roll schedule` 定时运行任务](./docs/how-to-schedule-tasks.md)
+  - [Herdr 终端状态集成说明](./docs/how-to-use-herdr.md)
+- **客户端与生态接入**
+  - [非 Node.js Agent 接入指南](./docs/how-to-integrate-non-node-agents.md)
+  - [创建第一个 Runtime UI 客户端](./docs/tutorial-runtime-ui-quickstart.md)
+  - [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
+  - [远程 Web App 接入指南](./docs/how-to-connect-remote-web-app.md)
+  - [Runtime Protocol 架构与安全边界](./docs/runtime-protocol-architecture.md)
+  - [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md) · [`@roll-agent/client-node` 参考](./docs/client-node-reference.md) · [Relay Protocol 参考](./docs/companion-relay-v1-reference.md)
+- **工程约定（贡献者与维护者）**
+  - [仓库工程总则（AGENTS.md）](./AGENTS.md)
+  - [架构与宿主集成](./docs/engineering/architecture.md) · [发布供应链约束](./docs/engineering/release.md)
 
-### 方式 B：任意语言（实现 MCP Server）
-
-任何语言的 MCP Server 都可以接入（Python/Go/Rust/Java 均有官方 SDK）。
-
-- 对 `local-path` / `remote-manifest` 注册，可继续在 `SKILL.md` 中声明 legacy runtime metadata
-- 对 npm installable Agent，优先使用 `package.json#rollAgent`
-- 如果是非 Node Agent，本地接入通常优先 `stdio`，常驻服务通常优先 `streamable-http`
-
-下面是 `remote-manifest` / legacy fallback 的最小示例：
-
-```markdown
----
-name: wechat-agent
-description: 微信自动回复
-metadata:
-  roll-transport: streamable-http
-  roll-endpoint: http://localhost:8100/mcp
----
-```
-
-```bash
-roll agent add ./wechat-agent
-# 或者直接注册远程服务
-roll agent add --remote http://localhost:8100/mcp --name wechat-agent --description "微信自动回复"
-roll run wechat-agent send_message --userId xxx --content "你好"
-```
-
-完整接入指南见：
-
-- [docs/how-to-integrate-non-node-agents.md](./docs/how-to-integrate-non-node-agents.md)
-
-### 第三方 Web UI / GUI
-
-本地 Desktop UI 使用版本化 Runtime Protocol；远程 Web UI 通过 Cloud Relay 与用户本机
-Companion 间接访问 Runtime。两者都不直接依赖 `ConversationEngine`：
-
-```bash
-roll runtime serve --stdio
-```
-
-| 第三方宿主 | 直接依赖 | 说明 |
-|---|---|---|
-| 本地 Node/Electron Main | `@roll-agent/client-node`；直接使用 Schema 时再加 `@roll-agent/protocol` | Renderer 只走命名 IPC，不直接持有 Runtime Client |
-| Browser Web App | `@roll-agent/relay-client` | 前端只实现 Chat/Approval/User Input UI；后端兑换短期 Relay session |
-| Cloud Relay Server | `@roll-agent/relay-protocol` | 负责身份、路由与可靠投递；不安装 Companion |
-| 用户本机 Companion Host | 官方 `roll companion` 服务 | 安装/一次 enrollment 后常驻；普通第三方不组装 Host SDK |
-
-- [架构与安全边界](./docs/runtime-protocol-architecture.md)
-- [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
-- [`@roll-agent/client-node` API 参考](./docs/client-node-reference.md)
-- [`@roll-agent/relay-protocol` Relay v1 参考](./docs/companion-relay-v1-reference.md)
-- [远程 Web App 接入指南](./docs/how-to-connect-remote-web-app.md)
-- [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
-- [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
-
-## 项目结构
+## 仓库结构与源码开发
 
 ```
 packages/
-  core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
-  protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
-  relay-protocol/ Browser、Cloud Relay 与 Local Companion 共享的 Relay Wire 契约
-  relay-client/  普通第三方 Web App 使用的 Browser-safe Relay Client
-  client-node/   stdio Runtime Protocol Node 客户端
-  companion/     Companion 的低层 Bridge/Lease/Interaction 基础能力（不含 Cloud Relay）
-  sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
-  browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
+  core/                    CLI、配置、认证、多模型 Provider、Agent Registry、MCP 宿主与本地配置台
+  runtime/                 ConversationEngine、ThreadStore、上下文压缩、工具桥接与 Scheduler 账本
+  protocol/                版本化 Runtime Protocol 契约与 JSON Schema（MIT）
+  client-node/             stdio Runtime Protocol Node.js 客户端（MIT）
+  relay-protocol/          Browser、Cloud Relay 与 Local Companion 共享 Wire 契约（MIT）
+  relay-client/            第三方 Web 应用使用的 Browser-safe Relay 客户端（MIT）
+  companion/               本地 Companion 桥接、租约与交互管理能力
+  sdk/                     MCP 子 Agent 开发 SDK：defineAgent() / defineTool()（MIT）
+  browser/                 浏览器运行时抽象、上下文管理与页面探索原语
+  reply-authority-client/  远程签名鉴权服务客户端
 agents/
-  browser-use/   浏览器操控 Agent（17 个 tool，streamable-http 常驻服务）
-  smart-reply/   智能回复 Agent（stdio 按需模式）
+  browser-use/             基于 CDP / Playwright 的浏览器自动化子 Agent
+  smart-reply/             领域结构化回复子 Agent
+examples/                  Electron / Python Runtime 客户端与结构化输出示例
 ```
 
-## 开发
+本地开发基于 Node.js 原生 Type Stripping 零编译运行（要求 Node.js >= 22.13.0，pnpm 版本见根 `package.json#packageManager`）：
 
 ```bash
-pnpm dev                          # 运行 CLI
-pnpm build                        # tsc 构建所有包，并由 Vite 打包 core 的 React 配置台
-pnpm typecheck                    # 类型检查
-pnpm test                         # 运行测试
-pnpm lint                         # ESLint
-pnpm format                       # Prettier
+pnpm install
+pnpm dev -- --help       # 零编译直接运行 TypeScript CLI 入口
+pnpm build               # 构建全部包与 Web 配置台静态产物
+pnpm typecheck           # 全仓严格类型检查
+pnpm lint                # ESLint 9 + neostandard 检查
+pnpm test                # 运行内置 node:test 单元测试套件
 ```
 
-单包操作：
+## 许可协议（License）
 
-```bash
-pnpm --filter @roll-agent/core typecheck
-pnpm --filter @roll-agent/sdk build
-node --experimental-strip-types --test packages/core/src/config/schema.test.ts
-```
+本仓库采用**核心源码可用（Fair Source）+ 生态接入层宽松开源**的双层许可策略：
 
-## 发布
-
-使用 [Changesets](https://github.com/changesets/changesets) 管理版本和发布。
-
-### 日常工作流
-
-```bash
-# 1. 开发完成后创建 changeset（选择影响的包 + semver 级别）
-pnpm changeset
-
-# 2. 将 .changeset/*.md 文件随 PR 一起提交
-git add .changeset/ && git commit -m "chore: add changeset"
-
-# 3. 合入 main 后 GitHub Action 自动开 release PR（标题通常为 "chore: version packages"）
-#    审批合入该 PR → 自动 publish 到 npm → 创建 GitHub Releases
-```
-
-### 本地操作（调试/紧急发布）
-
-```bash
-pnpm version-packages              # 应用 changeset，更新版本号 + CHANGELOG
-pnpm release-packages              # 构建 + 发布到 npm
-pnpm release-github-releases -- --dry-run  # 预览将补齐的 GitHub Releases
-pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
-```
-
-### 发布包列表
-
-- `@roll-agent/sdk`
-- `@roll-agent/browser`
-- `@roll-agent/core`
-- `@roll-agent/runtime`
-- `@roll-agent/protocol`
-- `@roll-agent/relay-protocol`
-- `@roll-agent/relay-client`
-- `@roll-agent/client-node`
-- `@roll-agent/companion`
-- `@roll-agent/reply-authority-client`
-- `@roll-agent/browser-use-agent`
-- `@roll-agent/smart-reply-agent`
-
-内部依赖自动级联：修改 `@roll-agent/browser` 会自动 bump `browser-use-agent` 的依赖版本。
-
-发布后用户即可全局安装：
-
-```bash
-npm install -g @roll-agent/core
-roll --help
-```
-
-全局安装 `@roll-agent/core` 会提供 `roll companion` 管理命令，但不会自动 enrollment、
-安装后台服务或启用远程访问。GA 交付目标是包含版本匹配 Node/Roll 的官方签名安装包；当前
-工作树尚未产出已签名/notarize 的 macOS 安装包或 Authenticode MSI，因此 npm 安装仅面向
-开发、CI 与受控 OEM 验证，不能被描述为普通终端用户的完整安装体验。
-
-## 技术栈
-
-| 领域 | 选型 |
-|------|------|
-| 语言 | TypeScript 5 strict（零 any） |
-| 运行时 | Node.js 22.6+（原生 Type Stripping） |
-| CLI | citty（类型安全命令定义） |
-| MCP | @modelcontextprotocol/sdk |
-| LLM | AI SDK v7 + Anthropic/OpenAI/DeepSeek/Qwen/xAI/Google Gemini |
-| 配置 | YAML + Zod 校验 |
-| 测试 | node:test + node:assert（零外部依赖） |
-| Web 配置台 | React + Tailwind CSS |
-| 构建 | tsc（输出 .js + .d.ts）+ Vite（打包配置台静态资源） |
-| 包管理 | pnpm workspace |
-| 版本管理 | Changesets（自动版本号 + CHANGELOG + npm publish） |
-
-## License
-
-MIT
+- **核心引擎、宿主与内置组件（[`FSL-1.1-ALv2`](./LICENSE)）**
+  仓库根目录及 `@roll-agent/core`、`@roll-agent/runtime`、`@roll-agent/companion`、`@roll-agent/browser` 等核心与内置 Agent 包采用 **Functional Source License, Version 1.1, ALv2 Future License (`FSL-1.1-ALv2`)**：
+  - 允许个人及企业**内部使用**、自托管部署、非商业教学研究，以及修改和再分发；
+  - **禁止竞争性商业用途（Competing Use）**：不得将本软件包装为替代性的商业产品或对外提供托管服务（Managed Service / SaaS）；
+  - **两年自动转开源**：每个发布版本自发布满 **2 年**之日起，自动转换为标准宽松开源协议 **Apache License 2.0**。
+- **SDK 与协议客户端包（[`MIT`](./packages/sdk/LICENSE)）**
+  `@roll-agent/sdk`、`@roll-agent/protocol`、`@roll-agent/client-node`、`@roll-agent/relay-protocol`、`@roll-agent/relay-client` 采用 **MIT License** 授权，方便第三方团队无顾虑地开发自定义 MCP 子 Agent 与客户端应用。

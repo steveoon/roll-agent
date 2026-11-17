@@ -30,7 +30,7 @@ Agent 注册信息由三个维度描述：
 - `transport`：`stdio` | `streamable-http`
 - `runtime ownership`：`on-demand` | `core-managed` | `external-managed`
 
-Installable Agent 通过 `package.json#rollAgent` 提供 runtime 信息，优先于 `SKILL.md metadata` 的 legacy fallback。
+可安装的 Agent 通过 `package.json#rollAgent` 声明运行时启动信息，其优先级高于 `SKILL.md` frontmatter `metadata` 的旧版兼容配置。
 
 非 Node/TypeScript Agent 的接入说明见：
 
@@ -38,9 +38,10 @@ Installable Agent 通过 `package.json#rollAgent` 提供 runtime 信息，优先
 
 当前推荐：
 
-- 本地工具型 Agent：`stdio + local-path`
-- 常驻服务型 Agent：`streamable-http + external-managed`
-- 非 Node repo 如果不想引入 `package.json`，继续使用 `SKILL.md metadata` 即可
+- 本地按需工具型 Agent：`stdio + on-demand`（如本地源码 `local-path` 或 npm 包）
+- 由 Roll 按需拉起并管理生命周期的常驻 HTTP Agent：`streamable-http + core-managed`（如 `browser-use-agent`）
+- 外部独立部署的常驻服务型 Agent：`streamable-http + external-managed`
+- 非 Node 仓库若不想引入 `package.json`，继续使用 `SKILL.md metadata` 即可
 
 ## 双层标准架构
 
@@ -50,11 +51,13 @@ Installable Agent 通过 `package.json#rollAgent` 提供 runtime 信息，优先
 
 ## Core 模块
 
-- `cli/` — 命令定义 + 终端 UI 工具（chalk/ora/cli-table3）
-- `registry/` — SKILL.md 解析（gray-matter）、Agent 发现、注册持久化（~/.roll-agent/）
+- `cli/` — 命令定义 + 终端 UI 工具（citty/ink/chalk/ora/cli-table3）
+- `auth/` — ChatGPT 等订阅账号的 OAuth 登录、凭证存储与跨进程续期锁
+- `execution-environment/` — 宿主运行环境探测（独立发行版 vs npm 全局）、私有 Node/命令路径解析与自更新目标校验
+- `registry/` — SKILL.md 解析（gray-matter）、Agent 发现、注册持久化（~/.roll-agent/）与进程使用租约
 - `router/` — 声明式路由 + LLM 智能路由
 - `mcp/` — MCP Client 连接池（stdio/HTTP 传输）、Sampling 处理
-- `llm/` — AI SDK Provider 接线与统一模型调用
+- `llm/` — AI SDK Provider 接线、OpenAI Responses/ChatGPT 适配与统一模型调用
 - `config/` — roll.config.yaml 加载、Zod 校验、breaking schema migration 检测
 - `runtime-host/` — 动态加载 `@roll-agent/runtime`，把 config/registry/MCP 依赖注入 Runtime
 - `scheduler-host/` — daemon、exec 子进程、进程树探活、用户服务与 admission lock
@@ -72,10 +75,10 @@ Runtime 是可复用的执行内核；新增功能必须继续保持这个边界
 不得反向依赖 Core。需要宿主能力时，由 Runtime 定义中立契约，Core 实现并注入；Runtime 调用
 注入的宿主接口不构成反向包依赖。
 
-- **Runtime 行为与持久化**放在 `packages/runtime`：Engine、Session、Tool execution、ThreadStore、
-  scheduler state machine。
+- **Runtime 行为与持久化**放在 `packages/runtime`：对话引擎、会话管理、工具执行桥接、ThreadStore、
+  调度状态机与账本。
 - **产品与宿主集成**放在 `packages/core`：CLI/UI、完整配置解析、账号/凭证、Provider 创建与协议适配、
-  模型能力发现、Agent Registry、MCP connection、daemon/service 和 process identity。
+  模型能力发现、Agent Registry、MCP 连接管理、守护进程/系统服务与进程身份校验。
 - **进程内注入契约**由 Runtime 的 `host-contracts`、`tool-contracts`、`skills` 等公开出口提供。
   `ConversationEngine` 接收 `RuntimeSettings`、模型和 `AgentHost` 等依赖；Core 的
   `runtime-host/engine-factory.ts` 将 `RollConfig` 显式投影为执行设置。不得把完整配置、认证服务、
@@ -100,8 +103,16 @@ API 迁移与宿主约束见 [Runtime 宿主 API 迁移](../runtime-core-api-mig
 ## SDK 公开 API
 
 ```typescript
-import { defineAgent, defineTool } from "@roll-agent/sdk";
-// 类型：AgentContext, ToolDefinition, AgentDefinition, AnyToolDefinition
+import {
+  defineAgent,
+  defineTool,
+  createAgentLogger,
+  StructuredToolError,
+  isStructuredToolError,
+  TOOL_RESOURCE_ACCESS_MODES,
+  TOOL_RESOURCE_HINT_KINDS,
+} from "@roll-agent/sdk";
+// 核心类型：AgentContext, ToolDefinition, AgentDefinition, AnyToolDefinition, ToolResourceHint, AppOutputContract
 ```
 
 `AnyToolDefinition` 用于异构 tool 集合（类型擦除），`ToolDefinition<TInput, TOutput>` 保留泛型类型安全。

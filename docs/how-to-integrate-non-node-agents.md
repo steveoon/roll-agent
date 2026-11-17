@@ -1,43 +1,48 @@
-# How To Integrate Non-Node Agents With Roll
+# 非 Node.js 子 Agent 接入指南
 
-本指南面向使用 Python、Java、Go、Rust 等非 Node/TypeScript 技术栈开发子 Agent 的团队，说明如何把 Agent 接入 `roll-core`。
+本指南面向使用 Python、Java、Go、Rust 等非 Node.js / TypeScript 技术栈开发子 Agent 的团队，说明如何将子 Agent 接入 `Roll（@roll-agent/core）`。
 
-当前最推荐的两种接入方式是：
+常见的接入方式有三种：
 
-- **本地 `stdio` Agent**：由 `roll run` / `roll ask` 按需启动本地进程
-- **远程 `streamable-http` Agent**：Agent 自己常驻运行，Roll 通过 MCP HTTP 连接
+- **本地 `stdio` Agent（`on-demand`）**：由 `roll chat`、`roll schedule`、`roll run` 或 `roll ask` 按需拉起本地子进程。
+- **外部常驻 `streamable-http` Agent（`external-managed`）**：Agent 作为独立服务常驻运行，Roll 通过 MCP Streamable HTTP 连接。
+- **Roll 托管 `streamable-http` Agent（`core-managed`）**：通过 `package.json#rollAgent` 声明启动命令与本地端口，由 `roll agent start` / `stop` 托管常驻进程。
 
 ## 先选接入模式
 
-| 场景 | 推荐模式 | 注册方式 | 生命周期 |
+| 场景 | 推荐传输 | 推荐配置方式 | 进程归属（`ownership`） |
 | --- | --- | --- | --- |
-| 工具型 Agent、启动成本低、希望一次调用拉起一个进程 | `stdio` | `roll agent add ./path` | `on-demand` |
-| 浏览器自动化、长会话、启动成本高、已有常驻服务 | `streamable-http` | `roll agent add --remote <endpoint>` 或 `roll agent add ./path` | `external-managed` |
+| 工具型 Agent、启动开销低、无需跨会话维持长连接 | `stdio` | `SKILL.md metadata` + `roll agent add ./path` | `on-demand` |
+| 已有独立部署的常驻服务（FastAPI / Spring Boot / Go 等） | `streamable-http` | `roll agent add --remote <endpoint>` 或 `SKILL.md metadata` | `external-managed` |
+| 本地长会话 / 浏览器自动化服务，希望由 `roll agent start/stop` 统一启停 | `streamable-http` | `package.json#rollAgent` + `roll agent add ./path` | `core-managed` |
 
-如果你只是想让任意语言的 Agent 被 Roll 调用，**不需要**使用 Node SDK。真正的要求只有两个：
+让任意语言的程序被 Roll 调用**不需要**引入 Node SDK，只需满足两个条件：
 
-1. 你的程序实现了 MCP Server
-2. 你提供了 `SKILL.md`
+1. 程序实现了标准 MCP Server（`stdio` 或 `streamable-http`）。
+2. 提供了一份符合规范的 `SKILL.md`（纯 `--remote` 注册时由 Roll 自动生成最简本地清单）。
+
+## 不同入口的调用与连接机制
+
+已注册的非 Node.js 子 Agent 可在以下所有入口中使用，但连接生命周期和元数据读取方式有所不同：
+
+- **`roll chat`**：进入对话后通过 MCP `listTools()` 直接读取子 Agent 的实时工具列表与 `inputSchema` 注入模型上下文。对于 `stdio` Agent，**同一聊天会话期间首次连接后会保持并复用该子进程连接**，退出会话时才关闭——因此在本地修改了 `stdio` Agent 的代码或工具 Schema 后，需退出当前 `roll chat` 并重新进入会话（如 `roll chat --last`）才会加载新代码。
+- **`roll schedule`**：每轮定时运行相当于独立执行一轮无人值守 `roll chat`。`on-demand` 的 `stdio` 子进程在该轮运行期间按需拉起，本轮结束即释放；`core-managed` 与 `external-managed` 的 HTTP 服务则直接通过配置的 endpoint 连接。
+- **`roll run` / `roll ask`**：单次命令执行时拉起 `stdio` 子进程，调用完成后立即关闭。其中 `roll ask` 分两阶段执行：**前置路由阶段**主要读取注册时保存的 `SKILL.md`（`name`、`description` 与正文说明）来挑选目标 Agent 和工具，选定后再建立 MCP 连接校验 `inputSchema` 并执行工具。
 
 ## 共享要求
 
-无论使用哪种模式，都建议满足这些约束：
+无论采用哪种接入模式，都请遵守以下约束：
 
-- `SKILL.md` 必须存在，frontmatter 至少包含 `name` 和 `description`
-- `SKILL.md` body 要写清楚 tools 的用途；`roll ask` 路由会读取这些文字
-- `stdout` 只输出 MCP 协议数据
-- 日志一律写到 `stderr`
-- tool 名称、参数名、描述尽量稳定；更新后 `stdio` Agent 直接重跑，HTTP Agent 需要重启服务
-- **`stdout` 必须是 UTF-8 字节流**。Roll 按 UTF-8 解码子进程的 stdio；Windows 上非 Node
-  运行时默认使用系统 locale 编码（中文系统为 CP936/GBK），中文 tool 结果会变成乱码。
-  - Python：Roll 启动 `stdio` 子进程时会自动注入 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`
-    （可在 agent env 里显式覆盖），通常无需额外处理；自行托管的 HTTP 服务进程需要自己保证
-  - 其他运行时（Java/Go/Rust/.NET）：请在程序内显式以 UTF-8 写 stdout/stderr
-    （如 Java 加 `-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8`），不要依赖系统默认编码
+- `SKILL.md` 必须存在，YAML frontmatter 至少包含 `name` 和 `description`。
+- `SKILL.md` 正文应清晰说明各工具的用途与适用场景（供 `roll ask` 前置路由及技能检索参考）。
+- **`stdout` 仅用于输出 MCP 协议报文**；所有业务日志、调试输出一律写入 `stderr`。
+- **`stdout` 必须是 UTF-8 字节流**。Roll 按 UTF-8 解码子进程输出；Windows 上非 Node.js 运行时默认常采用系统区域编码（如中文环境下的 CP936/GBK），直接输出会导致中文工具结果乱码：
+  - **Python**：Roll 启动 `stdio` 子进程时会自动注入 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`（可在 `agents.env` 中覆盖），通常无需额外配置；自行托管的 HTTP 服务进程需自行确保 UTF-8 编码。
+  - **其他运行时（Java / Go / Rust / .NET）**：请在程序启动参数或代码中显式指定 UTF-8 输出（例如 Java 传入 `-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8`），不要依赖系统默认编码。
 
 ## 方案 A：本地 `stdio` Agent
 
-这是非 Node Agent 最简单的本地接入方式。
+这是非 Node.js 子 Agent 最轻量的本地接入方式。
 
 ### 目录结构
 
@@ -66,30 +71,34 @@ metadata:
 
 说明：
 
-- `roll-command` 会被直接按空白拆分，不经过 shell 解释
-- 如果启动命令很复杂，建议写一个包装脚本，再把 `roll-command` 指向那个脚本
-- 非 Node Agent 的 `local-path` 场景，当前**最简单**的做法仍然是用 `SKILL.md metadata`
-- 单条 tool 结果可能超过 10 MiB 时，用 `roll-max-buffer-size`（字节，正整数）调高 stdio 读缓冲上限，例如 `roll-max-buffer-size: "33554432"`；未声明时沿用 MCP SDK 默认的 10 MiB，超限会直接断开连接。该字段只对 stdio 生效
+- `roll-command` 按空白字符直接拆分为可执行文件与参数，**不经过 shell 解释**（不支持管道、重定向或环境变量展开）；若启动逻辑复杂，建议编写包装脚本并将 `roll-command` 指向该脚本。
+- 单条工具返回结果可能超过 10 MiB 时，可在 `metadata` 中声明 `roll-max-buffer-size`（字节数，正整数，例如 `roll-max-buffer-size: "33554432"`）调高 `stdio` 读缓冲上限；未声明时沿用 MCP SDK 默认的 10 MiB，超限会断开连接。该字段仅对 `stdio` 生效。
 
 ### 注册与调用
 
 ```bash
 roll agent add ./python-agent
+
+# 单次声明式调用与自然语言路由
 roll run python-demo-agent hello --name 张三
 roll ask "让 python-demo-agent 打个招呼"
+
+# 在交互式多轮对话中使用（模型自动发现并调用工具）
+roll chat
 ```
 
-### 什么时候适合
+注册后，该 Agent 同样可在 `roll schedule` 定时任务中由模型自动调用（注意：定时服务环境的 `PATH` 较精简，若 `python3` 等命令位于 Homebrew 或虚拟环境目录，请在 `roll.config.yaml` 的 `scheduler.env.PATH` 中显式补齐）。
 
-- 进程启动成本低
-- 不需要长时间持有浏览器、数据库连接、会话状态
-- 希望本地开发时直接改代码后重跑命令
+### 适用场景
 
-## 方案 B：远程 `streamable-http` Agent
+- 进程启动快、无重型初始化开销。
+- 不需要跨会话长期持有浏览器实例或连接池。
 
-如果 Agent 本身已经是一个常驻服务，或者启动成本高，推荐走 HTTP MCP。
+## 方案 B：远程 / 常驻 `streamable-http` Agent
 
-### 方式 B1：直接注册远程服务
+如果 Agent 本身已是常驻服务，或单次启动成本较高，推荐使用 MCP `streamable-http`。
+
+### 方式 B1：直接注册远程 endpoint
 
 ```bash
 roll agent add \
@@ -98,19 +107,14 @@ roll agent add \
   --description "Python HTTP MCP Agent"
 ```
 
-这种方式最适合：
-
-- 服务已经在线
-- 你只想让 Roll 连上它
-- 不需要额外维护一个本地 Agent 仓库
+适用场景：服务已经独立运行在线，无需在本地维护 Agent 目录。
 
 注意：
 
-- 这种方式会生成一个最小本地 manifest
-- `ask` 路由可用，但可用语料只有 `name`、`description` 和一个通用 body
-- 如果你希望 `roll ask` 更准确地理解 tools，建议使用下面的 B2
+- 该命令会在 Roll 数据目录下自动生成一份最简本地技能清单，仅包含你传入的 `name` 和 `description`，不含各工具的详细文字说明。
+- `roll chat` 和 `roll schedule` 会直接连接 MCP 服务拉取实时工具列表，不受影响；但若希望 `roll ask` 的前置路由能结合详细文档更精准地挑选工具，推荐使用下面的方式 B2。
 
-### 方式 B2：本地仓库 + `SKILL.md` 指向远程 endpoint
+### 方式 B2：本地目录 + `SKILL.md` 指向远程 endpoint
 
 ```text
 python-http-agent/
@@ -128,8 +132,8 @@ metadata:
 
 ## Tools
 
-- `search_candidate` - 搜索候选人
-- `send_reply` - 发送回复
+- `search_docs` - 检索知识库文档
+- `create_ticket` - 创建工单
 ```
 
 注册：
@@ -138,22 +142,16 @@ metadata:
 roll agent add ./python-http-agent
 ```
 
-这样做的好处是：
+这样做的好处：
 
-- `ask` 路由能看到完整 `SKILL.md` body
-- 以后改描述、tool 说明时可以直接 `roll update`
+- `roll ask` 前置路由可以读取完整的 `SKILL.md` 正文说明。
+- 后续调整描述或工具说明文档后，直接执行 `roll update` 即可同步元数据。
 
-### 什么时候适合
+## 可选：使用 `package.json#rollAgent` 声明运行时契约
 
-- Agent 需要维持浏览器、会话、缓存、长连接
-- 进程启动慢，不适合每次调用拉起
-- 你已经有 Python/FastAPI、Java/Spring Boot、Go/Fiber 等常驻服务
+如果你的非 Node.js 项目希望显式声明进程托管模式（尤其是让 Roll 通过 `roll agent start` / `stop` 托管本地常驻 HTTP 服务），可以在项目根目录放置一个最小的 `package.json` 并配置 `rollAgent` 字段。
 
-## 可选：在非 Node 仓库里使用 `package.json#rollAgent`
-
-如果你的非 Node Agent 仓库愿意放一个最小 `package.json`，也可以使用 runtime manifest。
-
-### `stdio` 示例
+### 1. `on-demand` + `stdio` 示例
 
 ```json
 {
@@ -166,15 +164,41 @@ roll agent add ./python-http-agent
     },
     "start": {
       "command": "python3",
-      "args": ["agent.py"]
+      "args": ["agent.py"],
+      "maxBufferSize": 33554432
     }
   }
 }
 ```
 
-`start` 下可选 `"maxBufferSize": 33554432`（字节，正整数），语义与 SKILL.md 的 `roll-max-buffer-size` 相同。
+### 2. `core-managed` + `streamable-http` 示例（由 Roll 托管本地常驻进程）
 
-### `external-managed streamable-http` 示例
+需要同时声明 `start.command`（及可选 `args`）与本地监听的 `endpoint.path` + `endpoint.port`：
+
+```json
+{
+  "name": "python-managed-http-agent",
+  "private": true,
+  "rollAgent": {
+    "runtime": {
+      "ownership": "core-managed",
+      "transport": "streamable-http"
+    },
+    "start": {
+      "command": "python3",
+      "args": ["server.py", "--port", "8100"]
+    },
+    "endpoint": {
+      "path": "/mcp",
+      "port": 8100
+    }
+  }
+}
+```
+
+注册后可通过 `roll agent start python-managed-http-agent`、`roll agent stop python-managed-http-agent` 和 `roll agent health` 管理其生命周期。
+
+### 3. `external-managed` + `streamable-http` 示例（外部自行托管进程）
 
 ```json
 {
@@ -192,74 +216,62 @@ roll agent add ./python-http-agent
 }
 ```
 
-注意两点：
+### 优先级与跳过前端依赖安装
 
-- `package.json#rollAgent` 优先级高于 `SKILL.md metadata`
-- 如果两边 runtime 信息冲突，Roll 会直接报错
+- `package.json#rollAgent` 的优先级高于 `SKILL.md metadata`；若两处同时声明了传输配置且彼此不一致，注册时 Roll 会直接报错阻止。
+- 当目录下存在 `package.json` 时，`roll agent add ./path` 默认会依次根据 `package.json#packageManager` 字段及锁文件（`pnpm-lock.yaml`、`package-lock.json` / `npm-shrinkwrap.json`、`yarn.lock`、`bun.lock` / `bun.lockb`）自动识别包管理器安装依赖，均未命中时回退执行 `pnpm install`。
+- 对于仅为提供 `rollAgent` 清单而放置 `package.json` 的纯 Python / Java / Go / Rust 项目，无需执行前端包管理器安装，可在注册时通过 `ROLL_SKIP_INSTALL=1` 跳过该步骤：
 
-对非 Node Agent 来说，这个做法是**可选高级用法**。如果你只是本地开发或手工部署服务，通常 `SKILL.md metadata` 更简单。
+```bash
+ROLL_SKIP_INSTALL=1 roll agent add ./python-managed-http-agent
+```
 
-另一个现实差异是：
+## 常见误区
 
-- `roll agent add ./path` 只要看到 `package.json`，当前就会尝试执行一次 `pnpm install`
-- 对纯 Python/Java/Go 项目来说，这通常不是必须步骤
-- 所以如果你只是想提供 runtime manifest，而不想引入 npm/pnpm 语义，继续使用 `SKILL.md metadata` 往往更省事
+### 1. 直接对纯非 Node.js 仓库执行 `roll agent install`
 
-## 当前不推荐的路径
+`roll agent install <pkg>` 面向发布到 npm 仓库的软件包。如果希望为非 Node.js 子 Agent 提供团队内便捷分发，建议选择以下方式之一：
 
-### 1. 直接把纯 Python/Java 项目当作 npm installable Agent
+- 将服务部署为常驻 HTTP 端点，使用 `roll agent add --remote <endpoint>` 接入；
+- 通过 Git 仓库分发，使用 `roll agent add <git-url>` 克隆并注册；
+- 若确需走 npm 分发链路，编写一个轻量的 npm 包装包来拉起对应语言的可执行文件或运行时。
 
-当前 `roll agent install` 的分发路径仍是 npm-centric。  
-如果你想让非 Node Agent 走“一键安装”，更现实的方式通常是：
+### 2. 将普通日志输出到 `stdout`
 
-- 提供一个 Node/npm 包装层
-- 或把 Agent 部署成远程服务，再用 `roll agent add --remote`
-
-### 2. 让 MCP 协议日志写到 `stdout`
-
-这会直接污染协议流，尤其是 `stdio` 模式下最容易出问题。日志必须走 `stderr`。
+在 `stdio` 模式下，任何非 MCP JSON-RPC 的标准输出都会破坏协议帧解析导致连接中断。请务必将所有日志重定向到 `stderr`。
 
 ## 更新与运维
 
-- `stdio` Agent 改了代码后，通常直接重跑即可
-- `streamable-http` Agent 改了代码后，需要重启服务进程
-- 如果改了 `SKILL.md` body、描述或 runtime metadata，可执行：
-
-```bash
-roll update
-```
-
-完整更新策略见：
-
-- [How To Update Registered Agents](./how-to-update-registered-agents.md)
+- **`stdio` Agent 更新代码后**：`roll run` / `roll ask` 下次执行即生效；正在进行的 `roll chat` 会话因复用了子进程连接，需退出会话后重进才生效。
+- **`streamable-http` Agent 更新代码后**：`core-managed` 执行 `roll agent stop <name>` 与 `roll agent start <name>` 重启；`external-managed` 在外部托管系统中重启服务进程（若工具 Schema 变化，重进 `roll chat` 会话以刷新工具定义）。
+- **修改了 `SKILL.md` 描述、正文或运行时配置后**：执行 `roll update` 刷新注册表元数据。完整更新策略参见 [已注册子 Agent 更新指南](./how-to-update-registered-agents.md)。
 
 ## 快速排错
 
-### `roll run` 能连上，但 `roll ask` 选不到正确 tool
+### `roll run` / `roll chat` 能正常调用，但 `roll ask` 选不到正确工具
 
-优先检查 `SKILL.md` body 是否写清楚了 tool 说明。`ask` 路由不会直接读取 live tool schema 作为主要语料。
+优先检查 `SKILL.md` 正文是否写清楚了工具名称与职责说明。`roll ask` 的前置路由阶段主要依据注册表中的 `SKILL.md` 文本选工具，而不是先连接所有子 Agent 拉取实时 Schema。
 
 ### `stdio` Agent 启动失败
 
 优先检查：
 
-- `roll-command` 是否可在当前机器直接执行
-- 命令是否依赖 shell 特性（如管道、重定向、变量展开）
-- MCP 协议输出是否被普通日志污染
+- `roll-command`（或 `rollAgent.start.command`）在当前环境（或 `scheduler.env.PATH`）下是否可直接执行；
+- 启动命令是否误用了管道、重定向、`~` 或环境变量展开等 shell 语法；
+- 子进程启动时是否向 `stdout` 打印了横幅或日志污染了 MCP 协议流。
 
 ### HTTP Agent 已启动，但 Roll 仍报连接失败
 
 优先检查：
 
-- endpoint 是否真的是 MCP `streamable-http`
-- `roll-endpoint` / `--remote` 是否带了正确的 `/mcp` 路径
-- 服务重启后端口是否变化
+- 服务端实现是否为标准 MCP `streamable-http` 协议；
+- `roll-endpoint`、`--remote` 或 `endpoint.path` 是否包含了正确的路由后缀（如 `/mcp`）；
+- 服务重启后监听地址或端口是否发生了变化。
 
-## 预期结果
+## 小结
 
-按本指南接入后，非 Node Agent 团队应该能明确区分：
+接入非 Node.js 子 Agent 时，可按如下原则快速选型：
 
-- **本地工具型 Agent**：优先 `stdio`
-- **常驻服务型 Agent**：优先 `streamable-http`
-- **简单接入**：优先 `SKILL.md metadata`
-- **更强 runtime 声明**：可选 `package.json#rollAgent`
+- **轻量本地工具**：优先选 `stdio` + `SKILL.md metadata`；
+- **独立部署的外部常驻服务**：优先选 `external-managed` `streamable-http`（配合本地 `SKILL.md` 可获得最佳 `roll ask` 路由效果）；
+- **需由 Roll 统一启停的本地常驻服务**：选 `package.json#rollAgent`（`core-managed` + `streamable-http`），注册时配合 `ROLL_SKIP_INSTALL=1` 跳过前端依赖安装。

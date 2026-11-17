@@ -1,171 +1,115 @@
-# How To Update Registered Agents
+# 更新已注册的子 Agent
 
-本指南说明在 Roll 里更新一个已注册子 Agent 时，什么时候只需要重启进程，什么时候可以用 `roll update`，什么时候仍然建议 `remove + add`。
+本指南说明在 Roll 中更新已注册子 Agent 时，不同变更分别影响哪一层状态，以及何时重跑命令或重进会话即可生效、何时应执行 `roll update`、何时必须 `remove + add` 重新注册。
 
 ## 适用范围
 
-假设你已经注册过一个子 Agent，并且遇到了以下任一情况：
+假设你已经注册过一个子 Agent，并遇到以下任一情况：
 
-- tool 逻辑更新了
-- tool schema 更新了
-- `SKILL.md` 的名称、描述、body、transport、endpoint 变了
-- 你发现 `roll run` / `roll ask` 还是打到了旧逻辑
-- `roll update` 提示本地配置 schema 需要迁移
+- 修改了 tool 实现逻辑或 tool schema
+- 更新了 `SKILL.md` 的名称、描述、正文或 `package.json#rollAgent` 元数据
+- 修改代码后发现 `roll run`、`roll ask` 或 `roll chat` 仍执行旧逻辑
+- `roll update` 提示本地配置文件 schema 需要迁移
 
-## Step 1. 先判断变更发生在哪一层
+## Step 1. 判断变更发生在哪一层
 
-更新子 Agent 时，实际会涉及三层状态：
+子 Agent 的行为由以下三层状态共同决定：
 
-| 层 | 典型内容 | 是否影响调用 |
+| 层级 | 典型内容 | 是否影响调用 |
 | --- | --- | --- |
-| 注册表层 | agent 名称、描述、SKILL body、transport、endpoint | 会 |
-| 磁盘代码层 | 本地源码、git pull 后的代码、npm 安装产物 | 会 |
-| 运行进程层 | 正在运行的 HTTP Agent 内存态 | 会 |
+| 注册表层 | Agent 名称、描述、`SKILL.md` 正文、transport、endpoint、启动元数据 | 会 |
+| 磁盘代码层 | 本地源码、`git pull` 后的代码、npm 包安装产物 | 会 |
+| 运行进程层 | 常驻 HTTP Agent 服务进程，或当前 `roll chat` 会话持有的 `stdio` 子进程 | 会 |
 
-最常见的误区是：**注册表更新了，不代表正在运行的 HTTP Agent 进程也更新了。**
+排查更新未生效时，最常见的误区是**只更新了磁盘代码或注册表，却仍在复用旧的运行进程**。
 
-## Step 2. 如果只是 tool 逻辑或 tool schema 更新
+## Step 2. 仅改代码或 Tool Schema 时的生效方式
+
+如果 Agent 的名称、来源及注册表启动元数据均未改变，仅修改了内部代码逻辑或 tool schema，无需 `remove + add`，按传输方式与调用入口处理即可：
 
 ### `stdio` Agent
 
-直接重新执行命令即可，不需要 `remove + add`。
-
-原因：
-
-- `roll run` / `roll ask` 会重新连接 Agent
-- `stdio` Agent 通常是按调用启动的新进程
-- 新进程会直接加载最新代码
+- **单次命令（`roll run` / `roll ask`）**：直接重新执行命令即可生效。单次命令每次都会拉起新的 `stdio` 子进程，执行完毕后退出，因此会自动加载磁盘上的最新代码与 schema。
+- **交互式会话（`roll chat`）**：在同一个 `roll chat` 会话期间，宿主会保持并复用已建立的 `stdio` 子进程连接，不会在每轮对话重拉进程。**修改代码或 tool schema 后，需要退出当前 `roll chat` 会话并重新进入**，才会启动新子进程使改动生效。
 
 ### `streamable-http` Agent
 
-需要**重启 Agent 服务进程**，通常不需要 `remove + add`。
+需要**重启该 HTTP Agent 服务进程**。虽然 `roll run` / `roll ask` 调用前会实时请求 `tools/list`，但 HTTP Agent 是独立常驻进程，不重启服务则内存中仍是旧代码和旧 schema：
 
-原因：
+- 若为 Roll 托管（`core-managed`）的 HTTP Agent，可直接运行 `roll update` 自动完成重启与探活。
+- 若为外部自管（`external-managed`）的 HTTP 服务，需由你手动重启外部服务进程。
+- 若当前正处于 `roll chat` 会话中且更新了 tool schema，重启 HTTP 服务后同样建议重新进入 `roll chat` 会话以刷新工具列表。
 
-- `roll run` / `roll ask` 调用前会读取 live `tools/list`
-- 但 HTTP Agent 是常驻进程
-- 如果服务没有重启，内存里仍然是旧 schema / 旧逻辑
+## Step 3. 使用 `roll update` 刷新注册表与重启托管服务
 
-结论：
-
-- `stdio`：重新执行即可
-- `http`：重启服务进程
-
-## Step 3. 如果 Agent 来源是 `git` / `installed-package` / `local-path`
-
-这三类来源都可以优先尝试：
+无论子 Agent 来自 `git`、`installed-package` 还是 `local-path`（例如通过 `roll agent add ./agents/my-agent` 注册的本地目录），都可以优先使用 `roll update` 同步更新：
 
 ```bash
 roll update
 ```
 
-`roll update` 当前会做这些事：
+`roll update` 会按注册来源分别执行：
 
-- `git` 来源：`git pull` + 安装依赖 + 刷新 `SKILL.md` / manifest
-- `installed-package` 来源：重新安装 npm 包 + 刷新 `SKILL.md` / manifest
-- `local-path` 来源：不拉代码，但会重新解析本地 `SKILL.md` / manifest 并刷新注册表
+- **`git` 来源**：执行 `git pull` 拉取最新代码、安装依赖，并重新解析 `SKILL.md` / manifest 刷新注册表。
+- **`installed-package` 来源**：拉取并重新安装 npm 包，同步刷新 `SKILL.md` / manifest。
+- **`local-path` 来源**：不改动本地源码，但会重新解析本地目录中的 `SKILL.md` 与 `package.json#rollAgent`（manifest）并刷新注册表快照。
 
-但要注意：
+只要 Agent 的**名称和注册来源没有改变**，以下注册表层变更都可以直接通过 `roll update` 刷新，无需 `remove + add`：
 
-- 如果这个 Agent 是 **正在运行中的 `core-managed` HTTP Agent**，`roll update` 会自动重启并重新探活
-- 如果这个 Agent 是 **external-managed HTTP 服务**，`roll update` 只会刷新 metadata / 连通性，不会替你接管外部进程
-- 如果 `roll update` 同时提示本地 `roll.config.yaml` 需要迁移，先执行：
+- `SKILL.md` 的 `description` 或正文更新（例如希望同步更新 `roll ask` 的路由语义）
+- `package.json#rollAgent` 的运行时元数据更新，或旧版 `roll-command` / `roll-endpoint` 字段更新
+
+执行 `roll update` 时还需注意以下行为边界：
+
+- 对于**正在运行的 `core-managed` HTTP Agent**，`roll update` 会自动停止旧进程、启动新进程并重新探活。
+- 对于 **`external-managed` HTTP 服务**，`roll update` 只刷新注册表元数据并检查连通性，不会接管或重启外部进程。
+- 若 `roll update` 提示本地 `roll.config.yaml` 需要迁移，请先执行配置迁移再继续验证：
 
 ```bash
 roll config migrate
 ```
 
-然后再继续验证命令行为是否符合预期
+## Step 4. 必须 `remove + add` 的场景
 
-## Step 4. 出现这些情况时，必须 `remove + add`
+只有当 Agent 的核心标识或注册来源发生变化时，才必须先移除再重新注册：
 
-以下变更属于“注册表层变化”，需要重新注册：
+- `SKILL.md` 中的 Agent `name` 变了
+- Agent 的注册来源类型变了（例如从本地路径改为 npm 包，或从本地路径改为远程 `--remote` endpoint）
 
-- `SKILL.md` 中的 `name` 变了
-- Agent 的来源变了
-  - 例如从本地 path 改成 npm 包
-  - 或从本地 path 改成远程 endpoint
-
-以下变更现在通常可以直接用 `roll update` 刷新，不必 `remove + add`：
-
-- `description` 变了
-- `SKILL.md` body 变了，且你希望 `ask` 的路由语义更新
-- legacy `roll-command` / `roll-endpoint` 变了，但 Agent 名称没变且来源没变
-- `package.json#rollAgent` 的 runtime metadata 变了，但 Agent 名称没变且来源没变
-
-这时建议显式执行：
+此时按新的来源方式显式重新注册：
 
 ```bash
+# 本地路径或 Git 仓库
 roll agent remove <agent-name>
 roll agent add <path-or-git-url>
-```
 
-或：
-
-```bash
+# npm 包
 roll agent remove <agent-name>
 roll agent install <package>
-```
 
-或：
-
-```bash
+# 远程 HTTP Endpoint
 roll agent remove <agent-name>
 roll agent add --remote <endpoint> --name <name> --description "<description>"
 ```
 
-## Step 5. `local-path` Agent 现在也可以用 `roll update`
+## Step 5. 验证更新生效
 
-当前 `roll update` **会刷新** `local-path` Agent 的本地 metadata。
-
-如果你是这样注册的：
-
-```bash
-roll agent add ./agents/my-agent
-```
-
-那么：
-
-- 只改 tool 逻辑 / schema：
-  - `stdio` Agent 直接重跑
-  - `core-managed http` Agent 可先用 `roll update`
-  - `external-managed http` Agent 仍需重启外部服务
-- 改 metadata / manifest：
-  - 可优先尝试 `roll update`
-- 改 Agent 名称或来源：
-  - 需要 `remove + add`
-
-## Step 6. 更新后如何确认是否真的生效
-
-建议至少做下面几步：
+更新完成后，可通过以下命令确认注册信息、连通性与实际调用结果：
 
 ```bash
 roll agent info <agent-name>
 roll agent health
-roll run <agent> <tool> ...
+roll run <agent-name> <tool-name> ...
 ```
 
-如果是 HTTP Agent，额外确认：
-
-- 服务进程是否已重启
-- `roll run` 读到的 live `tools/list` 是否已经反映新 schema
+若目标为 HTTP Agent，请额外确认服务进程确已重启，且 `roll run` 获取到的实时 `tools/list` 已反映最新 schema；若在 `roll chat` 中验证，请确保已退出旧会话并重新进入。
 
 ## 快速判断表
 
-| 场景 | 是否需要重启进程 | 是否需要 `roll update` | 是否需要 `remove + add` |
+| 变更场景 | 是否需要重启进程 / 重进会话 | 是否需要 `roll update` | 是否需要 `remove + add` |
 | --- | --- | --- | --- |
-| `stdio` Agent 只改 tool 逻辑 | 否 | 否 | 否 |
-| `http` Agent 只改 tool 逻辑 | 是 | 否 | 否 |
-| `git` Agent 更新代码 | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
-| `installed-package` Agent 更新包 | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
-| `local-path` Agent 更新代码 / metadata | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
-| `SKILL.md` name 改了 | 视 transport 而定 | 不够 | 是 |
-| 想刷新本地 path 注册信息 | 视 transport 而定 | 适用 | 否 |
-
-## 预期结果
-
-按这个流程处理后，你应该可以区分：
-
-- 什么时候问题是“注册表没刷新”
-- 什么时候问题是“磁盘代码没更新”
-- 什么时候问题只是“HTTP Agent 进程没重启，内存里还是旧逻辑”
+| `stdio` Agent 仅改代码或 tool schema | `roll run` / `roll ask` 无需操作；`roll chat` 需退出并重进会话 | 否 | 否 |
+| `streamable-http` Agent 仅改代码或 tool schema | 需重启 HTTP 服务进程（若在 `roll chat` 中改了 schema 也需重进会话） | 否（`core-managed` 可借 `roll update` 重启） | 否 |
+| `git` / `installed-package` Agent 拉取新版本 | `core-managed` 自动重启；`external-managed` 需手动重启外部服务；已打开的 `roll chat` 需重进 | 建议 | 否 |
+| `local-path` Agent 修改代码或刷新本地 `SKILL.md` / manifest | 同上（`stdio` 在 `roll chat` 中需重进，`external-managed` HTTP 需手动重启） | 改代码无需，刷新元数据建议执行 | 否 |
+| `SKILL.md` 中的 `name` 改变，或 Agent 来源类型改变 | 重注册后旧 `roll chat` 会话需重进，`external-managed` HTTP 需确保目标服务就绪 | 不够 | **是** |

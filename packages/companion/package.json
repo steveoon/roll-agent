@@ -1,6 +1,7 @@
 {
   "name": "@roll-agent/companion",
   "version": "1.0.3",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "repository": {
     "type": "git",

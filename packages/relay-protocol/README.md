@@ -55,24 +55,27 @@ Interaction 帧；Companion→Relay 还包含首帧 `device.connect`。`runtime.
 
 ## 版本
 
-支持矩阵是 `["1.1", "1.0"]`。Wire 1.1 新增 typed Interaction；Wire 1.0 的 registry、
-Schema、fixtures 和 Approval fallback 保持冻结。
+支持矩阵是 `["1.3", "1.2", "1.1", "1.0"]`：
+- **Wire 1.3**：新增有界 `contextRecovery` 快照字段与 `context.recovery.changed` 事件（向 1.2 降级时映射为 `capabilities.changed` 并保持 `relaySequence` 连续）；
+- **Wire 1.2**：新增远程只读方法 `operation.result.get` 与 `OperationView` / `tool.completed` 的 `appOutput` 描述符；
+- **Wire 1.1**：新增类型化 Interaction 与远端脱敏投影；
+- **Wire 1.0**：registry、Schema、fixtures 与 Approval fallback 保持冻结。
 
-为了让现有 Companion 和 Browser 不被 minor upgrade 静默升级，历史上没有版本后缀的
+为了让现有 Companion 和 Browser 不被 minor 升级静默改变行为，历史上没有版本后缀的
 `RELAY_PROTOCOL_VERSION`、`relayMessageSchema`、`relayRequestMethodSchemas`、parser 和 type
 仍固定指向 Wire 1.0。新代码应使用 `LATEST_RELAY_PROTOCOL_VERSION` 和显式的 `*V10` /
-`*V11` / `*ForVersion` API。
+`*V11` / `*V12` / `*V13` / `*ForVersion` API。
 
 ```ts
 import {
   LATEST_RELAY_PROTOCOL_VERSION,
   parseRelayMessageForVersion,
-  relayMessageSchemaV11,
+  relayMessageSchemaV12,
 } from "@roll-agent/relay-protocol";
 
-LATEST_RELAY_PROTOCOL_VERSION; // "1.1"
-const frame = parseRelayMessageForVersion("1.1", input);
-relayMessageSchemaV11.parse(frame);
+LATEST_RELAY_PROTOCOL_VERSION; // "1.3"
+const frame = parseRelayMessageForVersion("1.2", input);
+relayMessageSchemaV12.parse(frame);
 ```
 
 `CompanionRelayBridge.connect(transport)` 这一历史一参入口仍只表示 Wire 1.0。支持 Wire 1.1
@@ -143,17 +146,17 @@ context 必须由宿主注入。
 ## Schema、fixtures 与 conformance
 
 - `@roll-agent/relay-protocol/schema` 与 `/schema/v1.0`：冻结的 Wire 1.0 JSON Schema；
-- `@roll-agent/relay-protocol/schema/v1.1`：Wire 1.1 JSON Schema；
+- `@roll-agent/relay-protocol/schema/v1.1`、`/v1.2`、`/v1.3`：Wire 1.1–1.3 JSON Schema；
 - `@roll-agent/relay-protocol/control`：Control 1.0、Browser Session 和 WSS 方向 Schema；
 - `@roll-agent/relay-protocol/control/schema`：Control 1.0 JSON Schema；
 - `@roll-agent/relay-protocol/control/session-schema`：Browser Session JSON Schema；
 - `@roll-agent/relay-protocol/control/fixtures/*`：Control/Session golden fixtures；
 - `@roll-agent/relay-protocol/fixtures/v1/*`：字节冻结的 Wire 1.0 golden fixtures；
-- `@roll-agent/relay-protocol/fixtures/v1.1/*`：Wire 1.1 Interaction 与安全负例；
+- `@roll-agent/relay-protocol/fixtures/v1.1/*`、`v1.2/*`、`v1.3/*`：Wire 1.1–1.3 契约与安全负例；
 - `@roll-agent/relay-protocol/conformance`：可复用的 N/N-1 suite。
 
 历史 `runRelayProtocolConformance(adapter)` 一参调用固定执行 Wire 1.0 suite；新实现使用
-`runRelayProtocolConformanceForVersion(version, adapter)` 显式选择 1.1 或 1.0。Suite 覆盖
+`runRelayProtocolConformanceForVersion(version, adapter)` 显式选择 `"1.3"`、`"1.2"`、`"1.1"` 或 `"1.0"`。Suite 覆盖
 版本协商、完整 method registry、duplicate/conflict、ACK/gap、Interaction 生命周期、加密
 metadata 和安全 sentinel。
 
@@ -165,7 +168,3 @@ Relay 不能为了获得 Wire Schema 而安装 `@roll-agent/companion`。
 
 Relay `requestId`、逻辑 `interactionId`、Runtime JSON-RPC `id`、Runtime mutation
 `requestId` 与 Relay `relaySequence` 是不同的类型和生命周期，不能互相复用。
-
-### Wire 1.3 context recovery
-
-Wire 1.3 adds bounded `contextRecovery` snapshots and `context.recovery.changed` timeline events. It retains 1.2 App output semantics. The 1.0/1.1/1.2 wire schemas remain frozen; downgrade maps recovery events to `capabilities.changed` while preserving Relay sequence continuity. This package does not upgrade a deployed cloud Relay service.
