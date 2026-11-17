@@ -1,6 +1,7 @@
 {
   "name": "@roll-agent/relay-protocol",
   "version": "0.5.4",
+  "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",

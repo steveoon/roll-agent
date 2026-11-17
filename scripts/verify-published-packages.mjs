@@ -336,6 +336,7 @@ const PACKAGE_CHECKS = [
 
 async function main() {
   assertPublishedPackageChecksMatch();
+  const expectedLicenses = new Map(PUBLISHED_PACKAGES.map(({ name, license }) => [name, license]));
   const packRoot = await mkdtemp(join(tmpdir(), "roll-agent-pack-verify-"));
 
   try {
@@ -347,6 +348,13 @@ async function main() {
       const manifest = await readPackedJson(tarballPath, "package/package.json");
 
       pkg.verifyManifest(manifest);
+      await assertExpectedPackageLicense(
+        pkg.name,
+        manifest,
+        tarballPath,
+        tarEntries,
+        expectedLicenses.get(pkg.name),
+      );
       assertNoBlockedLifecycleScripts(pkg.name, manifest);
       assertNoMapFiles(pkg.name, tarEntries);
       assertNoSuspiciousFileNames(pkg.name, tarEntries);
@@ -416,6 +424,41 @@ async function readPackedText(tarballPath, entryPath) {
     maxBuffer: 1024 * 1024 * 8,
   });
   return stdout;
+}
+
+const LICENSE_TEXT_MARKERS = new Map([
+  ["MIT", "MIT License"],
+  ["FSL-1.1-ALv2", "FSL-1.1-ALv2"],
+]);
+
+export function assertLicenseTextMatches(packageName, expectedLicense, licenseText) {
+  const expectedMarker = LICENSE_TEXT_MARKERS.get(expectedLicense);
+  assert.ok(expectedMarker, `Unsupported expected license for ${packageName}: ${expectedLicense}`);
+  assert.ok(
+    licenseText.includes(expectedMarker),
+    `${packageName} LICENSE file does not match declared license ${expectedLicense}`,
+  );
+}
+
+async function assertExpectedPackageLicense(
+  packageName,
+  manifest,
+  tarballPath,
+  tarEntries,
+  expectedLicense,
+) {
+  assert.ok(expectedLicense, `Missing expected license policy for ${packageName}`);
+  assert.equal(
+    manifest.license,
+    expectedLicense,
+    `${packageName} packed package.json has unexpected license: ${manifest.license}`,
+  );
+  assert.ok(
+    tarEntries.includes("package/LICENSE"),
+    `${packageName} tarball is missing package/LICENSE`,
+  );
+  const licenseText = await readPackedText(tarballPath, "package/LICENSE");
+  assertLicenseTextMatches(packageName, expectedLicense, licenseText);
 }
 
 function assertNoBlockedLifecycleScripts(packageName, manifest) {

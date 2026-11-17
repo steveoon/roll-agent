@@ -86,23 +86,24 @@ function handleEvent(event: RuntimeEventEnvelopeV13): void {
 
 - `@roll-agent/protocol/schema` 与 `@roll-agent/protocol/schema/latest`：最新版本
   JSON Schema Draft 2020-12 根 Schema；
-- `@roll-agent/protocol/schema/1.4`、`/1.3`、`/1.2`、`/1.1`、`/1.0`：严格按协商版本隔离的 Schema；
+- `@roll-agent/protocol/schema/1.6`、`/1.5`、`/1.4`、`/1.3`、`/1.2`、`/1.1`、`/1.0`：严格按协商版本隔离的 Schema；
+- `@roll-agent/protocol/app-output` 与 `./observation-retention`：1.5+ 应用结构化输出与保留期契约；
+- `@roll-agent/protocol/fixtures/v1.6/*` 与 `v1.5/*`：Protocol 1.6 模型/浏览/恢复与 1.5 `app-output` fixtures；
 - `@roll-agent/protocol/fixtures/v1.4/*`：Protocol 1.4 attachment / turn.start / snapshot fixtures；
 - `@roll-agent/protocol/fixtures/v1.3/*`：Protocol 1.3 durable event/replay fixtures；
+- `@roll-agent/protocol/fixtures/v1.2/*`：Protocol 1.2 capability/interaction fixtures；
 - `@roll-agent/protocol/fixtures/v1/*`：冻结的 1.1/1.0 跨语言有效/无效消息 fixtures。
-- `@roll-agent/protocol/fixtures/v1.2/*`：Protocol 1.2 capability/interaction fixtures。
 
 协议版本与 npm 包版本相互独立。`RUNTIME_PROTOCOL_VERSION` 表示这个包提供的最新 wire
 schema，并不代表调用方已实现对应 Client 能力。当前支持顺序为
-`["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
-`"1.3"` 或 `"1.4"` 后，
-Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
-返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按
-Runtime registry；Client 必须按集合语义处理。未知的未来 method 名可安全发送但不会被接受。
+`["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 1.2–1.6 后，
+Client 必须用 `client.capabilities.set` 提交单调递增的 `revision` 与当前 Handler methods，Runtime
+返回注册表交集后才进入可接收交互状态。ACK 可以为空或为请求集的任意子集，顺序按
+Runtime 注册表排列；Client 必须按集合语义处理。未知的未来 method 名可安全发送但不会被接受。
 
-广告 `"1.4"` 或 `"1.3"` 同时声明 Client 能接收至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧：
+广告 1.3–1.6 任一版本均声明 Client 能接收至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧：
 durable record 的绝对上限为 `16 MiB`，额外 1 MiB 留给 envelope 与 JSON-RPC 元数据。本地
-入站预算低于 17 MiB 的 Client 必须同时省略 `"1.4"` 与 `"1.3"`。这不会扩大 Client→Runtime 出站额度；
+入站预算低于 17 MiB 的 Client 必须同时省略 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`。这不会扩大 Client→Runtime 出站额度；
 初始化后的出站上限仍取本地预算与 Runtime 返回的 `limits.maxFrameBytes` 的较小值。
 官方 Node 恢复管理器的默认 replay 暂存窗口为 10,000 条 / 32 MiB。
 

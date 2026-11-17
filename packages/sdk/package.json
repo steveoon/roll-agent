@@ -1,6 +1,7 @@
 {
   "name": "@roll-agent/sdk",
   "version": "1.0.3",
+  "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",

@@ -1,8 +1,8 @@
 # `@roll-agent/client-node`
 
 面向 Node.js、Electron 主进程和本地 Companion 的 Roll Runtime Protocol v1 客户端。
-客户端优先协商 `"1.4"`，并在 `client.capabilities.set` ACK 完成后才结束连接；旧 Runtime
-继续精确回落到 `"1.2"` / `"1.1"` / `"1.0"`。
+客户端优先协商 `"1.6"`，并在 `client.capabilities.set` ACK 完成后才结束连接；连接旧版 Runtime 时
+可按服务端支持情况逐级回落至 `"1.5"` / `"1.4"` / `"1.3"` / `"1.2"` / `"1.1"` / `"1.0"`。
 
 它负责启动或连接 Runtime、初始化协商、JSON-RPC 请求、流式事件、协议校验、未知 Turn
 结果跟踪，以及可等待的有界子进程关闭。Renderer 不应直接持有该客户端或子进程句柄。
@@ -14,9 +14,9 @@
 `RollNodeClient.start()` 默认执行 `roll runtime serve --stdio`。宿主必须确保 `roll` 命令
 已安装，或通过 `command` 指向随应用分发的 Runtime；这仍然只建立本地 stdio 连接。
 
-默认本地 `maxFrameBytes` 为 `17 MiB`。广告 Runtime Protocol `"1.4"` / `"1.3"` 表示 Client 能接收
+默认本地 `maxFrameBytes` 为 `17 MiB`。广告 Runtime Protocol 1.3–1.6 表示 Client 能接收
 至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧；若调用方显式配置更低上限，Client 会从
-初始化广告中移除 `"1.4"` 与 `"1.3"`，但仍可协商旧版本。初始化后的 Client→Runtime 出站上限仍是
+初始化广告中移除 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`，但仍可协商旧版本。初始化后的 Client→Runtime 出站上限仍是
 `min(client.maxFrameBytes, initialize.limits.maxFrameBytes)`；当前 Runtime 默认接收入站帧
 上限为 `4 MiB`，不会因为 Client 的 17 MiB 入站能力而扩大。
 

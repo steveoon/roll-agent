@@ -70,6 +70,7 @@ async function assertPublishSurface() {
   for (const pkg of PUBLISHED_PACKAGES) {
     const manifest = JSON.parse(await readFile(resolve(repoRoot, pkg.packageJson), "utf8"));
     assert.equal(manifest.name, pkg.name);
+    assert.equal(manifest.license, pkg.license, `${pkg.name} has an unexpected license field`);
     assertAllowedPublishLifecycle(pkg.name, manifest, pkg.prepublishOnly);
   }
 }
