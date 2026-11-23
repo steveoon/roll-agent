@@ -13,6 +13,7 @@ import {
   createProviderModel,
   providerAcceptsToolSchemaIssues,
   resolveLLMCall,
+  shouldRetainEmptyReasoningPart,
   thinkingProviderOptions,
 } from "./providers.ts";
 import { inlineAcyclicLocalJsonSchemaReferences } from "../tool-runtime/json-schema-refs.ts";
@@ -1302,5 +1303,179 @@ describe("tool schema compatibility after local ref inlining", () => {
       );
       assert.doesNotMatch(text, /\$ref/u, provider);
     }
+  });
+
+  it("retains Google empty text/reasoning signatures on Google and omits them on all other providers", async () => {
+    const promptWithGoogleSignature = [
+      { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "reasoning" as const,
+            text: "",
+            providerOptions: { google: { thoughtSignature: "sig-reasoning" } },
+          },
+          { type: "text" as const, text: "Hello" },
+          {
+            type: "text" as const,
+            text: "",
+            providerOptions: { google: { thoughtSignature: "sig-text" } },
+          },
+        ],
+      },
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: "",
+            providerOptions: { google: { thoughtSignature: "sig-only" } },
+          },
+        ],
+      },
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "reasoning" as const,
+            text: "",
+            providerOptions: { google: { thoughtSignature: "sig-reasoning-only" } },
+          },
+        ],
+      },
+      { role: "user" as const, content: [{ type: "text" as const, text: "next" }] },
+    ];
+
+    async function capturePromptRequest(
+      model: LanguageModelV4,
+      includeStrictTool = false,
+    ): Promise<unknown> {
+      const originalFetch = globalThis.fetch;
+      let body: unknown;
+      try {
+        globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+          body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+          return new Response("", {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        };
+        const result = await model.doStream({
+          prompt: promptWithGoogleSignature,
+          ...(includeStrictTool
+            ? {
+                tools: [
+                  {
+                    type: "function",
+                    name: "probe",
+                    description: "probe",
+                    strict: true,
+                    inputSchema: {
+                      type: "object",
+                      properties: { q: { type: "string" } },
+                      required: ["q"],
+                      additionalProperties: false,
+                    },
+                  },
+                ],
+              }
+            : {}),
+        });
+        await result.stream.cancel();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      return body;
+    }
+
+    const googleBody = await capturePromptRequest(
+      createProviderModel("google", "gemini-3.8-flash", "k"),
+    );
+    assert.ok(isRecord(googleBody) && Array.isArray(googleBody.contents));
+    const firstModelTurn = googleBody.contents[1];
+    assert.ok(isRecord(firstModelTurn) && Array.isArray(firstModelTurn.parts));
+    assert.deepEqual(firstModelTurn.parts, [
+      { text: "", thought: true, thoughtSignature: "sig-reasoning" },
+      { text: "Hello" },
+      { text: "", thoughtSignature: "sig-text" },
+    ]);
+
+    for (const [provider, modelName] of [
+      ["openai", "gpt-5.4"],
+      ["xai", "grok-4.7"],
+    ] as const) {
+      const body = await capturePromptRequest(createProviderModel(provider, modelName, "k"));
+      assert.ok(isRecord(body) && Array.isArray(body.input), provider);
+      const assistantTexts = body.input.flatMap((item: unknown) =>
+        isRecord(item) && item.role === "assistant" ? [item.content] : [],
+      );
+      assert.deepEqual(assistantTexts, ["Hello"], provider);
+      assert.doesNotMatch(JSON.stringify(body), /sig-/u, provider);
+    }
+
+    for (const [label, baseURL, expectedStrict] of [
+      ["deepseek-standard", undefined, false],
+      ["deepseek-beta", "https://api.deepseek.com/beta", true],
+    ] as const) {
+      const body = await capturePromptRequest(
+        createProviderModel("deepseek", "deepseek-v4-flash", "k", baseURL),
+        true,
+      );
+      assert.ok(isRecord(body) && Array.isArray(body.messages), label);
+      const assistants = body.messages.filter(
+        (item: unknown): item is Record<string, unknown> =>
+          isRecord(item) && item.role === "assistant",
+      );
+      assert.deepEqual(
+        assistants.map((item) => item.content),
+        ["Hello"],
+        label,
+      );
+      assert.doesNotMatch(JSON.stringify(body), /sig-/u, label);
+      assert.ok(Array.isArray(body.tools) && isRecord(body.tools[0]), label);
+      const fn = body.tools[0].function;
+      assert.ok(isRecord(fn), label);
+      assert.equal(fn.strict, expectedStrict, label);
+    }
+
+    for (const [provider, modelName] of [
+      ["anthropic", "claude-sonnet-4-6"],
+      ["qwen", "qwen3.6-plus"],
+    ] as const) {
+      const body = await capturePromptRequest(createProviderModel(provider, modelName, "k"));
+      assert.ok(isRecord(body) && Array.isArray(body.messages), provider);
+      const assistants = body.messages.filter(
+        (item: unknown): item is Record<string, unknown> =>
+          isRecord(item) && item.role === "assistant",
+      );
+      assert.equal(assistants.length, 1, provider);
+      assert.doesNotMatch(JSON.stringify(body), /sig-/u, provider);
+    }
+  });
+
+  it("shouldRetainEmptyReasoningPart only accepts Google namespace thoughtSignature carriers", () => {
+    assert.equal(shouldRetainEmptyReasoningPart({ google: { thoughtSignature: "sig-1" } }), true);
+    assert.equal(shouldRetainEmptyReasoningPart({ google: { thoughtSignature: "" } }), false);
+    assert.equal(
+      shouldRetainEmptyReasoningPart({ google: { thoughtSignature: "sig-1", extra: true } }),
+      false,
+    );
+    assert.equal(shouldRetainEmptyReasoningPart({ other: { thoughtSignature: "sig-1" } }), false);
+    assert.equal(shouldRetainEmptyReasoningPart({ openai: { thoughtSignature: "sig-1" } }), false);
+    assert.equal(
+      shouldRetainEmptyReasoningPart({
+        google: { thoughtSignature: "sig-1" },
+        openai: { itemId: "rs-1" },
+      }),
+      false,
+    );
+    assert.equal(
+      shouldRetainEmptyReasoningPart({
+        openai: { itemId: "rs-private", reasoningEncryptedContent: "enc" },
+      }),
+      false,
+    );
+    assert.equal(shouldRetainEmptyReasoningPart({ anthropic: { signature: "sig-ant" } }), false);
   });
 });

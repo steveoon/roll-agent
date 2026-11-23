@@ -5,7 +5,10 @@ import { createThreadModelHost, withThreadModelReasoning } from "./thread-model-
 import { runtimeSettingsSchema, type RuntimeSettings } from "@roll-agent/runtime/host-contracts";
 import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-binding.ts";
 import type { RollConfig } from "../config/schema.ts";
-import { providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
+import {
+  providerAcceptsToolSchemaIssues,
+  shouldRetainEmptyReasoningPart,
+} from "../llm/providers.ts";
 import { CoreAgentHost } from "./agent-host.ts";
 import { isDebugLogEnabled, log } from "../cli/utils/output.ts";
 import { resolveChatWorkspace } from "./workspace-identity.ts";
@@ -58,6 +61,7 @@ export interface CreateChatEngineInput {
   readonly surface: ChatEngineSurface;
   readonly modelRecovery?: NonNullable<ChatEngineOptions["modelRecovery"]>;
   readonly resolveReasoningPresentation?: ChatEngineOptions["resolveReasoningPresentation"];
+  readonly retainEmptyReasoningPart?: ChatEngineOptions["retainEmptyReasoningPart"];
   readonly policy?: NonNullable<ChatEngineOptions["policy"]>;
   readonly resolveDynamicCapabilityContext?: NonNullable<
     ChatEngineOptions["resolveDynamicCapabilityContext"]
@@ -146,6 +150,7 @@ function chatEngineOptions(input: CreateChatEngineInput): ChatEngineOptions {
     ...(input.resolveReasoningPresentation
       ? { resolveReasoningPresentation: input.resolveReasoningPresentation }
       : {}),
+    retainEmptyReasoningPart: input.retainEmptyReasoningPart ?? shouldRetainEmptyReasoningPart,
     policy: input.policy ?? createToolPolicy(input.runtime, input.config),
     maxSteps: input.config.runtime.maxSteps,
     ...(chatHostModeForSurface(input.surface) === "interactive" && input.modelRecovery

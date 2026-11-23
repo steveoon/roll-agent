@@ -11,6 +11,10 @@ import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/go
 import { createXai } from "@ai-sdk/xai";
 import { wrapLanguageModel } from "ai";
 import { projectAnthropicStrictToolSchema } from "./anthropic-tool-schema.ts";
+import {
+  omitForeignEmptyAssistantTextParts,
+  shouldRetainEmptyReasoningPart,
+} from "./foreign-empty-text.ts";
 import { applyOpenAiResponsesToolStrictDefaults } from "./openai-tool-strict.ts";
 import {
   requireLegacyThinkingLevel,
@@ -24,6 +28,7 @@ import {
 } from "../tool-runtime/json-schema-refs.ts";
 
 export type { ThinkingLevel } from "./thinking-levels.ts";
+export { shouldRetainEmptyReasoningPart };
 export class UnsupportedThinkingLevelError extends Error {}
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
 type GoogleThinkingConfig = NonNullable<GoogleGenerativeAIProviderOptions["thinkingConfig"]>;
@@ -197,16 +202,22 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
       model: provider(modelName),
       middleware: {
         transformParams: async ({ params }) => {
-          if (!params.tools?.some((tool) => tool.type === "function" && tool.strict === true)) {
-            return params;
-          }
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "anthropic");
+          const hasStrict =
+            params.tools?.some((tool) => tool.type === "function" && tool.strict === true) ?? false;
+          if (prompt === params.prompt && !hasStrict) return params;
           return {
             ...params,
-            tools: params.tools.map((tool) =>
-              tool.type === "function" && tool.strict === true
-                ? { ...tool, inputSchema: projectAnthropicStrictToolSchema(tool.inputSchema) }
-                : tool,
-            ),
+            ...(prompt === params.prompt ? {} : { prompt }),
+            ...(hasStrict && params.tools !== undefined
+              ? {
+                  tools: params.tools.map((tool) =>
+                    tool.type === "function" && tool.strict === true
+                      ? { ...tool, inputSchema: projectAnthropicStrictToolSchema(tool.inputSchema) }
+                      : tool,
+                  ),
+                }
+              : {}),
           };
         },
       },
@@ -218,8 +229,15 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
       model: provider(modelName),
       middleware: {
         transformParams: async ({ params }) => {
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "openai");
           const tools = applyOpenAiResponsesToolStrictDefaults(params.tools);
-          return tools === undefined || tools === params.tools ? params : { ...params, tools };
+          const toolsChanged = tools !== undefined && tools !== params.tools;
+          if (prompt === params.prompt && !toolsChanged) return params;
+          return {
+            ...params,
+            ...(prompt === params.prompt ? {} : { prompt }),
+            ...(toolsChanged ? { tools } : {}),
+          };
         },
       },
     });
@@ -227,22 +245,33 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   deepseek: (modelName, { apiKey, baseURL }) => {
     const provider = createDeepSeek({ apiKey, ...(baseURL ? { baseURL } : {}) });
     const model = provider(modelName);
-    if (baseURL?.replace(/\/$/u, "").endsWith("/beta")) return model;
+    const isBeta = baseURL?.replace(/\/$/u, "").endsWith("/beta") ?? false;
     // DeepSeek only accepts provider-side strict tool generation on /beta.
     // Keep the original schemas and AI SDK input validation; adapt only the
-    // generation hint sent to standard endpoints, for both chat and sampling.
+    // generation hint sent to standard endpoints, for both chat and sampling,
+    // while omitting foreign empty signature carriers on both standard and /beta endpoints.
     return wrapLanguageModel({
       model,
       middleware: {
         transformParams: async ({ params }) => {
-          if (!params.tools?.some((tool) => tool.type === "function" && tool.strict === true)) {
-            return params;
-          }
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "deepseek");
+          const adaptStrict =
+            !isBeta &&
+            (params.tools?.some((tool) => tool.type === "function" && tool.strict === true) ??
+              false);
+          if (prompt === params.prompt && !adaptStrict) return params;
           return {
             ...params,
-            tools: params.tools.map((tool) =>
-              tool.type === "function" && tool.strict === true ? { ...tool, strict: false } : tool,
-            ),
+            ...(prompt === params.prompt ? {} : { prompt }),
+            ...(adaptStrict && params.tools !== undefined
+              ? {
+                  tools: params.tools.map((tool) =>
+                    tool.type === "function" && tool.strict === true
+                      ? { ...tool, strict: false }
+                      : tool,
+                  ),
+                }
+              : {}),
           };
         },
       },
@@ -250,15 +279,39 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   },
   qwen: (modelName, { apiKey, baseURL }) => {
     const provider = createAlibaba({ apiKey, baseURL: baseURL ?? QWEN_BASE_URL });
-    return provider(modelName);
+    return wrapLanguageModel({
+      model: provider(modelName),
+      middleware: {
+        transformParams: async ({ params }) => {
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "alibaba");
+          return prompt === params.prompt ? params : { ...params, prompt };
+        },
+      },
+    });
   },
   xai: (modelName, { apiKey, baseURL }) => {
     const provider = createXai({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    return provider(modelName);
+    return wrapLanguageModel({
+      model: provider(modelName),
+      middleware: {
+        transformParams: async ({ params }) => {
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "xai");
+          return prompt === params.prompt ? params : { ...params, prompt };
+        },
+      },
+    });
   },
   google: (modelName, { apiKey, baseURL }) => {
     const provider = createGoogle({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    return provider(modelName);
+    return wrapLanguageModel({
+      model: provider(modelName),
+      middleware: {
+        transformParams: async ({ params }) => {
+          const prompt = omitForeignEmptyAssistantTextParts(params.prompt, "google");
+          return prompt === params.prompt ? params : { ...params, prompt };
+        },
+      },
+    });
   },
 };
 

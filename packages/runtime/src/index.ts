@@ -26,6 +26,7 @@ export type {
 export { AgentSession } from "./engine/agent-session.ts";
 export type { ModelTurnRecovery } from "./engine/model-recovery.ts";
 export type {
+  RetainEmptyReasoningPartPolicy,
   SessionModelSwitch,
   SessionToolExclusion,
   ToolSchemaPolicy,

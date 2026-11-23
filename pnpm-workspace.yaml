@@ -34,6 +34,17 @@ minimumReleaseAgeExclude:
   - "@ai-sdk/deepseek@3.0.45"
   - "@ai-sdk/provider@4.0.15"
   - "@ai-sdk/provider-utils@5.0.41"
+  # Explicit AI SDK ecosystem upgrade; eligible normally on 2026-11-28.
+  - "ai@7.0.179"
+  - "@ai-sdk/alibaba@2.0.93"
+  - "@ai-sdk/anthropic@4.0.107"
+  - "@ai-sdk/deepseek@3.0.89"
+  - "@ai-sdk/gateway@4.0.152"
+  - "@ai-sdk/google@4.0.124"
+  - "@ai-sdk/openai@4.0.122"
+  - "@ai-sdk/provider@4.0.39"
+  - "@ai-sdk/provider-utils@5.0.83"
+  - "@ai-sdk/xai@5.0.48"
 blockExoticSubdeps: true
 savePrefix: ""
 strictDepBuilds: true
