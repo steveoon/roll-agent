@@ -1,11 +1,16 @@
 import {
+  hasUnresolvedEnvPlaceholder,
+  hasUnresolvedThinkingIdentity,
+} from "../../../src/config/helpers.ts";
+import {
+  apiThinkingLevels,
   chatGptThinkingLevels,
   legacyThinkingLevels,
   runtimeThinkingLevels,
 } from "../../../src/llm/thinking-levels.ts";
 import type { ConfigCatalogNode, ConfigEnumOptionsStatus, JsonObject } from "../types.ts";
 import { getAtPath } from "./config-value.ts";
-import { validateEnumInput } from "./input-validation.ts";
+import { isEnvironmentReferenceDraft, validateEnumInput } from "./input-validation.ts";
 import type { RollUiApi } from "../api.ts";
 
 export interface ChatGptModelCatalog {
@@ -19,18 +24,27 @@ const THINKING_PATHS = [
   ["runtime", "compaction", "thinkingLevel"],
 ] as const;
 
+function isUnresolvedDraftPlaceholder(value: string): boolean {
+  return hasUnresolvedEnvPlaceholder(value) || isEnvironmentReferenceDraft(value);
+}
+
 function selectedCapability(draft: JsonObject, catalog: ChatGptModelCatalog) {
   const provider =
     getAtPath(draft, ["runtime", "provider"]) ?? getAtPath(draft, ["llm", "defaultProvider"]);
   const accountId = getAtPath(draft, ["runtime", "chatgptAccountId"]);
-  const modelName = getAtPath(draft, ["runtime", "model"]);
+  const runtimeModel = getAtPath(draft, ["runtime", "model"]);
+  const effectiveModel =
+    provider === "chatgpt"
+      ? runtimeModel
+      : (runtimeModel ?? getAtPath(draft, ["llm", "defaultModel"]));
   const matchesAccount = accountId === undefined || accountId === catalog.accountId;
-  const model = matchesAccount ? catalog.models.find(({ slug }) => slug === modelName) : undefined;
-  const unresolved =
-    provider === undefined ||
-    [provider, modelName, accountId].some(
-      (value) => typeof value === "string" && value.includes("${"),
-    );
+  const model = matchesAccount
+    ? catalog.models.find(({ slug }) => slug === runtimeModel)
+    : undefined;
+  const unresolved = hasUnresolvedThinkingIdentity(
+    { provider, model: effectiveModel, chatgptAccountId: accountId },
+    isUnresolvedDraftPlaceholder,
+  );
   let status: ConfigEnumOptionsStatus = provider === "chatgpt" ? catalog.status : "ready";
   if (provider === "chatgpt" && !matchesAccount) status = "loading";
   if (
@@ -39,7 +53,12 @@ function selectedCapability(draft: JsonObject, catalog: ChatGptModelCatalog) {
   ) {
     status = "unavailable";
   }
-  return { provider, model, status };
+  return {
+    provider,
+    modelName: typeof effectiveModel === "string" ? effectiveModel : undefined,
+    model,
+    status,
+  };
 }
 
 export function thinkingCatalogForDraft(
@@ -47,14 +66,19 @@ export function thinkingCatalogForDraft(
   draft: JsonObject,
   catalog: ChatGptModelCatalog,
 ): ConfigCatalogNode {
-  const { provider, model, status } = selectedCapability(draft, catalog);
-  return thinkingCatalog(node, provider, model, status);
+  const { provider, modelName, model, status } = selectedCapability(draft, catalog);
+  return thinkingCatalog(node, provider, model, status, modelName);
 }
 
 /** Validate even hidden modules, so model/catalog changes cannot leave stale field issues. */
 export function thinkingFieldValidity(draft: JsonObject, catalog: ChatGptModelCatalog) {
-  const { provider, model, status } = selectedCapability(draft, catalog);
-  const options = provider === "chatgpt" ? chatGptThinkingLevels(model) : legacyThinkingLevels;
+  const { provider, modelName, model, status } = selectedCapability(draft, catalog);
+  const options =
+    provider === "chatgpt"
+      ? chatGptThinkingLevels(model)
+      : typeof provider === "string"
+        ? apiThinkingLevels(provider, modelName)
+        : legacyThinkingLevels;
   return THINKING_PATHS.map((path) => ({
     path,
     message: validateEnumInput(getAtPath(draft, path), {
@@ -70,6 +94,7 @@ export function thinkingCatalog(
   provider: unknown,
   model?: { readonly reasoningEfforts?: readonly string[] | undefined },
   status: ConfigEnumOptionsStatus = "ready",
+  modelName?: string,
 ): ConfigCatalogNode {
   if (node.kind === "object") {
     return {
@@ -77,7 +102,7 @@ export function thinkingCatalog(
       fields: Object.fromEntries(
         Object.entries(node.fields).map(([key, child]) => [
           key,
-          thinkingCatalog(child, provider, model, status),
+          thinkingCatalog(child, provider, model, status, modelName),
         ]),
       ),
     };
@@ -97,7 +122,9 @@ export function thinkingCatalog(
       ? runtimeThinkingLevels
       : provider === "chatgpt"
         ? chatGptThinkingLevels(model)
-        : legacyThinkingLevels;
+        : typeof provider === "string"
+          ? apiThinkingLevels(provider, modelName)
+          : legacyThinkingLevels;
   return {
     ...node,
     options,

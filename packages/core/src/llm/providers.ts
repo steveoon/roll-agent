@@ -17,8 +17,15 @@ import {
 } from "./foreign-empty-text.ts";
 import { applyOpenAiResponsesToolStrictDefaults } from "./openai-tool-strict.ts";
 import {
+  assertXaiChatThinkingSupported,
+  normalizeGoogleModelId,
+  requireApiThinkingLevel,
+  requireGoogleRequiredThinkingLevel,
   requireLegacyThinkingLevel,
-  type LegacyThinkingLevel,
+  requiresGoogleThinking,
+  requiresXaiChatThinking,
+  UnsupportedThinkingLevelError,
+  type ApiThinkingLevel,
   type ThinkingLevel,
 } from "./thinking-levels.ts";
 import {
@@ -28,8 +35,8 @@ import {
 } from "../tool-runtime/json-schema-refs.ts";
 
 export type { ThinkingLevel } from "./thinking-levels.ts";
+export { UnsupportedThinkingLevelError };
 export { shouldRetainEmptyReasoningPart };
-export class UnsupportedThinkingLevelError extends Error {}
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
 type GoogleThinkingConfig = NonNullable<GoogleGenerativeAIProviderOptions["thinkingConfig"]>;
 
@@ -76,27 +83,21 @@ function isXaiFixedGrok420Model(modelName: string): boolean {
   return modelName.startsWith(XAI_GROK_420_PREFIX) && !modelName.includes(XAI_MULTI_AGENT_MARKER);
 }
 
-const XAI_ALWAYS_REASONING_MODELS: ReadonlySet<string> = new Set([
-  "grok-4.5",
-  "grok-4.6",
-  "grok-4.7",
-]);
-
 function isXaiRequiredReasoningModel(modelName: string): boolean {
   return (
-    XAI_ALWAYS_REASONING_MODELS.has(modelName) ||
+    requiresXaiChatThinking(modelName) ||
     modelName.includes(XAI_MULTI_AGENT_MARKER) ||
     (isXaiFixedGrok420Model(modelName) && !isXaiNonReasoningModel(modelName))
   );
 }
 
 function isGemini3OrLater(modelName: string): boolean {
-  const name = modelName.toLowerCase();
+  const name = normalizeGoogleModelId(modelName);
   return name.startsWith("gemini-") && !GEMINI_PRE_3_MODEL_PATTERN.test(name);
 }
 
 function minimalGemini3ThinkingLevel(modelName: string): "minimal" | "low" {
-  const name = modelName.toLowerCase();
+  const name = normalizeGoogleModelId(modelName);
   if (name === "gemini-flash-latest") {
     return "low";
   }
@@ -112,10 +113,20 @@ function minimalGemini3ThinkingLevel(modelName: string): "minimal" | "low" {
 }
 
 function isGemini25Pro(modelName: string): boolean {
-  return modelName.toLowerCase().includes("gemini-2.5-pro");
+  return normalizeGoogleModelId(modelName).includes("gemini-2.5-pro");
 }
 
-function googleThinkingConfig(modelName: string, level: LegacyThinkingLevel): GoogleThinkingConfig {
+function googleThinkingConfig(
+  modelName: string,
+  requestedLevel: ThinkingLevel,
+): GoogleThinkingConfig {
+  if (requiresGoogleThinking(modelName)) {
+    return {
+      thinkingLevel: requireGoogleRequiredThinkingLevel(requestedLevel, modelName),
+      includeThoughts: true,
+    };
+  }
+  const level = requireLegacyThinkingLevel(requestedLevel, "google");
   if (isGemini3OrLater(modelName)) {
     return level === "off"
       ? { thinkingLevel: minimalGemini3ThinkingLevel(modelName) }
@@ -132,6 +143,9 @@ export function thinkingProviderOptions(
   modelName: string,
   requestedLevel: ThinkingLevel,
 ): SharedV4ProviderOptions | undefined {
+  if (providerName === "google") {
+    return { google: { thinkingConfig: googleThinkingConfig(modelName, requestedLevel) } };
+  }
   const level = requireLegacyThinkingLevel(requestedLevel, providerName);
   if (providerName === "openai") {
     if (level === "off") {
@@ -162,18 +176,11 @@ export function thinkingProviderOptions(
       return undefined;
     }
     if (isXaiFixedGrok420Model(modelName)) return undefined;
-    if (level === "off" && XAI_ALWAYS_REASONING_MODELS.has(modelName)) {
-      throw new UnsupportedThinkingLevelError(
-        `模型 ${modelName} 不支持关闭思考。请将 runtime.thinking-level 设为 low 或更高。`,
-      );
-    }
+    assertXaiChatThinkingSupported(modelName, level);
     return { xai: { reasoningEffort: level === "off" ? "none" : level } };
   }
   if (providerName === "deepseek") {
     return { deepseek: { thinking: { type: level === "off" ? "disabled" : "enabled" } } };
-  }
-  if (providerName === "google") {
-    return { google: { thinkingConfig: googleThinkingConfig(modelName, level) } };
   }
   return undefined;
 }
@@ -346,14 +353,14 @@ export interface ResolvedLLMCall {
   readonly providerOptions?: SharedV4ProviderOptions;
 }
 
-function unifiedReasoningForThinkingLevel(level: LegacyThinkingLevel): UnifiedReasoning {
+function unifiedReasoningForThinkingLevel(level: ApiThinkingLevel): UnifiedReasoning {
   return level === "off" ? "none" : level;
 }
 
 function resolveStructuredOutputReasoning(
   providerName: string,
   modelName: string,
-  level: LegacyThinkingLevel,
+  level: ApiThinkingLevel,
 ): UnifiedReasoning | undefined {
   if (providerName === "openai") {
     if (!isOpenAIReasoningModel(modelName)) {
@@ -425,7 +432,7 @@ export function resolveLLMCall(
   baseURL?: string,
   requestedLevel: ThinkingLevel = "medium",
 ): ResolvedLLMCall {
-  const thinkingLevel = requireLegacyThinkingLevel(requestedLevel, providerName);
+  const thinkingLevel = requireApiThinkingLevel(requestedLevel, providerName, modelName);
   const model = createProviderModel(providerName, modelName, apiKey, baseURL);
 
   if (purpose === "structured-output") {

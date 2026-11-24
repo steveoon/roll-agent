@@ -4,7 +4,11 @@ import type {
 } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { inspectLlmConfigReadiness, type LlmConfigReadiness } from "../config/helpers.ts";
-import { providerAcceptsToolSchemaIssues, resolveLLMCall } from "../llm/providers.ts";
+import {
+  providerAcceptsToolSchemaIssues,
+  resolveLLMCall,
+  UnsupportedThinkingLevelError,
+} from "../llm/providers.ts";
 
 export function resolveChatLlmSwitch(
   config: RollConfig,
@@ -80,16 +84,31 @@ export function resolveChatLlmCalls(
   readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
 } {
   const chat = resolveLLMCall(provider, modelName, apiKey, "chat", baseUrl, thinkingLevel);
-  const structuredOutput = compactionUsesStructuredOutput
-    ? resolveLLMCall(
+  let structuredOutput: ReturnType<typeof resolveLLMCall> | undefined;
+  if (compactionUsesStructuredOutput) {
+    try {
+      structuredOutput = resolveLLMCall(
         provider,
         modelName,
         apiKey,
         "structured-output",
         baseUrl,
         compactionThinkingLevel ?? thinkingLevel,
-      )
-    : undefined;
+      );
+    } catch (error) {
+      if (
+        compactionThinkingLevel !== undefined &&
+        error instanceof UnsupportedThinkingLevelError &&
+        !error.message.includes("runtime.compaction.thinking-level")
+      ) {
+        throw new UnsupportedThinkingLevelError(
+          `压缩配置 runtime.compaction.thinking-level 不兼容：${error.message}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
   return {
     model: chat.model,
     toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),

@@ -1,6 +1,7 @@
 import { getChatGptAuthService, type ChatGptAuthService } from "../auth/chatgpt/service.ts";
+import { hasUnresolvedEnvPlaceholder, hasUnresolvedThinkingIdentity } from "../config/helpers.ts";
 import type { RollConfig } from "../config/schema.ts";
-import { chatGptThinkingLevels, legacyThinkingLevels } from "../llm/thinking-levels.ts";
+import { apiThinkingLevels, chatGptThinkingLevels } from "../llm/thinking-levels.ts";
 
 /** UI validation uses available capability data; inference still validates against live models. */
 export function validateUiThinkingConfig(
@@ -9,18 +10,40 @@ export function validateUiThinkingConfig(
     getChatGptAuthService().cachedModels(accountId),
 ): void {
   const provider = config.runtime.provider ?? config.llm.defaultProvider;
-  const model =
-    provider === "chatgpt"
-      ? getModels(config.runtime.chatgptAccountId).find(({ slug }) => slug === config.runtime.model)
-      : undefined;
-  if (config.runtime.fastMode && model?.supportsFastMode === false) {
+  const providerResolved = !hasUnresolvedEnvPlaceholder(provider);
+  const canLookupChatGptModel =
+    providerResolved &&
+    provider === "chatgpt" &&
+    (config.runtime.chatgptAccountId === undefined ||
+      !hasUnresolvedEnvPlaceholder(config.runtime.chatgptAccountId)) &&
+    (config.runtime.model === undefined || !hasUnresolvedEnvPlaceholder(config.runtime.model));
+  const model = canLookupChatGptModel
+    ? getModels(config.runtime.chatgptAccountId).find(({ slug }) => slug === config.runtime.model)
+    : undefined;
+  if (providerResolved && config.runtime.fastMode && model?.supportsFastMode === false) {
     throw new Error(
       "Config validation failed:\n  - runtime.fastMode: 当前 ChatGPT 模型不支持 Fast 模式。",
     );
   }
+  const effectiveModel =
+    provider === "chatgpt"
+      ? config.runtime.model
+      : (config.runtime.model ?? config.llm.defaultModel);
+  if (
+    hasUnresolvedThinkingIdentity({
+      provider,
+      model: effectiveModel,
+      chatgptAccountId: config.runtime.chatgptAccountId,
+    })
+  ) {
+    return;
+  }
   // Missing model/effort data is unknown, not evidence that only the legacy four levels exist.
   if (provider === "chatgpt" && model?.reasoningEfforts === undefined) return;
-  const options = provider === "chatgpt" ? chatGptThinkingLevels(model) : legacyThinkingLevels;
+  const options =
+    provider === "chatgpt"
+      ? chatGptThinkingLevels(model)
+      : apiThinkingLevels(provider, effectiveModel);
   const levels = [
     ["runtime.thinkingLevel", config.runtime.thinkingLevel],
     [

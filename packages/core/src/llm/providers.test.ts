@@ -15,7 +15,9 @@ import {
   resolveLLMCall,
   shouldRetainEmptyReasoningPart,
   thinkingProviderOptions,
+  UnsupportedThinkingLevelError,
 } from "./providers.ts";
+import { apiSamplingThinkingLevel } from "./thinking-levels.ts";
 import { inlineAcyclicLocalJsonSchemaReferences } from "../tool-runtime/json-schema-refs.ts";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
 
@@ -981,6 +983,236 @@ describe("resolveLLMCall", () => {
     });
   });
 
+  it("serializes identical native thinkingLevel for bare and models/-prefixed Gemini 4 targets", async () => {
+    const originalFetch = globalThis.fetch;
+
+    async function captureRequest(
+      modelName: string,
+      purpose: "chat" | "sampling" | "structured-output",
+      level: "low" | "high" | "xhigh",
+      baseURL?: string,
+    ): Promise<{ url: string; thinkingConfig: unknown }> {
+      let capturedUrl: string | undefined;
+      let capturedBody: unknown;
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const resolved = resolveLLMCall("google", modelName, "test-key", purpose, baseURL, level);
+      const result = await resolved.model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+        ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+        ...(resolved.reasoning ? { reasoning: resolved.reasoning } : {}),
+      });
+      await result.stream.cancel();
+
+      assert.ok(capturedUrl);
+      assert.ok(isRecord(capturedBody) && isRecord(capturedBody.generationConfig));
+      return { url: capturedUrl, thinkingConfig: capturedBody.generationConfig.thinkingConfig };
+    }
+
+    try {
+      for (const base of ["gemini-4-neon", "gemini-4-hydrogen"] as const) {
+        for (const purpose of ["chat", "sampling", "structured-output"] as const) {
+          for (const level of ["low", "xhigh"] as const) {
+            const bare = await captureRequest(base, purpose, level);
+            const prefixed = await captureRequest(`models/${base}`, purpose, level);
+            assert.equal(prefixed.url, bare.url, `${base} ${purpose} ${level} URL parity`);
+            assert.ok(bare.url.includes(`/models/${base}:streamGenerateContent`), bare.url);
+            const expected =
+              purpose === "structured-output"
+                ? { thinkingLevel: level }
+                : { thinkingLevel: level, includeThoughts: true };
+            assert.deepEqual(bare.thinkingConfig, expected, `${base} ${purpose} ${level}`);
+            assert.deepEqual(
+              prefixed.thinkingConfig,
+              expected,
+              `models/${base} ${purpose} ${level}`,
+            );
+          }
+        }
+      }
+
+      for (const base of ["gemini-4-carbon", "gemini-4-argon"] as const) {
+        for (const purpose of ["chat", "sampling", "structured-output"] as const) {
+          for (const level of ["low", "high"] as const) {
+            const bare = await captureRequest(base, purpose, level);
+            const prefixed = await captureRequest(`models/${base}`, purpose, level);
+            assert.equal(prefixed.url, bare.url, `${base} ${purpose} ${level} URL parity`);
+            const expected =
+              purpose === "structured-output"
+                ? { thinkingLevel: level }
+                : { thinkingLevel: level, includeThoughts: true };
+            assert.deepEqual(bare.thinkingConfig, expected, `${base} ${purpose} ${level}`);
+            assert.deepEqual(
+              prefixed.thinkingConfig,
+              expected,
+              `models/${base} ${purpose} ${level}`,
+            );
+          }
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("matches only the terminal segment on full Google resource paths with custom baseURL", async () => {
+    const originalFetch = globalThis.fetch;
+    const customBaseURL = "https://custom-google.example/v1beta";
+    const neonProjectCarbon =
+      "projects/gemini-4-neon-prod/locations/global/publishers/google/models/gemini-4-carbon";
+    const neonProjectLegacy =
+      "projects/gemini-4-neon-prod/locations/global/publishers/google/models/gemini-2.5-flash";
+    const carbonProjectNeon =
+      "projects/gemini-4-carbon-prod/locations/global/publishers/google/models/gemini-4-neon";
+
+    let fetchCalls = 0;
+    const captured: Array<{ url: string; thinkingConfig: unknown }> = [];
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        fetchCalls += 1;
+        const url = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        const body: unknown = JSON.parse(init.body);
+        assert.ok(isRecord(body) && isRecord(body.generationConfig));
+        captured.push({ url, thinkingConfig: body.generationConfig.thinkingConfig });
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      for (const purpose of ["chat", "sampling", "structured-output", "text"] as const) {
+        for (const unsupported of ["off", "xhigh", "max"] as const) {
+          assert.throws(
+            () =>
+              resolveLLMCall(
+                "google",
+                neonProjectCarbon,
+                "test-key",
+                purpose,
+                customBaseURL,
+                unsupported,
+              ),
+            UnsupportedThinkingLevelError,
+          );
+        }
+        assert.throws(
+          () =>
+            resolveLLMCall(
+              "google",
+              neonProjectLegacy,
+              "test-key",
+              purpose,
+              customBaseURL,
+              "xhigh",
+            ),
+          UnsupportedThinkingLevelError,
+        );
+        assert.throws(
+          () =>
+            resolveLLMCall("google", carbonProjectNeon, "test-key", purpose, customBaseURL, "off"),
+          UnsupportedThinkingLevelError,
+        );
+      }
+      assert.equal(fetchCalls, 0, "rejected full resource paths must not issue HTTP requests");
+
+      const legacyLow = resolveLLMCall(
+        "google",
+        neonProjectLegacy,
+        "test-key",
+        "chat",
+        customBaseURL,
+        "low",
+      );
+      await (
+        await legacyLow.model.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+          ...(legacyLow.providerOptions ? { providerOptions: legacyLow.providerOptions } : {}),
+        })
+      ).stream.cancel();
+
+      const carbonLow = resolveLLMCall(
+        "google",
+        neonProjectCarbon,
+        "test-key",
+        "chat",
+        customBaseURL,
+        "low",
+      );
+      await (
+        await carbonLow.model.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+          ...(carbonLow.providerOptions ? { providerOptions: carbonLow.providerOptions } : {}),
+        })
+      ).stream.cancel();
+
+      for (const purpose of ["chat", "sampling", "structured-output"] as const) {
+        const neonXhigh = resolveLLMCall(
+          "google",
+          carbonProjectNeon,
+          "test-key",
+          purpose,
+          customBaseURL,
+          "xhigh",
+        );
+        await (
+          await neonXhigh.model.doStream({
+            prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+            ...(neonXhigh.providerOptions ? { providerOptions: neonXhigh.providerOptions } : {}),
+            ...(neonXhigh.reasoning ? { reasoning: neonXhigh.reasoning } : {}),
+          })
+        ).stream.cancel();
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(captured.length, 5);
+    assert.equal(
+      captured[0]?.url,
+      `${customBaseURL}/${neonProjectLegacy}:streamGenerateContent?alt=sse`,
+    );
+    assert.deepEqual(captured[0]?.thinkingConfig, {
+      thinkingBudget: 2048,
+      includeThoughts: true,
+    });
+    assert.equal(
+      captured[1]?.url,
+      `${customBaseURL}/${neonProjectCarbon}:streamGenerateContent?alt=sse`,
+    );
+    assert.deepEqual(captured[1]?.thinkingConfig, {
+      thinkingLevel: "low",
+      includeThoughts: true,
+    });
+    assert.equal(
+      captured[2]?.url,
+      `${customBaseURL}/${carbonProjectNeon}:streamGenerateContent?alt=sse`,
+    );
+    assert.deepEqual(captured[2]?.thinkingConfig, {
+      thinkingLevel: "xhigh",
+      includeThoughts: true,
+    });
+    assert.deepEqual(captured[3]?.thinkingConfig, {
+      thinkingLevel: "xhigh",
+      includeThoughts: true,
+    });
+    assert.deepEqual(captured[4]?.thinkingConfig, {
+      thinkingLevel: "xhigh",
+    });
+  });
+
   it("applies the same thinking mapping to sampling calls as chat calls", () => {
     const chatOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "chat", undefined, "off");
     const samplingOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "sampling", undefined, "off");
@@ -1119,6 +1351,63 @@ describe("thinkingProviderOptions", () => {
     assert.deepEqual(thinkingProviderOptions("google", "gemini-3.1-pro-preview", "high"), {
       google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } },
     });
+  });
+
+  it("maps Gemini 4 thinking tiers independently for Neon/Hydrogen vs Carbon/Argon", () => {
+    for (const model of [
+      "gemini-4-hydrogen",
+      "gemini-4-neon",
+      "models/gemini-4-neon",
+      "gemini-4-neon-preview",
+    ]) {
+      for (const level of ["low", "medium", "high", "xhigh"] as const) {
+        assert.deepEqual(thinkingProviderOptions("google", model, level), {
+          google: { thinkingConfig: { thinkingLevel: level, includeThoughts: true } },
+        });
+      }
+      for (const unsupported of ["off", "max"] as const) {
+        assert.throws(
+          () => thinkingProviderOptions("google", model, unsupported),
+          (error: unknown) =>
+            error instanceof UnsupportedThinkingLevelError && /不支持推理强度/.test(error.message),
+        );
+        for (const purpose of ["chat", "sampling", "structured-output", "text"] as const) {
+          assert.throws(
+            () => resolveLLMCall("google", model, "test-key", purpose, undefined, unsupported),
+            (error: unknown) =>
+              error instanceof UnsupportedThinkingLevelError &&
+              /不支持推理强度/.test(error.message),
+          );
+        }
+      }
+    }
+    for (const model of [
+      "gemini-4-argon",
+      "gemini-4-carbon",
+      "models/gemini-4-carbon",
+      "models/gemini-4-argon",
+    ]) {
+      for (const level of ["low", "medium", "high"] as const) {
+        assert.deepEqual(thinkingProviderOptions("google", model, level), {
+          google: { thinkingConfig: { thinkingLevel: level, includeThoughts: true } },
+        });
+      }
+      for (const unsupported of ["off", "xhigh", "max"] as const) {
+        assert.throws(
+          () => thinkingProviderOptions("google", model, unsupported),
+          (error: unknown) =>
+            error instanceof UnsupportedThinkingLevelError && /不支持推理强度/.test(error.message),
+        );
+        for (const purpose of ["chat", "sampling", "structured-output", "text"] as const) {
+          assert.throws(
+            () => resolveLLMCall("google", model, "test-key", purpose, undefined, unsupported),
+            (error: unknown) =>
+              error instanceof UnsupportedThinkingLevelError &&
+              /不支持推理强度/.test(error.message),
+          );
+        }
+      }
+    }
   });
 
   it("maps Gemini 3 off to the lowest thinking level each model accepts", () => {
@@ -1477,5 +1766,189 @@ describe("tool schema compatibility after local ref inlining", () => {
       false,
     );
     assert.equal(shouldRetainEmptyReasoningPart({ anthropic: { signature: "sig-ant" } }), false);
+  });
+});
+
+describe("apiSamplingThinkingLevel xAI boundary", () => {
+  it("rejects invalid xAI off source and same-model configs via the 4-arg public API without warnings", () => {
+    const invalidCases = ["grok-4.5", "grok-4.6", "grok-4.7"].flatMap((xaiModel) => [
+      ...[
+        { provider: "google", model: "gemini-4-neon" },
+        { provider: "google", model: "gemini-3.8-flash" },
+        { provider: "openai", model: "gpt-5.4" },
+      ].map((target) => ({
+        label: `xai/${xaiModel} off -> ${target.provider}/${target.model}`,
+        runtime: { provider: "xai", model: xaiModel, thinkingLevel: "off" as const },
+        apiProvider: target.provider,
+        apiModel: target.model,
+        expectedModel: xaiModel,
+      })),
+      ...[
+        { provider: "xai", model: xaiModel, thinkingLevel: "off" as const },
+        { provider: "xai", thinkingLevel: "off" as const },
+        { thinkingLevel: "off" as const },
+      ].map((runtime, index) => ({
+        label: `same-model ${xaiModel} off #${String(index + 1)}`,
+        runtime,
+        apiProvider: "xai",
+        apiModel: xaiModel,
+        expectedModel: xaiModel,
+      })),
+    ]);
+
+    for (const item of invalidCases) {
+      assert.throws(
+        () =>
+          apiSamplingThinkingLevel(
+            item.runtime,
+            item.apiProvider,
+            () => {
+              throw new Error(`${item.label} must not warn or fallback`);
+            },
+            item.apiModel,
+          ),
+        (error: unknown) =>
+          error instanceof UnsupportedThinkingLevelError &&
+          error.message.includes(`模型 ${item.expectedModel} 不支持关闭思考`) &&
+          error.message.includes("runtime.thinking-level"),
+        item.label,
+      );
+    }
+
+    const sameEffectiveLevel = apiSamplingThinkingLevel(
+      { provider: "xai", model: " GROK-4.5 ", thinkingLevel: "off" },
+      "xai",
+      () => {
+        throw new Error("same effective xAI model must not warn");
+      },
+      "grok-4.5",
+    );
+    assert.equal(sameEffectiveLevel, "off");
+    assert.throws(
+      () =>
+        resolveLLMCall("xai", "grok-4.5", "test-key", "sampling", undefined, sameEffectiveLevel),
+      UnsupportedThinkingLevelError,
+    );
+  });
+
+  it("downgrades valid cross-model and subscription off configs to medium on Grok 4.5-4.7 while preserving supported/fixed xAI models and structured-output constraints", async () => {
+    const downgradeSources = [
+      {
+        label: "Google 3.8 Flash off",
+        runtime: { provider: "google", model: "gemini-3.8-flash", thinkingLevel: "off" as const },
+        prefix: "聊天模型 google/gemini-3\\.8-flash 的推理强度 off",
+      },
+      {
+        label: "ChatGPT subscription off",
+        runtime: { provider: "chatgpt", model: "gpt-sub", thinkingLevel: "off" as const },
+        prefix: "ChatGPT 聊天强度 off",
+      },
+      {
+        label: "xAI grok-4.3 off",
+        runtime: { provider: "xai", model: "grok-4.3", thinkingLevel: "off" as const },
+        prefix: "聊天模型 xai/grok-4\\.3 的推理强度 off",
+      },
+    ] as const;
+
+    for (const xaiTarget of ["grok-4.5", "grok-4.6", "grok-4.7"] as const) {
+      for (const source of downgradeSources) {
+        const warnings: string[] = [];
+        const resolved = apiSamplingThinkingLevel(
+          source.runtime,
+          "xai",
+          (message) => warnings.push(message),
+          xaiTarget,
+        );
+        assert.equal(resolved, "medium", `${source.label} -> ${xaiTarget}`);
+        assert.equal(warnings.length, 1, `${source.label} -> ${xaiTarget}`);
+        assert.match(
+          warnings[0] ?? "",
+          new RegExp(
+            `${source.prefix} 不适用于独立 API Sampling 模型 xai/${xaiTarget}.*默认 medium`,
+          ),
+        );
+      }
+    }
+
+    const originalFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        capturedBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const fallbackLevel = apiSamplingThinkingLevel(
+        { provider: "google", model: "gemini-3.8-flash", thinkingLevel: "off" },
+        "xai",
+        () => {},
+        "grok-4.5",
+      );
+      const call = resolveLLMCall(
+        "xai",
+        "grok-4.5",
+        "test-key",
+        "sampling",
+        undefined,
+        fallbackLevel,
+      );
+      const streamResult = await call.model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+        ...(call.providerOptions ? { providerOptions: call.providerOptions } : {}),
+      });
+      await streamResult.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(capturedUrl, "https://api.x.ai/v1/responses");
+    assert.ok(isRecord(capturedBody));
+    assert.equal(capturedBody.model, "grok-4.5");
+    assert.deepEqual(capturedBody.reasoning, { effort: "medium" });
+
+    for (const compatibleTarget of [
+      { model: "grok-4.3", expectedOptions: { xai: { reasoningEffort: "none" } } },
+      { model: "grok-4.20-reasoning", expectedOptions: undefined },
+      { model: "grok-4.20-non-reasoning", expectedOptions: undefined },
+      { model: "grok-3", expectedOptions: undefined },
+    ] as const) {
+      for (const runtime of [
+        { provider: "google", model: "gemini-3.8-flash", thinkingLevel: "off" as const },
+        { provider: "chatgpt", model: "gpt-sub", thinkingLevel: "off" as const },
+      ]) {
+        const level = apiSamplingThinkingLevel(
+          runtime,
+          "xai",
+          () => {
+            throw new Error(`${compatibleTarget.model} must not warn on off`);
+          },
+          compatibleTarget.model,
+        );
+        assert.equal(level, "off");
+        const call = resolveLLMCall(
+          "xai",
+          compatibleTarget.model,
+          "test-key",
+          "sampling",
+          undefined,
+          level,
+        );
+        assert.deepEqual(call.providerOptions, compatibleTarget.expectedOptions);
+      }
+    }
+
+    for (const model of ["grok-4.5", "grok-4.20-reasoning", "grok-4.20-multi-agent"] as const) {
+      assert.throws(
+        () => resolveLLMCall("xai", model, "test-key", "structured-output", undefined, "off"),
+        (error: unknown) =>
+          error instanceof UnsupportedThinkingLevelError &&
+          error.message.includes(`模型 ${model} 不支持关闭思考`) &&
+          error.message.includes("runtime.compaction.thinking-level"),
+      );
+    }
   });
 });

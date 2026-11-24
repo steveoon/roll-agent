@@ -168,7 +168,12 @@ export default defineCommand({
       providerConfig.apiKey,
       "sampling",
       providerConfig.baseUrl,
-      apiSamplingThinkingLevel(config.runtime, routerProvider, (message) => log.warn(message)),
+      apiSamplingThinkingLevel(
+        config.runtime,
+        routerProvider,
+        (message) => log.warn(message),
+        config.llm.defaultModel,
+      ),
     );
 
     const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "ask");

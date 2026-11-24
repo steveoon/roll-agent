@@ -20,7 +20,7 @@ import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import { isCancel, select } from "@clack/prompts";
 import type { AgentSession, EngineModelSwitch, SessionEvent } from "@roll-agent/runtime";
-import { thinkingProviderOptions, UnsupportedThinkingLevelError } from "../../llm/providers.ts";
+import { UnsupportedThinkingLevelError } from "../../llm/providers.ts";
 import {
   assertChatGptFastModeSupported,
   withChatGptFastMode,
@@ -30,17 +30,14 @@ import {
   runFastModeCommand,
   type ChatFastModeControl,
 } from "../chat/fast-mode.ts";
-import { chatGptThinkingLevels, legacyThinkingLevels } from "../../llm/thinking-levels.ts";
-import { resolveAndSwitchChatModel } from "../chat/model-switch.ts";
+import { createInteractiveChatModelControls } from "../chat/model-switch.ts";
 import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
 import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
 import { getChatGptAuthService } from "../../auth/chatgpt/service.ts";
 import {
   resolveInteractiveChatLlm,
-  resolveInteractiveChatSwitch,
   chatGptModelChoices,
   chatModelPickerItems,
-  chatGptThinkingOptions,
   loadAuthenticatedChatGptModels,
   type ChatGptModels,
 } from "../../runtime-host/chatgpt-resolution.ts";
@@ -1173,6 +1170,43 @@ export default defineCommand({
             const { runInkRepl } = (await import(
               inkReplSpecifier
             )) as typeof import("../chat/ink/run-ink-repl.ts");
+            const refreshSubscriptionModels = async () => {
+              const choices = await loadAuthenticatedChatGptModels(
+                getChatGptAuthService(),
+                subscriptionAccountId,
+              );
+              subscriptionModels = choices.models;
+              subscriptionAccountId = choices.accountId;
+              chatConnection.updateCatalog(choices.models, choices.accountId);
+              return { models: subscriptionModels, accountId: subscriptionAccountId };
+            };
+            const modelControls = createInteractiveChatModelControls({
+              config,
+              getSession: () => session,
+              switchEngineModel: (nextSelection) => chatEngine.switchModel(nextSelection),
+              getState: () => ({
+                provider: currentProvider,
+                model: currentModel,
+                thinkingLevel: currentThinkingLevel,
+                fastMode: currentFastMode,
+                selection: activeSelection,
+                subscriptionModels,
+                subscriptionAccountId,
+              }),
+              setSelection: (next) => {
+                activeSelection = next;
+              },
+              setThinkingLevel: (next) => {
+                currentThinkingLevel = next;
+              },
+              setModelIdentity: (nextProvider, nextModel) => {
+                currentProvider = nextProvider;
+                chatConnection.setEnabled(nextProvider === "chatgpt");
+                currentModel = nextModel;
+              },
+              refreshSubscriptionModels,
+              connection: chatConnection,
+            });
             await runInkRepl(session, store, isNewSession, {
               terminalAgentStatus,
               fastMode,
@@ -1191,27 +1225,8 @@ export default defineCommand({
                 usedInk = true;
               },
               signal: signalScope.signal,
-              getThinkingLevels: () =>
-                currentProvider === "chatgpt"
-                  ? chatGptThinkingLevels(
-                      chatConnection.models.find(({ slug }) => slug === currentModel),
-                    )
-                  : legacyThinkingLevels,
-              onThinkingChange: (level) => {
-                const nextOptions =
-                  currentProvider === "chatgpt"
-                    ? withChatGptFastMode(
-                        chatGptThinkingOptions(
-                          level,
-                          chatConnection.models.find(({ slug }) => slug === currentModel),
-                        ),
-                        currentFastMode,
-                      )
-                    : thinkingProviderOptions(currentProvider, currentModel, level);
-                session.setProviderOptions(nextOptions);
-                activeSelection = { ...activeSelection, providerOptions: nextOptions ?? {} };
-                currentThinkingLevel = level;
-              },
+              getThinkingLevels: modelControls.getThinkingLevels,
+              onThinkingChange: modelControls.onThinkingChange,
               resumeSession,
               scheduleBrowser,
               onActiveSessionChange: (next) => {
@@ -1221,84 +1236,14 @@ export default defineCommand({
               modelSwitching: {
                 loadItems: async (current) => {
                   try {
-                    const choices = await loadAuthenticatedChatGptModels(
-                      getChatGptAuthService(),
-                      subscriptionAccountId,
-                    );
-                    subscriptionModels = choices.models;
-                    subscriptionAccountId = choices.accountId;
-                    chatConnection.updateCatalog(choices.models, choices.accountId);
+                    await refreshSubscriptionModels();
                   } catch (error) {
                     log.warn(error instanceof Error ? error.message : String(error));
                   }
                   return chatModelPickerItems(config, subscriptionModels, current);
                 },
-                getThinkingLevels: async (input) => {
-                  const selected = findLlmModelChoice(
-                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
-                    input,
-                  );
-                  if (selected?.provider !== "chatgpt" && !input.startsWith("chatgpt/")) {
-                    return legacyThinkingLevels;
-                  }
-                  const choices = await loadAuthenticatedChatGptModels(
-                    getChatGptAuthService(),
-                    subscriptionAccountId,
-                  );
-                  subscriptionModels = choices.models;
-                  subscriptionAccountId = choices.accountId;
-                  chatConnection.updateCatalog(choices.models, choices.accountId);
-                  const model = subscriptionModels.find(
-                    ({ slug }) => `chatgpt/${slug}` === input || slug === selected?.model,
-                  );
-                  if (!model) throw new Error(`当前账号不提供模型 "${input}"`);
-                  return chatGptThinkingLevels(model);
-                },
-                switchTo: async (input, selectedEffort) => {
-                  if (input.startsWith("chatgpt/") && subscriptionModels.length === 0) {
-                    const choices = await loadAuthenticatedChatGptModels(
-                      getChatGptAuthService(),
-                      subscriptionAccountId,
-                    );
-                    subscriptionModels = choices.models;
-                    subscriptionAccountId = choices.accountId;
-                    chatConnection.updateCatalog(choices.models, choices.accountId);
-                  }
-                  const choice = findLlmModelChoice(
-                    [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],
-                    input,
-                  );
-                  if (!choice) {
-                    throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
-                  }
-                  return resolveAndSwitchChatModel({
-                    resolve: () =>
-                      resolveInteractiveChatSwitch(
-                        { ...config, runtime: { ...config.runtime, fastMode: currentFastMode } },
-                        choice,
-                        selectedEffort ?? currentThinkingLevel,
-                        subscriptionAccountId,
-                        undefined,
-                        chatConnection,
-                      ),
-                    getFastMode: () => currentFastMode,
-                    commit: (nextSelection) => {
-                      const resolution = chatEngine.switchModel(nextSelection);
-                      activeSelection = nextSelection;
-                      currentProvider = choice.provider;
-                      chatConnection.setEnabled(choice.provider === "chatgpt");
-                      currentModel = choice.model;
-                      currentThinkingLevel = selectedEffort ?? currentThinkingLevel;
-                      return {
-                        thinkingLevel: currentThinkingLevel,
-                        id: choice.id,
-                        model: choice.model,
-                        contextWindow: resolution?.window,
-                        ...(resolution ? { contextWindowSource: resolution.source } : {}),
-                      };
-                    },
-                  });
-                },
+                getThinkingLevels: modelControls.getTargetThinkingLevels,
+                switchTo: modelControls.switchTo,
                 setAsDefault: async (id) => {
                   const choice = findLlmModelChoice(
                     [...listLlmModelChoices(config), ...chatGptModelChoices(subscriptionModels)],

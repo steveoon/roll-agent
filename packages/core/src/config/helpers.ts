@@ -1,6 +1,7 @@
 import type { AgentSkillEnvDeclarations } from "../types/agent.ts";
 import type { AskRuntimeIssue } from "../types/ask.ts";
 import type { RollConfig } from "./schema.ts";
+import { normalizeGoogleModelId } from "../llm/thinking-levels.ts";
 
 const ENV_PLACEHOLDER_PATTERN = /\$\{[^}]+\}/;
 
@@ -42,6 +43,34 @@ export interface AgentEnvCheckReport {
 
 export function hasUnresolvedEnvPlaceholder(value: string): boolean {
   return ENV_PLACEHOLDER_PATTERN.test(value);
+}
+
+/**
+ * Defer thinking-level validation only when capability depends on an unresolved identity.
+ * Providers with model-independent capability tables (e.g. OpenAI API) still validate strictly.
+ */
+export function hasUnresolvedThinkingIdentity(
+  input: {
+    readonly provider: unknown;
+    readonly model: unknown;
+    readonly chatgptAccountId?: unknown;
+  },
+  isPlaceholder: (value: string) => boolean = hasUnresolvedEnvPlaceholder,
+): boolean {
+  const { provider, model, chatgptAccountId } = input;
+  if (typeof provider !== "string" || provider.length === 0 || isPlaceholder(provider)) {
+    return true;
+  }
+  if (provider === "chatgpt") {
+    return (
+      (typeof model === "string" && isPlaceholder(model)) ||
+      (typeof chatgptAccountId === "string" && isPlaceholder(chatgptAccountId))
+    );
+  }
+  if (provider === "google") {
+    return typeof model === "string" && isPlaceholder(normalizeGoogleModelId(model));
+  }
+  return false;
 }
 
 export function inspectLlmConfigReadiness(

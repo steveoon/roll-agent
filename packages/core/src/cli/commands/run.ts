@@ -577,7 +577,12 @@ function createSamplingLLMCall(config: RollConfig): ResolvedLLMCall | undefined 
         providerConfig.apiKey,
         "sampling",
         providerConfig.baseUrl,
-        apiSamplingThinkingLevel(config.runtime, providerName, (message) => log.warn(message)),
+        apiSamplingThinkingLevel(
+          config.runtime,
+          providerName,
+          (message) => log.warn(message),
+          config.llm.defaultModel,
+        ),
       )
     : undefined;
 }
