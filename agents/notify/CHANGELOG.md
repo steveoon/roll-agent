@@ -1,5 +1,12 @@
 # notify-agent
 
+## 0.1.16
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @roll-agent/sdk@1.0.4
+
 ## 0.1.15
 
 ### Patch Changes
