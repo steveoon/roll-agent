@@ -1,6 +1,6 @@
 {
   "name": "notify-agent",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",

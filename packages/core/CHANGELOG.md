@@ -1,5 +1,38 @@
 # @roll-agent/core
 
+## 2.2.0
+
+### Minor Changes
+
+- [#329](https://github.com/steveoon/roll-agent/pull/329) [`02a0bdf`](https://github.com/steveoon/roll-agent/commit/02a0bdf626965f11054354229f954d278eddfb32) Thanks [@steveoon](https://github.com/steveoon)! - 对齐 Google Gemini 4 模型推理强度能力与 `@ai-sdk/google`：
+  
+  - `gemini-4-neon`、`gemini-4-hydrogen` 开放 `low` / `medium` / `high` / `xhigh` 原生 `thinkingLevel`（支持 chat、MCP Sampling、structured-output 压缩及配置台/CLI 交互），请求前拒绝 `off` 与 `max`
+  - `gemini-4-carbon`、`gemini-4-argon` 独立限定为 `low` / `medium` / `high`，请求前拒绝 `off`、`xhigh` 与 `max`；旧代 Gemini（3.x / 2.5）行为保持原契约
+  - 统一在共享能力入口按末段模型标识规范化匹配，修复 `models/` 前缀与完整资源名（`projects/.../models/<model>`）在自定义 `baseURL` 下的误判；前后端对未解析 `provider/model` 环境变量占位符一致推迟依赖未知身份的判定
+  - `roll ask` 和 `roll run` 使用独立 API 模型时，如果聊天档位合法但目标模型不支持，仅独立采样降为 `medium`，并通过 stderr 提示。例如，Gemini Neon 的 `xhigh` 可以搭配 OpenAI API，ChatGPT 订阅的 `off` 可以搭配 Grok 4.5。
+  - 独立采样也会校验聊天源模型的档位。若将 Grok 4.5、4.6 或 4.7 的聊天档位配置为 `off`，即使独立 API 支持 `off`，命令也会在调用工具前报告配置错误。
+  - `/model` 切模型先校验未知模型再判定档位选择，遇显式 `runtime.compaction.thinking-level` 不兼容时明确指出压缩配置字段并保留旧模型、会话与原档位
+
+- [#329](https://github.com/steveoon/roll-agent/pull/329) [`e71025f`](https://github.com/steveoon/roll-agent/commit/e71025f902a7b708835639255c87ddd9f60459f7) Thanks [@steveoon](https://github.com/steveoon)! - 支持在聊天会话内调整推理强度。`gpt-5-pro` 仅支持 `high`。用它启动且省略推理强度，或在会话中切到它并使用默认档位时，Roll 会自动选择 `high`。其他会话继续沿用各自的设置。
+  
+  - **Runtime Protocol 1.7 与 `@roll-agent/client-node`**：扩展 `runtime.models.list`、`thread.model.get` 与 `thread.model.set`（不新增额外事件通道），承载 `active` / `target` 会话推理强度状态、四态能力描述（`levels` / `toggle` / `fixed` / `unknown`）、`isThreadEffortToggleEnabled()` 及 `THREAD_MODEL_FAILURES_V17` 中的 `"effort-unsupported"` 失败原因（向 `1.6` 投影为 `"config-changed"`）；发布的 1.7 JSON Schema 严格拦截重复 `levels`、相同 `offLevel`/`onLevel` 及空 `thread.model.set` 请求，并对 `1.6` 客户端保持严格投影与本地写拦截兼容。
+  - **Core 模型能力表与 Runtime 切档状态机**：按已支持的模型系列正向解析公共推理强度能力（未知自定义模型返回 `unknown`，`gemini-2.5-pro` 不公告公共 `off`，OpenAI Pro 系列 `gpt-5-pro` / `gpt-5.2-pro` / `gpt-5.4-pro` / `gpt-5.5-pro` 及有效日期别名取 Core 实际可发送档位交集并在请求前拒绝低档与 `off`）；保持旧版 `1.6` `ThreadModelHost` 类型与运行时兼容并在握手时如实降级协商至 `"1.6"`；同模型切档保留宿主 `prepareEffort` 的 `this` 绑定并走轻量 `providerOptions` 热更新路径，保留已初始化的自动压缩配置与请求预算校准状态；跨模型切换（含 `effort: { mode: "default" }` 继承档位）在接纳前完成原子校验，非法组合不消耗 `revision`、不覆盖已有合法 `pending`，并发双写取代时返回请求自身 `revision` 的受理快照。
+  - **Relay Wire 1.4、Companion 与 `@roll-agent/relay-client`**：新增受限远端方法 `thread.effort.get`（query）与 `thread.effort.set`（mutation）（不暴露本地模型目录、`selection` 与 `contextWindow`，`active.provider`/`active.model` 长度上限与 Runtime 身份保持 128/512 对齐），在 `RELAY_ERROR_CODES_V14` 中新增窄公开错误码 `THREAD_EFFORT_STATE_STALE`（`retryable: true`）与 `THREAD_EFFORT_UNSUPPORTED`（`retryable: false`）；`roll companion enroll`、`roll companion enable`、`roll companion run` 新增 `--relay-protocol-version <1.2|1.3|1.4>` 与 `ROLL_COMPANION_RELAY_PROTOCOL_VERSION` 入口，默认保持 `"1.2"` 兼容旧版 Relay；`@roll-agent/relay-client` 在 `RelayThread` 上新增 `getEffort()` / `setEffort()` 并导出 `RELAY_ERROR_CODES_V14` 与 `isThreadEffortToggleEnabled()`，同时在初连与重连握手阶段严格校验对端返回的 `session.ready.relayProtocolVersion` 属于本次实际 offer 列表。
+
+### Patch Changes
+
+- [#329](https://github.com/steveoon/roll-agent/pull/329) [`f50f593`](https://github.com/steveoon/roll-agent/commit/f50f593fba8bedfb00884fd3f0236be2bd489e04) Thanks [@steveoon](https://github.com/steveoon)! - 升级 AI SDK 生态依赖（`ai`、`@ai-sdk/provider` 及全部内置 provider），并补齐 Google `thoughtSignature` 与流式中断适配：
+  
+  - 跳过空文本/空推理签名载体流帧对思维摘要认证与文本流事件的干扰，并在持久化与重开后原位保留不透明空推理签名供原模型回放
+  - 切换至 DeepSeek（含 `/beta`）、OpenAI、ChatGPT 订阅、xAI、Anthropic、Qwen 等其他 provider 时剥离外源空签名载体，避免发送空 assistant 消息
+  - 在模型流因 `interrupted` 或遗留未配对工具调用中断时如实结束，保留已完成步骤与部分正文，以 `not_executed` 记账，不杜撰工具结果或重放副作用
+- Updated dependencies [[`e71025f`](https://github.com/steveoon/roll-agent/commit/e71025f902a7b708835639255c87ddd9f60459f7), [`f50f593`](https://github.com/steveoon/roll-agent/commit/f50f593fba8bedfb00884fd3f0236be2bd489e04)]:
+  - @roll-agent/protocol@0.14.0
+  - @roll-agent/client-node@0.10.0
+  - @roll-agent/runtime@1.8.0
+  - @roll-agent/relay-protocol@0.6.0
+  - @roll-agent/companion@1.1.0
+
 ## 2.1.1
 
 ### Patch Changes
