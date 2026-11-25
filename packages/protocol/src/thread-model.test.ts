@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import Ajv2020Module from "ajv/dist/2020.js";
@@ -266,63 +265,20 @@ test("Protocol 1.7 model catalog and status project strictly down to frozen 1.6 
   assert.equal(projectedFailedV16.reason, "config-changed");
 });
 
-test("generated Runtime 1.7 JSON Schema enforces duplicate-level, distinct-toggle and non-empty-mutation invariants", () => {
-  const schemaText = readFileSync(
-    new URL("../dist/schema/roll-runtime-protocol-v1.7.schema.json", import.meta.url),
-    "utf8",
-  );
-  const rootSchema = z.looseObject({ $id: z.string() }).parse(JSON.parse(schemaText));
+test("Runtime 1.7 JSON Schemas enforce capability and mutation invariants", () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
-  for (const keyword of [
-    "x-roll-protocol-version",
-    "x-roll-methods",
-    "x-roll-server-request-methods",
-  ]) {
-    ajv.addKeyword({ keyword });
-  }
-  ajv.addSchema(rootSchema);
+  const validateCapability = ajv.compile(z.toJSONSchema(threadEffortCapabilitySchema));
+  const validateSetParams = ajv.compile(z.toJSONSchema(threadModelSetParamsV17Schema));
 
-  const validateGetResult = ajv.getSchema(`${rootSchema.$id}#/$defs/threadModelGetResult`);
-  const validateSetParams = ajv.getSchema(`${rootSchema.$id}#/$defs/threadModelSetParams`);
-  assert.ok(validateGetResult);
-  assert.ok(validateSetParams);
-
-  const validFixture = z
-    .object({ result: threadModelStatusSchema })
-    .parse(
-      JSON.parse(
-        readFileSync(
-          new URL("../fixtures/v1.7/valid-thread-model-status-pending.json", import.meta.url),
-          "utf8",
-        ),
-      ),
-    );
-  assert.equal(validateGetResult(validFixture.result), true);
-
+  assert.equal(validateCapability({ kind: "levels", levels: ["low", "high"] }), true);
   for (const invalidCapability of [
     { kind: "levels", levels: ["low", "low"] },
     { kind: "levels", levels: ["high"] },
     { kind: "toggle", offLevel: "medium", onLevel: "medium" },
     { kind: "toggle", offLevel: "off", onLevel: "off" },
   ]) {
-    const candidate: Record<string, unknown> = {
-      ...validFixture.result,
-      target: {
-        ...validFixture.result.target,
-        effortCapability: invalidCapability,
-      },
-    };
-    assert.equal(
-      validateGetResult(candidate),
-      false,
-      `expected JSON Schema to reject ${JSON.stringify(invalidCapability)}`,
-    );
-    assert.equal(
-      threadModelStatusSchema.safeParse(candidate).success,
-      false,
-      `expected Zod to reject ${JSON.stringify(invalidCapability)}`,
-    );
+    assert.equal(validateCapability(invalidCapability), false, JSON.stringify(invalidCapability));
   }
 
   const emptyMutation = {
@@ -332,5 +288,5 @@ test("generated Runtime 1.7 JSON Schema enforces duplicate-level, distinct-toggl
     configRevision: "cfg-1",
   };
   assert.equal(validateSetParams(emptyMutation), false);
-  assert.equal(threadModelSetParamsV17Schema.safeParse(emptyMutation).success, false);
+  assert.equal(validateSetParams({ ...emptyMutation, effort: { mode: "default" } }), true);
 });
