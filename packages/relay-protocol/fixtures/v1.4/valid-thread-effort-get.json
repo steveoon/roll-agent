@@ -1,0 +1,9 @@
+{
+  "type": "runtime.request",
+  "requestId": "00000000-0000-4000-8000-000000000521",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "method": "thread.effort.get",
+  "params": {
+    "threadId": "00000000-0000-4000-8000-000000000502"
+  }
+}

@@ -1,17 +1,26 @@
-import { mapRuntimeSettings } from "./engine-factory.ts";
+import { CHAT_ENGINE_SURFACES, createChatEngine, mapRuntimeSettings } from "./engine-factory.ts";
 
 import { CoreAgentHost, type CoreAgentHostOptions } from "./agent-host.ts";
 
-import { createProviderModel, providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
+import {
+  createProviderModel,
+  providerAcceptsToolSchemaIssues,
+  shouldRetainEmptyReasoningPart,
+} from "../llm/providers.ts";
+
+import * as runtimeModule from "@roll-agent/runtime";
 
 import {
   ConversationEngine,
+  RuntimeService,
   ThreadStore,
   type ConversationEngineOptions,
   type EngineModelSwitch,
   type AgentSession,
   type AgentBootstrapIssue,
 } from "@roll-agent/runtime";
+import { threadIdSchema } from "@roll-agent/protocol";
+import { messagesToHistory } from "../cli/chat/ink/history-from-messages.ts";
 
 import type {
   LanguageModelV4,
@@ -2080,6 +2089,708 @@ test("ConversationEngine 从 MCP 声明接入观察投影并拒绝无效声明",
   }
 });
 
+test("真实 Google SSE 收到完整 functionCall 后 EOF 无 finishReason：如实中断、保留部分正文、不杜撰结果、同会话继续及 SQLite 重开均正常", async () => {
+  const dir = tempDir();
+  const originalFetch = globalThis.fetch;
+  let fetchIndex = 0;
+  let sideEffectCalls = 0;
+  let interruptedToolCalls = 0;
+  const capturedBodies: unknown[] = [];
+
+  const sseResponse = (payloads: readonly Record<string, unknown>[]) =>
+    new Response(payloads.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    capturedBodies.push(typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+    const step = fetchIndex;
+    fetchIndex += 1;
+    if (step === 0) {
+      return sseResponse([
+        {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [
+                  {
+                    functionCall: { name: "probe__commit", args: { q: "step-1" } },
+                    thoughtSignature: "sig-step-1",
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]);
+    }
+    if (step === 1) {
+      // Real Google EOF without finishReason after emitting partial text + complete functionCall.
+      return sseResponse([
+        {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [
+                  { text: "Checking..." },
+                  {
+                    functionCall: { name: "probe__ping", args: { x: 1 } },
+                    thoughtSignature: "sig-interrupted",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]);
+    }
+    if (step === 2) {
+      return sseResponse([
+        {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "Turn 2 ok." }] },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]);
+    }
+    return sseResponse([
+      {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: "Reopened Turn 3 ok." }] },
+            finishReason: "STOP",
+          },
+        ],
+      },
+    ]);
+  };
+
+  const sources = [
+    {
+      agentName: "probe",
+      client: {
+        callTool: async ({ name }: { readonly name: string }) => {
+          if (name === "commit") {
+            sideEffectCalls += 1;
+            return { content: [{ type: "text", text: "committed-1" }] };
+          }
+          interruptedToolCalls += 1;
+          return { content: [{ type: "text", text: "pong" }] };
+        },
+      } as unknown as Parameters<typeof createEngine>[0]["sources"] extends
+        | readonly (infer S)[]
+        | undefined
+        ? S extends { readonly client: infer C }
+          ? C
+          : never
+        : never,
+      tools: [
+        {
+          tool: {
+            name: "commit",
+            description: "commit",
+            inputSchema: { type: "object" as const, properties: { q: { type: "string" } } },
+          },
+          annotations: undefined,
+        },
+        {
+          tool: {
+            name: "ping",
+            description: "ping",
+            inputSchema: { type: "object" as const, properties: { x: { type: "number" } } },
+          },
+          annotations: undefined,
+        },
+      ],
+    },
+  ];
+  const collectEvents = async <T>(stream: AsyncIterable<T>): Promise<T[]> => {
+    const items: T[] = [];
+    for await (const item of stream) items.push(item);
+    return items;
+  };
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "google",
+      defaultModel: "gemini-3.8-flash",
+      providers: { google: { apiKey: "k" } },
+    },
+    ask: {},
+    agents: { dataDir: dir },
+    runtime: { provider: "google", model: "gemini-3.8-flash", threadsDir: dir, maxSteps: 4 },
+  });
+
+  try {
+    let sessionId: string;
+    const store1 = new ThreadStore(dir);
+    try {
+      const engine1 = createEngine({
+        config,
+        store: store1,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      try {
+        const session = await engine1.createSession();
+        sessionId = session.id;
+        const events1 = await collectEvents(session.send("run workflow"));
+        assert.equal(
+          events1.some((event) => event.type === "message-finish"),
+          false,
+        );
+        assert.equal(events1.at(-1)?.type, "error");
+        assert.equal(sideEffectCalls, 1);
+        assert.equal(interruptedToolCalls, 0);
+
+        const persistedText = JSON.stringify(session.getMessages());
+        assert.match(persistedText, /Checking\.\.\./u);
+        assert.doesNotMatch(persistedText, /"toolName":"probe__ping"/u);
+        assert.doesNotMatch(persistedText, /pong/u);
+
+        // Continue in the same session: must not throw "Tool result is missing" or replay commit.
+        const events2 = await collectEvents(session.send("继续"));
+        assert.equal(
+          events2.some((event) => event.type === "message-finish" && event.text === "Turn 2 ok."),
+          true,
+        );
+        assert.equal(sideEffectCalls, 1);
+        assert.equal(interruptedToolCalls, 0);
+        assert.match(JSON.stringify(capturedBodies[2]), /Checking\.\.\./u);
+        assert.match(JSON.stringify(capturedBodies[2]), /roll__interrupted_turn_recovery/u);
+      } finally {
+        await engine1.dispose();
+      }
+    } finally {
+      store1.close();
+    }
+
+    // Reopen from SQLite and continue in a fresh engine instance.
+    const store2 = new ThreadStore(dir);
+    try {
+      const engine2 = createEngine({
+        config,
+        store: store2,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      try {
+        const reopened = await engine2.resumeSession(sessionId);
+        const events3 = await collectEvents(reopened.send("重开继续"));
+        assert.equal(
+          events3.some(
+            (event) => event.type === "message-finish" && event.text === "Reopened Turn 3 ok.",
+          ),
+          true,
+        );
+        assert.equal(sideEffectCalls, 1);
+        assert.equal(interruptedToolCalls, 0);
+        assert.match(JSON.stringify(capturedBodies[3]), /Checking\.\.\./u);
+      } finally {
+        await engine2.dispose();
+      }
+    } finally {
+      store2.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("真实 Google SSE 第一步完成而第二步复用同一 toolCallId 后 EOF：SQLite、同会话继续及重开均保留第一步已结算结果", async () => {
+  const dir = tempDir();
+  const originalFetch = globalThis.fetch;
+  let fetchIndex = 0;
+  const effects: string[] = [];
+  const capturedBodies: unknown[] = [];
+
+  const sseResponse = (parts: readonly Record<string, unknown>[], complete = true) =>
+    new Response(
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: { role: "model", parts },
+            ...(complete ? { finishReason: "STOP" } : {}),
+          },
+        ],
+      })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    capturedBodies.push(typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+    const step = fetchIndex;
+    fetchIndex += 1;
+    if (step === 0) {
+      return sseResponse([
+        {
+          functionCall: { id: "same", name: "probe__ping", args: { tag: "same" } },
+          thoughtSignature: "sig-same-1",
+        },
+      ]);
+    }
+    if (step === 1) {
+      return sseResponse(
+        [
+          { text: "partial-visible" },
+          {
+            functionCall: { id: "same", name: "probe__ping", args: { tag: "same" } },
+            thoughtSignature: "sig-same-2",
+          },
+        ],
+        false,
+      );
+    }
+    return sseResponse([{ text: "final answer" }]);
+  };
+
+  const sources = [
+    {
+      agentName: "probe",
+      client: {
+        callTool: async (params: { readonly arguments: { readonly tag: string } }) => {
+          effects.push(params.arguments.tag);
+          return { content: [{ type: "text", text: `effect-${params.arguments.tag}` }] };
+        },
+      } as unknown as Parameters<typeof createEngine>[0]["sources"] extends
+        | readonly (infer S)[]
+        | undefined
+        ? S extends { readonly client: infer C }
+          ? C
+          : never
+        : never,
+      tools: [
+        {
+          tool: {
+            name: "ping",
+            description: "ping",
+            inputSchema: {
+              type: "object" as const,
+              properties: { tag: { type: "string" } },
+              required: ["tag"],
+            },
+          },
+          annotations: undefined,
+        },
+      ],
+    },
+  ];
+  const collectEvents = async <T>(stream: AsyncIterable<T>): Promise<T[]> => {
+    const items: T[] = [];
+    for await (const item of stream) items.push(item);
+    return items;
+  };
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "google",
+      defaultModel: "gemini-3.8-flash",
+      providers: { google: { apiKey: "k" } },
+    },
+    ask: {},
+    agents: { dataDir: dir },
+    runtime: { provider: "google", model: "gemini-3.8-flash", threadsDir: dir, maxSteps: 4 },
+  });
+
+  try {
+    let sessionId: string;
+    const store1 = new ThreadStore(dir);
+    try {
+      const engine1 = createEngine({
+        config,
+        store: store1,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      try {
+        const session = await engine1.createSession();
+        sessionId = session.id;
+        const events1 = await collectEvents(session.send("two steps"));
+        assert.deepEqual(effects, ["same"]);
+        assert.equal(events1.at(-1)?.type, "error");
+
+        const persistedToolParts = store1
+          .getMessages(sessionId)
+          .filter((message) => message.role === "tool")
+          .flatMap((message) => (Array.isArray(message.content) ? message.content : []));
+        assert.equal(
+          persistedToolParts.some(
+            (part) =>
+              part.type === "tool-result" && JSON.stringify(part.output).includes("effect-same"),
+          ),
+          true,
+        );
+
+        const events2 = await collectEvents(session.send("continue"));
+        assert.equal(events2.at(-1)?.type, "message-finish");
+      } finally {
+        await engine1.dispose();
+      }
+    } finally {
+      store1.close();
+    }
+
+    const store2 = new ThreadStore(dir);
+    try {
+      const engine2 = createEngine({
+        config,
+        store: store2,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources,
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      try {
+        const reopened = await engine2.resumeSession(sessionId);
+        const events3 = await collectEvents(reopened.send("after reopen"));
+        assert.equal(events3.at(-1)?.type, "message-finish");
+        assert.deepEqual(effects, ["same"]);
+
+        for (const body of capturedBodies.slice(-2)) {
+          const parsed = body as {
+            contents?: Array<{ parts?: Array<{ functionResponse?: unknown }> }>;
+          };
+          const hasSettledResult = (parsed.contents ?? [])
+            .flatMap((entry) => entry.parts ?? [])
+            .some(
+              (part) =>
+                part.functionResponse !== undefined &&
+                JSON.stringify(part.functionResponse).includes("effect-same"),
+            );
+          assert.equal(hasSettledResult, true);
+        }
+      } finally {
+        await engine2.dispose();
+      }
+    } finally {
+      store2.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Google 空 reasoning 签名在下一轮与 SQLite 重开后原位保留，不泄露到公开协议/UI，切至 DeepSeek 普通与 /beta 不发外源空块", async () => {
+  const dir = tempDir();
+  const originalFetch = globalThis.fetch;
+  const capturedBodies: Array<{ readonly url: string; readonly body: unknown }> = [];
+  let googleCalls = 0;
+
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    capturedBodies.push({
+      url,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    if (url.includes("deepseek")) {
+      return new Response(
+        [
+          `data: ${JSON.stringify({ id: "ds-1", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { role: "assistant", content: "DeepSeek ok." }, finish_reason: null }] })}\n\n`,
+          `data: ${JSON.stringify({ id: "ds-1", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
+    googleCalls += 1;
+    const parts =
+      googleCalls === 1
+        ? [
+            { thought: true, text: "Private thought body" },
+            { thought: true, text: "", thoughtSignature: "sig-empty-reasoning-pos" },
+            { text: "Visible answer." },
+          ]
+        : [{ text: "", thoughtSignature: "sig-empty-text-only" }];
+    return new Response(
+      `data: ${JSON.stringify({
+        candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }],
+      })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "google",
+      defaultModel: "gemini-3.8-flash",
+      providers: {
+        google: { apiKey: "k" },
+        deepseek: { apiKey: "k" },
+      },
+    },
+    ask: {},
+    agents: { dataDir: dir },
+    runtime: { provider: "google", model: "gemini-3.8-flash", threadsDir: dir, maxSteps: 2 },
+  });
+
+  try {
+    let sessionId: string;
+    const store1 = new ThreadStore(dir);
+    try {
+      const engine1 = createEngine({
+        config,
+        store: store1,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      try {
+        const session = await engine1.createSession();
+        sessionId = session.id;
+        await drain(session.send("turn 1"));
+        await drain(session.send("turn 2"));
+
+        // Turn 2 request to Google must preserve empty reasoning signature in original position without private thought text.
+        const turn2Body = capturedBodies[1]?.body as { contents?: Array<{ parts?: unknown[] }> };
+        assert.deepEqual(turn2Body.contents?.[1]?.parts, [
+          { text: "", thought: true, thoughtSignature: "sig-empty-reasoning-pos" },
+          { text: "Visible answer." },
+        ]);
+        assert.doesNotMatch(JSON.stringify(turn2Body), /Private thought body/u);
+
+        // UI history projection must never expose reasoning text or opaque signature.
+        const uiHistory = JSON.stringify(messagesToHistory(session.getMessages()));
+        assert.match(uiHistory, /Visible answer\./u);
+        assert.doesNotMatch(
+          uiHistory,
+          /Private thought body|sig-empty-reasoning-pos|sig-empty-text-only/u,
+        );
+      } finally {
+        await engine1.dispose();
+      }
+    } finally {
+      store1.close();
+    }
+
+    // Reopen from SQLite and verify public RuntimeService snapshot + Google replay + DeepSeek standard & /beta switch.
+    const store2 = new ThreadStore(dir);
+    try {
+      const engine2 = createEngine({
+        config,
+        store: store2,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+        shellProfile: null,
+      });
+      const service = new RuntimeService(engine2, store2);
+      try {
+        const snapshot = service.snapshotThread({
+          threadId: threadIdSchema.parse(sessionId),
+          limit: 50,
+        });
+        const snapshotJson = JSON.stringify(snapshot);
+        assert.match(snapshotJson, /Visible answer\./u);
+        assert.doesNotMatch(
+          snapshotJson,
+          /Private thought body|sig-empty-reasoning-pos|sig-empty-text-only/u,
+        );
+
+        const reopened = await engine2.resumeSession(sessionId);
+        await drain(reopened.send("turn 3 on google"));
+        const turn3Body = capturedBodies[2]?.body as { contents?: Array<{ parts?: unknown[] }> };
+        assert.deepEqual(turn3Body.contents?.[1]?.parts, [
+          { text: "", thought: true, thoughtSignature: "sig-empty-reasoning-pos" },
+          { text: "Visible answer." },
+        ]);
+        assert.deepEqual(turn3Body.contents?.[3]?.parts, [
+          { text: "", thoughtSignature: "sig-empty-text-only" },
+        ]);
+
+        // Switch to DeepSeek v4 standard and /beta: neither may send empty assistant messages.
+        for (const baseURL of [undefined, "https://api.deepseek.com/beta"] as const) {
+          switchModel(engine2, {
+            provider: "deepseek",
+            modelName: "deepseek-v4-flash",
+            model: createProviderModel("deepseek", "deepseek-v4-flash", "k", baseURL),
+            providerOptions: { deepseek: { thinking: { type: "enabled" } } },
+          });
+          await drain(reopened.send(`turn on deepseek ${baseURL ?? "standard"}`));
+          const dsBody = capturedBodies.at(-1)?.body as {
+            messages?: Array<{ role: string; content: string; reasoning_content?: string }>;
+          };
+          const emptyAssistants = (dsBody.messages ?? []).filter(
+            (msg) =>
+              msg.role === "assistant" &&
+              msg.content === "" &&
+              (msg.reasoning_content === undefined || msg.reasoning_content === ""),
+          );
+          assert.deepEqual(emptyAssistants, [], baseURL ?? "standard");
+          assert.doesNotMatch(
+            JSON.stringify(dsBody),
+            /sig-empty-reasoning-pos|sig-empty-text-only/u,
+          );
+        }
+      } finally {
+        await engine2.dispose();
+      }
+    } finally {
+      store2.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Core createChatEngine 自动注入 Google 空 reasoning 签名策略：覆盖正常 Chat、SQLite 重开、跨 provider 切换并拒绝其他 namespace 同名 thoughtSignature", async () => {
+  const dir = tempDir();
+  const originalFetch = globalThis.fetch;
+  const capturedBodies: Array<{ readonly url: string; readonly body: unknown }> = [];
+
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    capturedBodies.push({
+      url,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    if (url.includes("deepseek")) {
+      return new Response(
+        [
+          `data: ${JSON.stringify({ id: "ds-host", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { role: "assistant", content: "DeepSeek host ok." }, finish_reason: null }] })}\n\n`,
+          `data: ${JSON.stringify({ id: "ds-host", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
+    return new Response(
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [
+                { thought: true, text: "", thoughtSignature: "sig-host-google" },
+                { text: "Host google answer." },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "google",
+      defaultModel: "gemini-3.8-flash",
+      providers: {
+        google: { apiKey: "k" },
+        deepseek: { apiKey: "k" },
+      },
+    },
+    ask: {},
+    agents: { dataDir: dir },
+    runtime: { provider: "google", model: "gemini-3.8-flash", threadsDir: dir, maxSteps: 2 },
+  });
+
+  try {
+    let sessionId: string;
+    const store1 = new ThreadStore(dir);
+    try {
+      // Real Core host factory wiring (without manually passing retainEmptyReasoningPart).
+      const engine1 = createChatEngine({
+        runtime: runtimeModule,
+        config,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        store: store1,
+        surface: CHAT_ENGINE_SURFACES.oneShot,
+      });
+      try {
+        const session = await engine1.createSession();
+        sessionId = session.id;
+        await drain(session.send("turn 1"));
+        // Seed a persisted assistant message with a non-Google namespace carrying a same-named `thoughtSignature`.
+        store1.appendMessages(sessionId, [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "",
+                providerOptions: { otherVendor: { thoughtSignature: "foreign-same-name-sig" } },
+              },
+              { type: "text", text: "Seeded foreign answer." },
+            ],
+          },
+        ]);
+      } finally {
+        await engine1.dispose();
+      }
+    } finally {
+      store1.close();
+    }
+
+    // Reopen through real Core host factory: Google signature survives, foreign same-named signature is stripped.
+    const store2 = new ThreadStore(dir);
+    try {
+      const engine2 = createChatEngine({
+        runtime: runtimeModule,
+        config,
+        model: createProviderModel("google", "gemini-3.8-flash", "k"),
+        store: store2,
+        surface: CHAT_ENGINE_SURFACES.oneShot,
+      });
+      try {
+        const reopened = await engine2.resumeSession(sessionId);
+        const reopenedJson = JSON.stringify(reopened.getMessages());
+        assert.match(reopenedJson, /sig-host-google/u);
+        assert.doesNotMatch(reopenedJson, /foreign-same-name-sig/u);
+
+        await drain(reopened.send("turn 2 reopened on google"));
+        const googleReplay = capturedBodies.at(-1)?.body as {
+          contents?: Array<{ parts?: unknown[] }>;
+        };
+        assert.deepEqual(googleReplay.contents?.[1]?.parts, [
+          { text: "", thought: true, thoughtSignature: "sig-host-google" },
+          { text: "Host google answer." },
+        ]);
+        assert.doesNotMatch(JSON.stringify(googleReplay), /foreign-same-name-sig/u);
+
+        // Switch to DeepSeek: foreign Google signature is omitted from wire request.
+        switchModel(engine2, {
+          provider: "deepseek",
+          modelName: "deepseek-v4-flash",
+          model: createProviderModel("deepseek", "deepseek-v4-flash", "k"),
+        });
+        await drain(reopened.send("turn 3 on deepseek"));
+        const dsBody = capturedBodies.at(-1)?.body;
+        assert.doesNotMatch(JSON.stringify(dsBody), /sig-host-google|foreign-same-name-sig/u);
+      } finally {
+        await engine2.dispose();
+      }
+    } finally {
+      store2.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 type FixtureEngineOptions = Omit<
   ConversationEngineOptions,
   "settings" | "provider" | "modelName" | "model" | "agentHost"
@@ -2165,6 +2876,7 @@ function createEngine(input: FixtureEngineOptions): ConversationEngine {
     modelName,
     model,
     toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
+    retainEmptyReasoningPart: shouldRetainEmptyReasoningPart,
     ...(host ? { agentHost: host } : { sources: sources ?? [] }),
   });
   if (mutableAgents) fixtureAgents.set(engine, mutableAgents);

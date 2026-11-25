@@ -11,7 +11,9 @@ import {
   OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
   OFFICIAL_RELAY_PROFILE,
   RELAY_HOST_OVERRIDE_ENV,
+  resolveCompanionRelayProtocolVersion,
   resolveRelayEndpoint,
+  type CompanionRelayProtocolVersion,
   type RelayEndpoint,
 } from "./constants.ts";
 import { FileCompanionConfigStore, type CompanionConfigStore } from "./config-store.ts";
@@ -60,6 +62,7 @@ export interface CompanionApplicationOptions {
   readonly invocation: BundledRollInvocation;
   readonly logger: CompanionLogger;
   readonly sessionFactory: CompanionSessionFactory;
+  readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
   readonly sendControlRequest?: CompanionControlClient;
   readonly assertUserIdentity?: CompanionUserIdentityCheck;
   readonly inspectEnvironment?: (
@@ -84,6 +87,7 @@ export class CompanionApplication {
   private readonly invocation: BundledRollInvocation;
   private readonly logger: CompanionLogger;
   private readonly sessionFactory: CompanionSessionFactory;
+  private readonly relayProtocolVersionOverride: CompanionRelayProtocolVersion | undefined;
   private readonly sendControlRequest: CompanionControlClient;
   private readonly assertUserIdentity: CompanionUserIdentityCheck;
   private readonly inspectEnvironment: NonNullable<
@@ -113,6 +117,7 @@ export class CompanionApplication {
     this.invocation = options.invocation;
     this.logger = options.logger;
     this.sessionFactory = options.sessionFactory;
+    this.relayProtocolVersionOverride = options.relayProtocolVersion;
     this.sendControlRequest = options.sendControlRequest ?? sendCompanionControlRequest;
     this.assertUserIdentity =
       options.assertUserIdentity ??
@@ -122,6 +127,7 @@ export class CompanionApplication {
   async enroll(input: {
     readonly pairingCode: string;
     readonly workspace: string;
+    readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
     readonly signal?: AbortSignal;
   }): Promise<CompanionConfig> {
     await this.assertUserIdentity();
@@ -134,9 +140,14 @@ export class CompanionApplication {
     return this.enrollment.unenroll();
   }
 
-  async enable(): Promise<CompanionConfig> {
+  async enable(options?: {
+    readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
+  }): Promise<CompanionConfig> {
     await this.assertUserIdentity();
-    const config = await this.enrollment.setEnabled(true);
+    if (options?.relayProtocolVersion !== undefined) {
+      await this.stop();
+    }
+    const config = await this.enrollment.setEnabled(true, options);
     const service = await this.service.status();
     if (service.installed) {
       await this.service.start();
@@ -284,7 +295,9 @@ export class CompanionApplication {
       this.logger.error(reason);
       throw error;
     }
-    this.logger.info(`Companion Host uses ${describeRelayEndpoint(relayEndpoint)}`);
+    this.logger.info(
+      `Companion Host uses ${describeRelayEndpoint(relayEndpoint)} (Wire ${resolveCompanionRelayProtocolVersion({ ...(this.relayProtocolVersionOverride === undefined ? {} : { explicit: this.relayProtocolVersionOverride }), ...(config.relayProtocolVersion === undefined ? {} : { persisted: config.relayProtocolVersion }), env: process.env })})`,
+    );
     const supervisor = new CompanionHostSupervisor({
       config,
       credentialStore: this.credentialStore,
@@ -438,6 +451,7 @@ export function createDefaultCompanionApplication(
     readonly homeDir?: string;
     readonly platform?: NodeJS.Platform;
     readonly invocation?: BundledRollInvocation;
+    readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
   } = {},
 ): CompanionApplication {
   const platform = options.platform ?? process.platform;
@@ -457,9 +471,15 @@ export function createDefaultCompanionApplication(
     }),
     invocation,
     logger,
+    ...(options.relayProtocolVersion === undefined
+      ? {}
+      : { relayProtocolVersion: options.relayProtocolVersion }),
     sessionFactory: new DefaultCompanionSessionFactory({
       invocation,
       configPath: paths.configPath,
+      ...(options.relayProtocolVersion === undefined
+        ? {}
+        : { relayProtocolVersion: options.relayProtocolVersion }),
     }),
   });
 }

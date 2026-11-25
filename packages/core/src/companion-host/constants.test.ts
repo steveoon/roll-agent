@@ -3,8 +3,11 @@ import test from "node:test";
 import {
   OFFICIAL_RELAY_PROFILE,
   RELAY_HOST_OVERRIDE_ENV,
+  RELAY_PROTOCOL_VERSION_OVERRIDE_ENV,
   isOfficialRelayEndpointDecided,
   normalizeRelayHost,
+  parseCompanionRelayProtocolVersion,
+  resolveCompanionRelayProtocolVersion,
   resolveRelayEndpoint,
 } from "./constants.ts";
 
@@ -75,4 +78,32 @@ test("invalid overrides fail closed and blank overrides are ignored", () => {
   }
   assert.equal(resolveRelayEndpoint({ [RELAY_HOST_OVERRIDE_ENV]: "  " }).source, "official");
   assert.equal(normalizeRelayHost(" LOCALHOST:3000 "), "localhost:3000");
+});
+
+test("resolveCompanionRelayProtocolVersion supports product selection of 1.4 while preserving legacy fallback", () => {
+  assert.equal(resolveCompanionRelayProtocolVersion({ env: {} }), "1.2");
+  assert.equal(resolveCompanionRelayProtocolVersion({ persisted: "1.4", env: {} }), "1.4");
+  assert.equal(
+    resolveCompanionRelayProtocolVersion({
+      persisted: "1.2",
+      env: { [RELAY_PROTOCOL_VERSION_OVERRIDE_ENV]: "1.4" },
+    }),
+    "1.4",
+  );
+  assert.equal(
+    resolveCompanionRelayProtocolVersion({
+      explicit: "1.3",
+      persisted: "1.4",
+      env: { [RELAY_PROTOCOL_VERSION_OVERRIDE_ENV]: "1.4" },
+    }),
+    "1.3",
+  );
+  assert.equal(parseCompanionRelayProtocolVersion(" 1.4 "), "1.4");
+  assert.throws(
+    () =>
+      resolveCompanionRelayProtocolVersion({
+        env: { [RELAY_PROTOCOL_VERSION_OVERRIDE_ENV]: "1.1" },
+      }),
+    /ROLL_COMPANION_RELAY_PROTOCOL_VERSION/u,
+  );
 });

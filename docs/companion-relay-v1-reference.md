@@ -1,4 +1,4 @@
-# `@roll-agent/relay-protocol` Relay 1.3/1.2/1.1/1.0 参考
+# `@roll-agent/relay-protocol` Relay 1.4/1.3/1.2/1.1/1.0 参考
 
 ## 边界
 
@@ -14,8 +14,8 @@ Browser ── Cloud Relay ── Companion Relay Protocol ── Local Companio
 ```
 
 `@roll-agent/relay-protocol` 是 Cloud Relay、Browser Client 和 Local Companion 共享的
-浏览器安全契约来源，提供版本注册表、严格消息/方法 Schema、ID、JSON Schema（`./schema/v1.3`、
-`./schema/v1.2`、`./schema/v1.1`、`./schema/v1.0`）、fixtures（`./fixtures/v1.3/*`、`v1.2/*`、
+浏览器安全契约来源，提供版本注册表、严格消息/方法 Schema、ID、JSON Schema（`./schema/v1.4`、`./schema/v1.3`、
+`./schema/v1.2`、`./schema/v1.1`、`./schema/v1.0`）、fixtures（`./fixtures/v1.4/*`、`v1.3/*`、`v1.2/*`、
 `v1.1/*`、`v1/*`）、reference adapter 与 conformance suite。它不包含 Transport、账号、数据库、
 策略或部署代码。普通 Web App 通过 `@roll-agent/relay-client` 间接消费该契约。
 
@@ -38,45 +38,46 @@ Workspace 绑定；仅高级自定义宿主才直接装配 `OutboundCompanionRel
 
 ## Browser Control 1.0
 
-Relay Wire `1.1–1.3` 承载对话与交互数据面，而 `@roll-agent/relay-protocol/control` 独立定义浏览器会话引导（bootstrap）控制面：
+Relay Wire `1.1–1.4` 承载对话与交互数据面，而 `@roll-agent/relay-protocol/control` 独立定义浏览器会话引导（bootstrap）控制面：
 
 - `relaySessionDescriptorSchema` 校验第三方后端返回的 `wss:// connectUrl` 与 `expiresAt`；
-- `session.ready` 必须是 Browser WSS 收到的第一帧，固定 `controlVersion: "1.0"`，其 `relayProtocolVersion` 支持 `"1.1"`、`"1.2"` 或 `"1.3"`（包内同时导出固定 `"1.1"` 的 `relaySessionReadyControlMessageSchema` / `parseRelayBrowserFirstControlFrame()`，以及兼容 `1.1–1.3` 的 `relaySessionReadyControlMessageSchemaV12`、`relaySessionReadyControlMessageSchemaV13`、`relaySessionReadyControlMessageSchemaAny`、`relayBrowserControlMessageSchemaAny` 与 `parseRelayBrowserFirstControlFrameAny()`）；
+- `session.ready` 必须是 Browser WSS 收到的第一帧，固定 `controlVersion: "1.0"`，其 `relayProtocolVersion` 支持 `"1.1"`、`"1.2"`、`"1.3"` 或 `"1.4"`（包内同时导出固定 `"1.1"` 的 `relaySessionReadyControlMessageSchema` / `parseRelayBrowserFirstControlFrame()`，以及兼容 `1.1–1.4` 的 `relaySessionReadyControlMessageSchemaV12`、`relaySessionReadyControlMessageSchemaV13`、`relaySessionReadyControlMessageSchemaV14`、`relaySessionReadyControlMessageSchemaAny`、`relayBrowserControlMessageSchemaAny` 与 `parseRelayBrowserFirstControlFrameAny()`）；
 - `workspace.status` 表示本机 Companion / Runtime 当前为 `online` 或 `offline`；
 - `session.error` 仅携带稳定错误码 `code` 与 `retryable`；
 - Browser → Relay 仅允许发送 `runtime.request` 与 `runtime.ack`；Relay → Browser 仅允许下发上述三类 Control 帧，以及 `runtime.response`、`runtime.event`、`runtime.gap` 与三类 Interaction 数据面帧；
 - 当前 P0 浏览器方向白名单明确排除 `runtime.encrypted`（尚未交付浏览器侧端到端密钥协商）。
 
-Control 消息不属于 `relayMessageSchemaV11` / `V12` / `V13`，Cloud Relay 必须按连接角色与收发方向分别校验。
+Control 消息不属于 `relayMessageSchemaV11` / `V12` / `V13` / `V14`，Cloud Relay 必须按连接角色与收发方向分别校验。
 远程脱敏后的 Snapshot 不包含可响应的 `interactionId`；当浏览器新建或替换会话时，Cloud Relay 必须保留并重投尚未 `resolved` / `cancelled` 的 `interaction.request`，前端不能从 `approvalId` 反推或伪造 `interactionId`。
 
 ## 版本矩阵
 
-`SUPPORTED_RELAY_PROTOCOL_VERSIONS` 为 `["1.3", "1.2", "1.1", "1.0"]`，`LATEST_RELAY_PROTOCOL_VERSION` 为 `"1.3"`。
+`SUPPORTED_RELAY_PROTOCOL_VERSIONS` 为 `["1.4", "1.3", "1.2", "1.1", "1.0"]`，`LATEST_RELAY_PROTOCOL_VERSION` 为 `"1.4"`。
 
 | Wire | Companion API | 核心能力与远程投影 |
 |---|---|---|
+| `1.4` | `new CompanionRelayBridgeV11({ ..., protocolVersion: "1.4" })`（`roll companion` 可通过 `--relay-protocol-version 1.4` 或 `ROLL_COMPANION_RELAY_PROTOCOL_VERSION=1.4` 启用） | 继承 `1.3`；新增会话级 `thread.effort.get`（query）与 `thread.effort.set`（mutation）及窄公开错误码 `THREAD_EFFORT_STATE_STALE` / `THREAD_EFFORT_UNSUPPORTED`，不开放模型目录或全局配置 |
 | `1.3` | `new CompanionRelayBridgeV11({ ..., protocolVersion: "1.3" })` | 继承 `1.2`；Snapshot 新增可空 `contextRecovery`，事件流新增 `context.recovery.changed` |
-| `1.2` | `new CompanionRelayBridgeV11({ ..., protocolVersion: "1.2" })`（官方 `roll companion` 当前默认值） | 继承 `1.1`；新增只读 `operation.result.get`，`OperationView` 与 `tool.completed` 携带轻量 `appOutput` 描述符 |
+| `1.2` | `new CompanionRelayBridgeV11({ ..., protocolVersion: "1.2" })`（官方 `roll companion` 未指定版本时的兼容默认值） | 继承 `1.1`；新增只读 `operation.result.get`，`OperationView` 与 `tool.completed` 携带轻量 `appOutput` 描述符 |
 | `1.1` | `new CompanionRelayBridgeV11({ ... })`（底层构造默认 `"1.1"`） | 通用类型化交互 `interaction.request/resolved/cancelled` + `interaction.candidate` 与远程脱敏投影 |
 | `1.0` | `CompanionRelayBridge.connect(transport)` | 冻结的旧版 Approval 专属路径（仅限同等本地信任边界） |
 
 所有不带版本后缀的旧版通用导出（如 `RELAY_PROTOCOL_VERSION`、`RELAY_REQUEST_METHODS`、`relayMessageSchema`）均冻结在 `"1.0"`。新代码应使用 `RELAY_PROTOCOL_REGISTRY`、`parseRelayMessageForVersion()`、`parseRelayRequestParamsForVersion()` 与 `parseRelayRequestResultForVersion()` 按协商版本校验；`1.0` 的方法表、Schema 与测试夹具不再扩充。
 
-冻结 Wire `1.0` 仅旨在维持旧版接口兼容，并不代表其载荷已满足远程威胁模型下的脱敏要求。它仅适用于同等受信任本地边界内的旧版对端，绝不能作为面向不可信云端或浏览器的安全降级路径。凡涉及远程暴露的生产宿主，必须协商 Wire `1.1` 及以上版本（官方 Companion 默认协商 `"1.2"`，在匹配的 Relay 部署下可开启 `"1.3"`），协商失败时必须直接拒绝连接。
+冻结 Wire `1.0` 仅旨在维持旧版接口兼容，并不代表其载荷已满足远程威胁模型下的脱敏要求。它仅适用于同等受信任本地边界内的旧版对端，绝不能作为面向不可信云端或浏览器的安全降级路径。凡涉及远程暴露的生产宿主，必须协商 Wire `1.1` 及以上版本（官方 Companion 默认协商 `"1.2"`，在匹配的 Relay 部署下可开启 `"1.3"` 或 `"1.4"`），协商失败时必须直接拒绝连接。
 
-Relay Wire 版本与 npm 包版本、本地 Runtime Protocol 版本（当前最新为 `"1.6"`）各自独立演进。本地 Runtime `1.2–1.6` 的新增字段绝不能绕过投影直接塞入低版本 Wire 帧，每一层都必须按自身版本的注册表校验并转换。
+Relay Wire 版本与 npm 包版本、本地 Runtime Protocol 版本（当前最新为 `"1.7"`）各自独立演进。本地 Runtime `1.2–1.7` 的新增字段绝不能绕过投影直接塞入低版本 Wire 帧，每一层都必须按自身版本的注册表校验并转换。
 
-## Wire 1.1–1.3 消息与版本扩展
+## Wire 1.1–1.4 消息与版本扩展
 
-Wire `1.1`、`1.2` 与 `1.3` 共享相同的 10 种外层消息 `type`：
+Wire `1.1`、`1.2`、`1.3` 与 `1.4` 共享相同的 10 种外层消息 `type`：
 
 | 消息 `type` | 方向 | 用途 |
 |---|---|---|
-| `device.connect` | Companion → Relay | 携带 `protocolVersion`（`"1.1"` / `"1.2"` / `"1.3"`）、`deviceId` 与 `pairingToken` |
-| `runtime.request` | Relay → Companion | 查询/写操作或 `interaction.candidate`（`1.2–1.3` 包含 `operation.result.get`） |
+| `device.connect` | Companion → Relay | 携带 `protocolVersion`（`"1.1"` / `"1.2"` / `"1.3"` / `"1.4"`）、`deviceId` 与 `pairingToken` |
+| `runtime.request` | Relay → Companion | 查询/写操作或 `interaction.candidate`（`1.2–1.4` 包含 `operation.result.get`，`1.4` 另含 `thread.effort.get/set`） |
 | `runtime.response` | Companion → Relay | 请求结果或统一脱敏后的稳定错误 |
-| `runtime.event` | Companion → Relay | 脱敏后的 Runtime 事件投影（`1.2+` 含 `tool.completed.appOutput` 描述符，`1.3` 含 `context.recovery.changed`） |
+| `runtime.event` | Companion → Relay | 脱敏后的 Runtime 事件投影（`1.2+` 含 `tool.completed.appOutput` 描述符，`1.3+` 含 `context.recovery.changed`） |
 | `interaction.request` | Companion → Relay | 安全的 Approval / User Input 请求投影 |
 | `interaction.resolved` | Companion → Relay | 逻辑交互已结算；不携带完整提交结果 |
 | `interaction.cancelled` | Companion → Relay | 逻辑交互已取消；不携带本机内部报错详情 |
@@ -101,9 +102,16 @@ Wire `1.1`、`1.2` 与 `1.3` 共享相同的 10 种外层消息 `type`：
 - **状态与事件投影**：`thread.open` 与 `thread.snapshot` 结果新增可空的 `contextRecovery` 字段（仅暴露 `{ checkpointId, required, unextracted, requiredItemCount }` 有界门禁计数，不含模型笔记或归档原文）；`runtime.event` 允许转发 `context.recovery.changed` 事件。
 - **投影与向下兼容辅助函数**：导出 `projectRelayThreadSnapshotV13()`、`projectRuntimeEventEnvelopeForRelayV13()`，以及向 Wire `1.2` 对端降级（将 `context.recovery.changed` 兼容映射为 `capabilities.changed`）的 `projectRelayMessageV13ToV12()`。
 
+### Wire 1.4 扩展：会话内推理强度调整（Per-thread effort）
+
+- **会话级方法集合**：`RELAY_REQUEST_METHODS_V14` 在 `1.2/1.3` 的基础上新增查询 `thread.effort.get`（参数 `{ threadId }`）与写操作 `thread.effort.set`（参数 `{ requestId, threadId, expectedRevision, configRevision, effort }`）；模型候选目录 `runtime.models.list` 与模型切换控制面不会对远端开放。
+- **状态投影与幂等键分层**：`projectRelayThreadEffortStatusV14()` 从本地 Runtime `1.7` 状态剥离模型选择意图 `selection` 与本地 `contextWindow`，保留 `{ threadId, revision, configRevision, effort, status, active, target, reason? }`（`active.provider` 与 `active.model` 保持与 Runtime 身份一致的 `128` / `512` 字符上限）。内层 `params.requestId` 作为本地 Runtime 写操作的幂等键透传，外层 Relay `requestId` 独立承担传输层响应关联与断线重投。
+- **窄公开错误码**：为使 Web 端区分“状态/配置已过期（需重新查询）”与“档位不兼容/不可用（需重新选择）”，Wire `1.4` 在 `RELAY_ERROR_CODES_V14` 中为 `thread.effort.set/get` 定义 `THREAD_EFFORT_STATE_STALE`（`retryable: true`）与 `THREAD_EFFORT_UNSUPPORTED`（`retryable: false`），其余异常继续沿用原固定脱敏文案。
+- **官方 Companion 产品入口与客户端版本守卫**：`roll companion enroll`、`roll companion enable` 与 `roll companion run --foreground` 均提供 `--relay-protocol-version <1.2|1.3|1.4>`（亦可设置环境变量 `ROLL_COMPANION_RELAY_PROTOCOL_VERSION`），未指定时默认使用 `"1.2"` 以兼容旧版 Relay 部署。`@roll-agent/relay-client` 在 `RelayThread` 上提供 `thread.getEffort()` 与 `thread.setEffort()`，连接旧版 Wire 时在本地直接拒绝且不发送越界帧；在初连与重连握手期间，若对端返回的 `session.ready.relayProtocolVersion` 不在本次实际 offer 列表中，客户端在发送 ACK、进入 `connected` 或重放 mutation 前直接按协议错误关闭连接。
+
 ### Typed Interaction
 
-Wire `1.1–1.3` 支持两类远程交互：
+Wire `1.1–1.4` 支持两类远程交互：
 
 | `method` | request projection | candidate |
 |---|---|---|

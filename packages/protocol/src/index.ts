@@ -19,9 +19,13 @@ export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V15 = [
   "1.5",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V14,
 ] as const;
-export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V16 = [
   "1.6",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V15,
+] as const;
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+  "1.7",
+  ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V16,
 ] as const;
 export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS)[number];
 export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
@@ -114,6 +118,13 @@ export interface RuntimeProtocolCapabilities {
 }
 
 export const RUNTIME_PROTOCOL_CAPABILITIES = {
+  "1.7": {
+    serverRequests: true,
+    serverRequestCapabilityNegotiation: true,
+    approvalResolvedEvents: true,
+    clientApprovalResponses: false,
+    requiredServerRequestMethods: [],
+  },
   "1.6": {
     serverRequests: true,
     serverRequestCapabilityNegotiation: true,
@@ -166,6 +177,7 @@ export const RUNTIME_PROTOCOL_CAPABILITIES = {
 } as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolCapabilities>>;
 
 export const REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION = {
+  "1.7": RUNTIME_PROTOCOL_CAPABILITIES["1.7"].requiredServerRequestMethods,
   "1.6": RUNTIME_PROTOCOL_CAPABILITIES["1.6"].requiredServerRequestMethods,
   "1.5": RUNTIME_PROTOCOL_CAPABILITIES["1.5"].requiredServerRequestMethods,
   "1.4": RUNTIME_PROTOCOL_CAPABILITIES["1.4"].requiredServerRequestMethods,
@@ -608,8 +620,16 @@ export const initializeResultV16Schema = initializeResultV15Schema.def.innerType
   })
   .readonly();
 
+export const initializeResultV17Schema = initializeResultV15Schema.def.innerType
+  .extend({
+    protocolVersion: z.literal("1.7"),
+    features: z.array(z.enum(RUNTIME_FEATURES_V16)),
+  })
+  .readonly();
+
 /** Any currently supported Runtime Protocol initialize result. */
 export const initializeResultSchema = z.union([
+  initializeResultV17Schema,
   initializeResultV16Schema,
   initializeResultV15Schema,
   initializeResultV14Schema,
@@ -1270,20 +1290,155 @@ export const threadModelSelectionSchema = z
   ])
   .readonly();
 export type ThreadModelSelection = z.infer<typeof threadModelSelectionSchema>;
+
+export const THREAD_EFFORT_LEVELS = ["off", "low", "medium", "high", "xhigh", "max"] as const;
+export const threadEffortLevelSchema = z.enum(THREAD_EFFORT_LEVELS);
+export type ThreadEffortLevel = z.infer<typeof threadEffortLevelSchema>;
+
+export const THREAD_EFFORT_CAPABILITY_KINDS = ["levels", "toggle", "fixed", "unknown"] as const;
+const uniqueThreadEffortLevelsSchema = z
+  .array(threadEffortLevelSchema)
+  .min(2)
+  .max(THREAD_EFFORT_LEVELS.length)
+  .superRefine((levels, context) => {
+    const seen = new Set<ThreadEffortLevel>();
+    for (const [index, level] of levels.entries()) {
+      if (seen.has(level)) {
+        context.addIssue({
+          code: "custom",
+          message: "effort levels must not contain duplicates",
+          path: [index],
+        });
+      }
+      seen.add(level);
+    }
+  })
+  .meta({ uniqueItems: true })
+  .readonly();
+export const threadEffortLevelsCapabilitySchema = z
+  .object({
+    kind: z.literal("levels"),
+    levels: uniqueThreadEffortLevelsSchema,
+  })
+  .strict()
+  .readonly();
+const threadEffortToggleDistinctSchemas = [
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("off"),
+      onLevel: z.enum(["low", "medium", "high", "xhigh", "max"]),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("low"),
+      onLevel: z.enum(["off", "medium", "high", "xhigh", "max"]),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("medium"),
+      onLevel: z.enum(["off", "low", "high", "xhigh", "max"]),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("high"),
+      onLevel: z.enum(["off", "low", "medium", "xhigh", "max"]),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("xhigh"),
+      onLevel: z.enum(["off", "low", "medium", "high", "max"]),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      kind: z.literal("toggle"),
+      offLevel: z.literal("max"),
+      onLevel: z.enum(["off", "low", "medium", "high", "xhigh"]),
+    })
+    .strict()
+    .readonly(),
+] as const;
+export const threadEffortToggleCapabilitySchema = z.discriminatedUnion(
+  "offLevel",
+  threadEffortToggleDistinctSchemas,
+);
+export const threadEffortFixedCapabilitySchema = z
+  .object({ kind: z.literal("fixed") })
+  .strict()
+  .readonly();
+export const threadEffortUnknownCapabilitySchema = z
+  .object({ kind: z.literal("unknown") })
+  .strict()
+  .readonly();
+export const threadEffortCapabilitySchema = z.discriminatedUnion("kind", [
+  threadEffortLevelsCapabilitySchema,
+  threadEffortToggleCapabilitySchema,
+  threadEffortFixedCapabilitySchema,
+  threadEffortUnknownCapabilitySchema,
+]);
+export type ThreadEffortCapability = z.infer<typeof threadEffortCapabilitySchema>;
+
+export const threadEffortSelectionSchema = z
+  .discriminatedUnion("mode", [
+    z.object({ mode: z.literal("default") }).strict(),
+    z.object({ mode: z.literal("explicit"), level: threadEffortLevelSchema }).strict(),
+  ])
+  .readonly();
+export type ThreadEffortSelection = z.infer<typeof threadEffortSelectionSchema>;
+
+/** Any valid non-offLevel setting on a toggle-only model represents the enabled state. */
+export function isThreadEffortToggleEnabled(
+  capability: Extract<ThreadEffortCapability, { readonly kind: "toggle" }>,
+  level: ThreadEffortLevel,
+): boolean {
+  return level !== capability.offLevel;
+}
+
 const threadModelRevisionSchema = z.string().uuid();
 const threadModelConfigRevisionSchema = z.string().min(1).max(128);
-export const runtimeModelCatalogSchema = z
+const runtimeModelCatalogItemV16ObjectSchema = threadModelIdentitySchema
+  .extend({
+    available: z.boolean(),
+    reason: z.enum(["unsupported-provider", "unconfigured-provider"]).optional(),
+  })
+  .strict();
+
+/** Runtime Protocol 1.6 model catalog. Keep this schema frozen. */
+export const runtimeModelCatalogV16Schema = z
   .object({
     configRevision: threadModelConfigRevisionSchema,
     defaultModel: threadModelIdentitySchema.readonly(),
+    items: z.array(runtimeModelCatalogItemV16ObjectSchema.readonly()).max(2048).readonly(),
+  })
+  .strict()
+  .readonly();
+export type RuntimeModelCatalogV16 = z.infer<typeof runtimeModelCatalogV16Schema>;
+
+export const runtimeModelCatalogV17Schema = z
+  .object({
+    configRevision: threadModelConfigRevisionSchema,
+    defaultModel: threadModelIdentitySchema.readonly(),
+    defaultEffort: threadEffortLevelSchema,
     items: z
       .array(
-        threadModelIdentitySchema
+        runtimeModelCatalogItemV16ObjectSchema
           .extend({
-            available: z.boolean(),
-            reason: z.enum(["unsupported-provider", "unconfigured-provider"]).optional(),
+            effortCapability: threadEffortCapabilitySchema,
           })
-          .strict()
           .readonly(),
       )
       .max(2048)
@@ -1291,48 +1446,112 @@ export const runtimeModelCatalogSchema = z
   })
   .strict()
   .readonly();
+export const runtimeModelCatalogSchema = runtimeModelCatalogV17Schema;
 export type RuntimeModelCatalog = z.infer<typeof runtimeModelCatalogSchema>;
-const activeThreadModelSchema = threadModelIdentitySchema
+
+const activeThreadModelV16ObjectSchema = threadModelIdentitySchema
   .extend({
     reasoning: z.enum(["summary", "text"]).nullable(),
     contextWindow: z.number().int().positive().optional(),
   })
+  .strict();
+export const activeThreadModelV16Schema = activeThreadModelV16ObjectSchema.readonly();
+export type ActiveThreadModelV16 = z.infer<typeof activeThreadModelV16Schema>;
+
+export const activeThreadModelV17Schema = activeThreadModelV16ObjectSchema
+  .extend({
+    effort: threadEffortLevelSchema,
+    effortCapability: threadEffortCapabilitySchema,
+  })
+  .readonly();
+export type ActiveThreadModel = z.infer<typeof activeThreadModelV17Schema>;
+
+export const threadModelTargetSchema = threadModelIdentitySchema
+  .extend({
+    effectiveEffort: threadEffortLevelSchema,
+    effortCapability: threadEffortCapabilitySchema,
+  })
   .strict()
   .readonly();
-const threadModelStatusFields = {
+export type ThreadModelTarget = z.infer<typeof threadModelTargetSchema>;
+
+export const THREAD_MODEL_FAILURES_V16 = [
+  "model-unavailable",
+  "prepare-failed",
+  "apply-failed",
+  "config-changed",
+  "settlement-failed",
+] as const;
+export const THREAD_MODEL_FAILURES_V17 = [
+  ...THREAD_MODEL_FAILURES_V16,
+  "effort-unsupported",
+] as const;
+const threadModelFailureV16Schema = z.enum(THREAD_MODEL_FAILURES_V16);
+const threadModelFailureV17Schema = z.enum(THREAD_MODEL_FAILURES_V17);
+
+const threadModelStatusV16Fields = {
   threadId: threadIdSchema,
   revision: threadModelRevisionSchema,
   selection: threadModelSelectionSchema,
   configRevision: threadModelConfigRevisionSchema,
-  active: activeThreadModelSchema.nullable(),
+  active: activeThreadModelV16Schema.nullable(),
 };
-export const threadModelStatusSchema = z
+
+/** Runtime Protocol 1.6 thread model status. Keep this schema frozen. */
+export const threadModelStatusV16Schema = z
   .discriminatedUnion("status", [
     z
       .object({
-        ...threadModelStatusFields,
-        active: activeThreadModelSchema,
+        ...threadModelStatusV16Fields,
+        active: activeThreadModelV16Schema,
         status: z.literal("applied"),
       })
       .strict(),
-    z.object({ ...threadModelStatusFields, status: z.literal("pending") }).strict(),
+    z.object({ ...threadModelStatusV16Fields, status: z.literal("pending") }).strict(),
     z
       .object({
-        ...threadModelStatusFields,
+        ...threadModelStatusV16Fields,
         status: z.literal("failed"),
-        reason: z.enum([
-          "model-unavailable",
-          "prepare-failed",
-          "apply-failed",
-          "config-changed",
-          "settlement-failed",
-        ]),
+        reason: threadModelFailureV16Schema,
       })
       .strict(),
   ])
   .readonly();
+export type ThreadModelStatusV16 = z.infer<typeof threadModelStatusV16Schema>;
+
+const threadModelStatusV17Fields = {
+  threadId: threadIdSchema,
+  revision: threadModelRevisionSchema,
+  selection: threadModelSelectionSchema,
+  effort: threadEffortSelectionSchema,
+  target: threadModelTargetSchema,
+  configRevision: threadModelConfigRevisionSchema,
+  active: activeThreadModelV17Schema.nullable(),
+};
+export const threadModelStatusV17Schema = z
+  .discriminatedUnion("status", [
+    z
+      .object({
+        ...threadModelStatusV17Fields,
+        active: activeThreadModelV17Schema,
+        status: z.literal("applied"),
+      })
+      .strict(),
+    z.object({ ...threadModelStatusV17Fields, status: z.literal("pending") }).strict(),
+    z
+      .object({
+        ...threadModelStatusV17Fields,
+        status: z.literal("failed"),
+        reason: threadModelFailureV17Schema,
+      })
+      .strict(),
+  ])
+  .readonly();
+export const threadModelStatusSchema = threadModelStatusV17Schema;
 export type ThreadModelStatus = z.infer<typeof threadModelStatusSchema>;
-export const threadModelSetParamsSchema = z
+
+/** Runtime Protocol 1.6 thread.model.set params. Keep this schema frozen. */
+export const threadModelSetParamsV16Schema = z
   .object({
     ...requestFields,
     ...threadRequestFields,
@@ -1342,6 +1561,25 @@ export const threadModelSetParamsSchema = z
   })
   .strict()
   .readonly();
+export type ThreadModelSetParamsV16 = z.infer<typeof threadModelSetParamsV16Schema>;
+
+export const threadModelSetParamsV17Schema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    expectedRevision: threadModelRevisionSchema,
+    configRevision: threadModelConfigRevisionSchema,
+    selection: threadModelSelectionSchema.optional(),
+    effort: threadEffortSelectionSchema.optional(),
+  })
+  .strict()
+  .meta({ minProperties: 5 })
+  .refine((value) => value.selection !== undefined || value.effort !== undefined, {
+    message: "thread.model.set requires at least one of selection or effort",
+  })
+  .readonly();
+export const threadModelSetParamsSchema = threadModelSetParamsV17Schema;
+export type ThreadModelSetParams = z.infer<typeof threadModelSetParamsSchema>;
 
 export const threadListParamsSchema = z
   .object({
@@ -2199,7 +2437,35 @@ export const runtimeEventEnvelopeV16Schema = z.discriminatedUnion("durability", 
   runtimeEphemeralEventEnvelopeV16Schema,
 ]);
 
+export const runtimeDurableEventEnvelopeV17Schema = z
+  .object({
+    protocolVersion: z.literal("1.7"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("durable"),
+    eventId: runtimeEventIdSchema,
+    cursor: runtimeEventCursorSchema,
+    event: runtimeDurableEventV16Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+export const runtimeEphemeralEventEnvelopeV17Schema = z
+  .object({
+    protocolVersion: z.literal("1.7"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("ephemeral"),
+    event: runtimeEphemeralEventV16Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+export const runtimeEventEnvelopeV17Schema = z.discriminatedUnion("durability", [
+  runtimeDurableEventEnvelopeV17Schema,
+  runtimeEphemeralEventEnvelopeV17Schema,
+]);
+
 export const runtimeEventEnvelopeSchema = z.union([
+  runtimeEventEnvelopeV17Schema,
   runtimeEventEnvelopeV16Schema,
   runtimeEventEnvelopeV15Schema,
   runtimeEventEnvelopeV14Schema,
@@ -2405,15 +2671,15 @@ export const runtimeMethodSchemasV16 = {
   ...runtimeMethodSchemasV15,
   [RUNTIME_METHODS.modelsList]: {
     params: z.object({}).strict().readonly(),
-    result: runtimeModelCatalogSchema,
+    result: runtimeModelCatalogV16Schema,
   },
   [RUNTIME_METHODS.threadModelGet]: {
     params: z.object(threadRequestFields).strict().readonly(),
-    result: threadModelStatusSchema,
+    result: threadModelStatusV16Schema,
   },
   [RUNTIME_METHODS.threadModelSet]: {
-    params: threadModelSetParamsSchema,
-    result: threadModelStatusSchema,
+    params: threadModelSetParamsV16Schema,
+    result: threadModelStatusV16Schema,
   },
   // Optional read-only host extension; legacy list payloads and the handshake stay frozen.
   [RUNTIME_METHODS.threadBrowse]: {
@@ -2447,7 +2713,27 @@ export const runtimeMethodSchemasV16 = {
     result: runtimeModelConfigStatusSchema,
   },
 } as const;
-export const runtimeMethodSchemas = runtimeMethodSchemasV16;
+
+export const runtimeMethodSchemasV17 = {
+  ...runtimeMethodSchemasV16,
+  [RUNTIME_METHODS.initialize]: {
+    params: initializeParamsSchema,
+    result: initializeResultV17Schema,
+  },
+  [RUNTIME_METHODS.modelsList]: {
+    params: z.object({}).strict().readonly(),
+    result: runtimeModelCatalogV17Schema,
+  },
+  [RUNTIME_METHODS.threadModelGet]: {
+    params: z.object(threadRequestFields).strict().readonly(),
+    result: threadModelStatusV17Schema,
+  },
+  [RUNTIME_METHODS.threadModelSet]: {
+    params: threadModelSetParamsV17Schema,
+    result: threadModelStatusV17Schema,
+  },
+} as const;
+export const runtimeMethodSchemas = runtimeMethodSchemasV17;
 
 export const runtimeServerRequestSchemasV10 = {} as const;
 
@@ -2489,6 +2775,14 @@ export interface RuntimeProtocolRegistry {
 }
 
 export const RUNTIME_PROTOCOL_REGISTRY = {
+  "1.7": {
+    methods: runtimeMethodSchemasV17,
+    serverRequests: runtimeServerRequestSchemasV13,
+    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+    serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV12Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV17Schema,
+    errorDataSchema: runtimeProtocolErrorDataV14Schema,
+  },
   "1.6": {
     methods: runtimeMethodSchemasV16,
     serverRequests: runtimeServerRequestSchemasV13,
@@ -2705,6 +2999,9 @@ export type InitializeResultV11 = z.output<typeof initializeResultV11Schema>;
 export type InitializeResultV12 = z.output<typeof initializeResultV12Schema>;
 export type InitializeResultV13 = z.output<typeof initializeResultV13Schema>;
 export type InitializeResultV14 = z.output<typeof initializeResultV14Schema>;
+export type InitializeResultV15 = z.output<typeof initializeResultV15Schema>;
+export type InitializeResultV16 = z.output<typeof initializeResultV16Schema>;
+export type InitializeResultV17 = z.output<typeof initializeResultV17Schema>;
 export type AttachmentSource = z.infer<typeof attachmentSourceSchema>;
 export type AttachmentState = z.infer<typeof attachmentStateSchema>;
 export type AttachmentDescriptor = z.infer<typeof attachmentDescriptorSchema>;
@@ -2738,17 +3035,19 @@ export type RuntimeEphemeralEventEnvelopeV14 = z.infer<
 >;
 export type RuntimeEventEnvelopeV14 = z.infer<typeof runtimeEventEnvelopeV14Schema>;
 export type RuntimeEventEnvelopeForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.6"
-    ? RuntimeEventEnvelopeV16
-    : TVersion extends "1.5"
-      ? RuntimeEventEnvelopeV15
-      : TVersion extends "1.4"
-        ? RuntimeEventEnvelopeV14
-        : TVersion extends "1.3"
-          ? RuntimeEventEnvelopeV13
-          : TVersion extends "1.2"
-            ? RuntimeEventEnvelopeV12
-            : RuntimeEventEnvelopeV11;
+  TVersion extends "1.7"
+    ? RuntimeEventEnvelopeV17
+    : TVersion extends "1.6"
+      ? RuntimeEventEnvelopeV16
+      : TVersion extends "1.5"
+        ? RuntimeEventEnvelopeV15
+        : TVersion extends "1.4"
+          ? RuntimeEventEnvelopeV14
+          : TVersion extends "1.3"
+            ? RuntimeEventEnvelopeV13
+            : TVersion extends "1.2"
+              ? RuntimeEventEnvelopeV12
+              : RuntimeEventEnvelopeV11;
 export type RuntimeProtocolErrorData = z.infer<typeof runtimeProtocolErrorDataSchema>;
 export type RuntimeProtocolErrorDataV12 = z.infer<typeof runtimeProtocolErrorDataV12Schema>;
 export type RuntimeProtocolErrorDataV13 = z.infer<typeof runtimeProtocolErrorDataV13Schema>;
@@ -2766,18 +3065,19 @@ export type ThreadRecoverySnapshotV13 = z.infer<typeof threadRecoverySnapshotV13
 export type ThreadSnapshotV13 = z.infer<typeof threadSnapshotV13Schema>;
 export type ThreadSnapshotV14Full = z.infer<typeof threadSnapshotV14FullSchema>;
 export type ThreadSnapshotV14 = z.infer<typeof threadSnapshotV14Schema>;
-export type ThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.6"
-    ? ThreadSnapshotV16
-    : TVersion extends "1.5"
-      ? ThreadSnapshotV15
-      : TVersion extends "1.4"
-        ? ThreadSnapshotV14
-        : TVersion extends "1.3"
-          ? ThreadSnapshotV13
-          : TVersion extends "1.2"
-            ? ThreadSnapshotV12
-            : ThreadSnapshotV11;
+export type ThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion> = TVersion extends
+  | "1.7"
+  | "1.6"
+  ? ThreadSnapshotV16
+  : TVersion extends "1.5"
+    ? ThreadSnapshotV15
+    : TVersion extends "1.4"
+      ? ThreadSnapshotV14
+      : TVersion extends "1.3"
+        ? ThreadSnapshotV13
+        : TVersion extends "1.2"
+          ? ThreadSnapshotV12
+          : ThreadSnapshotV11;
 export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type UiMessageV14 = z.infer<typeof uiMessageV14Schema>;
 export type UiMessagePartV14 = z.infer<typeof uiMessagePartV14Schema>;
@@ -3217,7 +3517,7 @@ export function projectOperationViewForVersion(
   value: unknown,
 ): OperationView | OperationViewV15 {
   const current = operationViewV15Schema.safeParse(value);
-  if (version === "1.5" || version === "1.6") {
+  if (version === "1.5" || version === "1.6" || version === "1.7") {
     return current.success
       ? current.data
       : operationViewV15Schema.parse({
@@ -3230,11 +3530,82 @@ export function projectOperationViewForVersion(
   return operationViewSchema.parse(legacy);
 }
 
+export type RuntimeModelCatalogForVersion<TVersion extends "1.6" | "1.7"> = TVersion extends "1.7"
+  ? RuntimeModelCatalog
+  : RuntimeModelCatalogV16;
+
+export type ThreadModelStatusForVersion<TVersion extends "1.6" | "1.7"> = TVersion extends "1.7"
+  ? ThreadModelStatus
+  : ThreadModelStatusV16;
+
+export function projectRuntimeModelCatalogForVersion<TVersion extends "1.6" | "1.7">(
+  version: TVersion,
+  value: unknown,
+): RuntimeModelCatalogForVersion<TVersion> {
+  if (version === "1.7") {
+    return runtimeModelCatalogV17Schema.parse(value) as RuntimeModelCatalogForVersion<TVersion>;
+  }
+  const latest = runtimeModelCatalogV17Schema.safeParse(value);
+  if (!latest.success) {
+    return runtimeModelCatalogV16Schema.parse(value) as RuntimeModelCatalogForVersion<TVersion>;
+  }
+  return runtimeModelCatalogV16Schema.parse({
+    configRevision: latest.data.configRevision,
+    defaultModel: latest.data.defaultModel,
+    items: latest.data.items.map(({ effortCapability: _effortCapability, ...item }) => item),
+  }) as RuntimeModelCatalogForVersion<TVersion>;
+}
+
+export function projectThreadModelStatusForVersion<TVersion extends "1.6" | "1.7">(
+  version: TVersion,
+  value: unknown,
+): ThreadModelStatusForVersion<TVersion> {
+  if (version === "1.7") {
+    return threadModelStatusV17Schema.parse(value) as ThreadModelStatusForVersion<TVersion>;
+  }
+  const latest = threadModelStatusV17Schema.safeParse(value);
+  if (!latest.success) {
+    return threadModelStatusV16Schema.parse(value) as ThreadModelStatusForVersion<TVersion>;
+  }
+  const active =
+    latest.data.active === null
+      ? null
+      : (({ effort: _effort, effortCapability: _effortCapability, ...rest }) => rest)(
+          latest.data.active,
+        );
+  const commonFields = {
+    threadId: latest.data.threadId,
+    revision: latest.data.revision,
+    selection: latest.data.selection,
+    configRevision: latest.data.configRevision,
+  };
+  if (latest.data.status === "applied") {
+    return threadModelStatusV16Schema.parse({
+      ...commonFields,
+      active,
+      status: "applied",
+    }) as ThreadModelStatusForVersion<TVersion>;
+  }
+  if (latest.data.status === "pending") {
+    return threadModelStatusV16Schema.parse({
+      ...commonFields,
+      active,
+      status: "pending",
+    }) as ThreadModelStatusForVersion<TVersion>;
+  }
+  return threadModelStatusV16Schema.parse({
+    ...commonFields,
+    active,
+    status: "failed",
+    reason: latest.data.reason === "effort-unsupported" ? "config-changed" : latest.data.reason,
+  }) as ThreadModelStatusForVersion<TVersion>;
+}
+
 export function projectThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion>(
   version: TVersion,
   value: unknown,
 ): ThreadSnapshotForVersion<TVersion> {
-  if (version === "1.6") {
+  if (version === "1.6" || version === "1.7") {
     return threadSnapshotV16Schema.parse(value) as ThreadSnapshotForVersion<TVersion>;
   }
   const latestV16 = threadSnapshotV16Schema.safeParse(value);
@@ -3316,6 +3687,12 @@ export function projectRuntimeEventEnvelopeForVersion<TVersion extends RuntimePr
   value: unknown,
 ): RuntimeEventEnvelopeForVersion<TVersion> {
   const latest = runtimeEventEnvelopeSchema.parse(value);
+  if (version === "1.7") {
+    return runtimeEventEnvelopeV17Schema.parse({
+      ...latest,
+      protocolVersion: version,
+    }) as RuntimeEventEnvelopeForVersion<TVersion>;
+  }
   if (version === "1.6") {
     return runtimeEventEnvelopeV16Schema.parse({
       ...latest,
@@ -3532,3 +3909,8 @@ export type RuntimeEventEnvelopeV16 = z.infer<typeof runtimeEventEnvelopeV16Sche
 export type RuntimeDurableEventV16 = z.infer<typeof runtimeDurableEventV16Schema>;
 export type ThreadSnapshotV16Full = z.infer<typeof threadSnapshotV16FullSchema>;
 export type ThreadSnapshotV16 = z.infer<typeof threadSnapshotV16Schema>;
+export type RuntimeEventEnvelopeV17 = z.infer<typeof runtimeEventEnvelopeV17Schema>;
+export type RuntimeDurableEventEnvelopeV17 = z.infer<typeof runtimeDurableEventEnvelopeV17Schema>;
+export type RuntimeEphemeralEventEnvelopeV17 = z.infer<
+  typeof runtimeEphemeralEventEnvelopeV17Schema
+>;

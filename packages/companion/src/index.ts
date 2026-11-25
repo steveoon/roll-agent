@@ -79,6 +79,7 @@ export {
   localApprovalDecisionSchema,
   LocalApprovalDeniedError,
   LocalConfirmationRequiredError,
+  ThreadEffortUnsupportedError,
   isRollNodeClient,
 } from "./companion-workspace.ts";
 export {

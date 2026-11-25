@@ -368,6 +368,7 @@ function createTestApplication(input: {
   readonly control: CompanionControlClient;
   readonly logger?: CompanionLogger;
   readonly sessionFactory?: CompanionSessionFactory;
+  readonly relayProtocolVersion?: CompanionApplicationOptions["relayProtocolVersion"];
   readonly credentials?: CompanionCredentialStore;
   readonly assertUserIdentity?: () => Promise<void>;
 }): CompanionApplication {
@@ -398,6 +399,9 @@ function createTestApplication(input: {
       execArgv: [],
     }),
     logger,
+    ...(input.relayProtocolVersion === undefined
+      ? {}
+      : { relayProtocolVersion: input.relayProtocolVersion }),
     sessionFactory:
       input.sessionFactory ??
       ({
@@ -482,3 +486,52 @@ for (const failure of ["internal-error", "transport-error"] as const) {
     assert.deepEqual(requests, ["diagnostics", "status"]);
   });
 }
+
+test("runForeground logs the explicit relayProtocolVersion override instead of persisted version", async () => {
+  const root = await mkdtemp(join(tmpdir(), "roll-companion-log-wire-"));
+  const logger = new RecordingLogger();
+  const abortController = new AbortController();
+  const previousEnv = process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+  delete process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+  try {
+    const app = new CompanionApplication({
+      paths: createCompanionPaths(root, "darwin"),
+      platform: "darwin",
+      configStore: new MemoryConfigStore({ ...initialConfig, relayProtocolVersion: "1.2" }),
+      credentialStore: new FakeCredentialStore(),
+      enrollmentClient: {
+        async redeem() {
+          throw new Error("not used");
+        },
+      },
+      serviceController: new FakeServiceController([]),
+      invocation: createBundledRollInvocation({
+        command: "/bundle/node",
+        cliEntrypoint: "/bundle/roll.js",
+        execArgv: [],
+      }),
+      logger,
+      relayProtocolVersion: "1.4",
+      sessionFactory: {
+        async create() {
+          abortController.abort();
+          return {
+            runtimeExit: new Promise(() => {}),
+            async stop() {},
+          };
+        },
+      },
+      sendControlRequest: missingControlClient,
+      assertUserIdentity: async () => {},
+    });
+    await app.runForeground(abortController.signal);
+    assert.ok(
+      logger.entries.some((line) => line.includes("(Wire 1.4)")),
+      `expected Wire 1.4 in startup log, got: ${logger.entries.join(" | ")}`,
+    );
+  } finally {
+    if (previousEnv === undefined) delete process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+    else process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"] = previousEnv;
+    await rm(root, { recursive: true, force: true });
+  }
+});

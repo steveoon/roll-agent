@@ -54,11 +54,17 @@ export type RuntimeEventRecoverySnapshotReason =
 
 export type RuntimeDurableEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3" | "1.4" | "1.5" | "1.6"; readonly durability: "durable" }
+  {
+    readonly protocolVersion: "1.3" | "1.4" | "1.5" | "1.6" | "1.7";
+    readonly durability: "durable";
+  }
 >;
 export type RuntimeEphemeralEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3" | "1.4" | "1.5" | "1.6"; readonly durability: "ephemeral" }
+  {
+    readonly protocolVersion: "1.3" | "1.4" | "1.5" | "1.6" | "1.7";
+    readonly durability: "ephemeral";
+  }
 >;
 export type RuntimeEventRecoverySnapshot = RuntimeMethodResultForVersion<
   RuntimeProtocolVersion,
@@ -125,13 +131,19 @@ export type RuntimeEventRecoveryStartResult =
 
 export type DurableRecoveryProtocolVersion = Extract<
   RuntimeProtocolVersion,
-  "1.3" | "1.4" | "1.5" | "1.6"
+  "1.3" | "1.4" | "1.5" | "1.6" | "1.7"
 >;
 
 function supportsDurableRecovery(
   version: RuntimeProtocolVersion,
 ): version is DurableRecoveryProtocolVersion {
-  return version === "1.3" || version === "1.4" || version === "1.5" || version === "1.6";
+  return (
+    version === "1.3" ||
+    version === "1.4" ||
+    version === "1.5" ||
+    version === "1.6" ||
+    version === "1.7"
+  );
 }
 
 /**
@@ -292,7 +304,8 @@ function isRecoverableDurableEvent(
     (event.protocolVersion === "1.3" ||
       event.protocolVersion === "1.4" ||
       event.protocolVersion === "1.5" ||
-      event.protocolVersion === "1.6") &&
+      event.protocolVersion === "1.6" ||
+      event.protocolVersion === "1.7") &&
     event.durability === "durable"
   );
 }
@@ -304,7 +317,8 @@ function isRecoverableEphemeralEvent(
     (event.protocolVersion === "1.3" ||
       event.protocolVersion === "1.4" ||
       event.protocolVersion === "1.5" ||
-      event.protocolVersion === "1.6") &&
+      event.protocolVersion === "1.6" ||
+      event.protocolVersion === "1.7") &&
     event.durability === "ephemeral"
   );
 }

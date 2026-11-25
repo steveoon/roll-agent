@@ -2,7 +2,11 @@ import { defineCommand } from "citty";
 import { RELAY_HOST_OVERRIDE_ENV, resolveRelayEndpoint } from "../../companion-host/constants.ts";
 import { readPairingCodeFromStdin } from "../../companion-host/enrollment.ts";
 import { log } from "../utils/output.ts";
-import { createCompanionCliApplication, runCompanionCommand } from "./companion-command-utils.ts";
+import {
+  createCompanionCliApplication,
+  parseCliCompanionRelayProtocolVersion,
+  runCompanionCommand,
+} from "./companion-command-utils.ts";
 
 export default defineCommand({
   meta: { description: "使用标准输入中的一次性配对码绑定官方 Relay 和本机 Workspace" },
@@ -17,12 +21,17 @@ export default defineCommand({
       description: "本机 Workspace 的绝对路径",
       required: true,
     },
+    "relay-protocol-version": {
+      type: "string",
+      description: "可选 Relay Wire 协议版本（1.2、1.3 或 1.4）",
+    },
   },
   async run({ args }) {
     await runCompanionCommand(async () => {
       if (args.codeStdin !== true) {
         throw new Error("Enrollment requires --code-stdin");
       }
+      const relayProtocolVersion = parseCliCompanionRelayProtocolVersion(args.relayProtocolVersion);
       if (process.stdin.isTTY) {
         throw new Error("Pipe the one-time pairing code to stdin; interactive echo is not allowed");
       }
@@ -34,7 +43,11 @@ export default defineCommand({
       }
       const pairingCode = await readPairingCodeFromStdin(process.stdin);
       const app = createCompanionCliApplication();
-      await app.enroll({ pairingCode, workspace: args.workspace });
+      await app.enroll({
+        pairingCode,
+        workspace: args.workspace,
+        ...(relayProtocolVersion === undefined ? {} : { relayProtocolVersion }),
+      });
       log.success("Roll Companion 已完成设备绑定；配对码未写入配置或日志。");
     });
   },

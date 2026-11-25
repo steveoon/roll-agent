@@ -1,8 +1,33 @@
 import { createDefaultCompanionApplication } from "../../companion-host/application.ts";
+import {
+  parseCompanionRelayProtocolVersion,
+  type CompanionRelayProtocolVersion,
+} from "../../companion-host/constants.ts";
 import { log } from "../utils/output.ts";
 
-export function createCompanionCliApplication() {
-  return createDefaultCompanionApplication();
+export function parseCliCompanionRelayProtocolVersion(
+  value: unknown,
+): CompanionRelayProtocolVersion | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error("Invalid --relay-protocol-version flag value");
+  }
+  if (value.trim() === "") {
+    return undefined;
+  }
+  return parseCompanionRelayProtocolVersion(value, "--relay-protocol-version");
+}
+
+export function createCompanionCliApplication(options?: {
+  readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
+}) {
+  return createDefaultCompanionApplication(
+    options?.relayProtocolVersion === undefined
+      ? {}
+      : { relayProtocolVersion: options.relayProtocolVersion },
+  );
 }
 
 export async function runCompanionCommand(work: () => Promise<void>): Promise<void> {

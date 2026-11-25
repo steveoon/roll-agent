@@ -12,7 +12,6 @@ import {
   RUNTIME_ERROR_CODES,
   RUNTIME_FEATURES_V13,
   RUNTIME_METHODS,
-  RUNTIME_PROTOCOL_VERSION,
   RUNTIME_V14_MAX_ATTACHMENT_BYTES,
   RUNTIME_V14_MAX_ATTACHMENT_CHUNK_BYTES,
   RUNTIME_V14_MAX_STAGED_ATTACHMENTS,
@@ -29,6 +28,8 @@ import {
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
+  threadModelStatusV16Schema,
+  threadModelStatusV17Schema,
   userInputFormSchema,
   type ActiveTurn,
   type ApprovalResolution,
@@ -57,7 +58,13 @@ import {
   type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
-import { ThreadModelError, type ThreadModelEngine } from "../engine/thread-model-engine.ts";
+import {
+  isEffortAwareModelCatalog,
+  ThreadModelError,
+  type ThreadModelEngine,
+  type ThreadModelEngineStatus,
+  type ThreadModelHostCatalog,
+} from "../engine/thread-model-engine.ts";
 import type { SessionAttachment } from "../engine/session-attachments.ts";
 import { AttachmentStore, type AttachmentStoreFailure } from "./attachment-store.ts";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
@@ -130,6 +137,7 @@ export type RuntimeServiceSession = Pick<
 export interface RuntimeServiceEngine extends Partial<
   Pick<
     ThreadModelEngine,
+    | "supportsThreadEffort"
     | "getModelCatalog"
     | "getThreadModel"
     | "setThreadModel"
@@ -288,6 +296,24 @@ function mutationRequestFingerprint(params: unknown): string {
   return createHash("sha256").update(serialized).digest("hex");
 }
 
+type CachedMutationResult<TMethod extends MutationRuntimeMethod> =
+  TMethod extends typeof RUNTIME_METHODS.threadModelSet
+    ? ThreadModelEngineStatus
+    : LatestRuntimeMethodResult<TMethod>;
+
+function parseCachedMutationResult<TMethod extends MutationRuntimeMethod>(
+  method: TMethod,
+  result: unknown,
+): CachedMutationResult<TMethod> {
+  if (method === RUNTIME_METHODS.threadModelSet) {
+    const latest = threadModelStatusV17Schema.safeParse(result);
+    return (
+      latest.success ? latest.data : threadModelStatusV16Schema.parse(result)
+    ) as CachedMutationResult<TMethod>;
+  }
+  return parseLatestRuntimeMethodResult(method, result) as CachedMutationResult<TMethod>;
+}
+
 export class MutationRequestCache {
   private readonly maxEntries: number;
   private readonly inFlight = new Map<string, MutationRequestEntry>();
@@ -304,20 +330,20 @@ export class MutationRequestCache {
     requestId: string,
     method: TMethod,
     params: LatestRuntimeMethodParams<TMethod>,
-    action: () => LatestRuntimeMethodResult<TMethod> | Promise<LatestRuntimeMethodResult<TMethod>>,
-  ): Promise<LatestRuntimeMethodResult<TMethod>> {
+    action: () => CachedMutationResult<TMethod> | Promise<CachedMutationResult<TMethod>>,
+  ): Promise<CachedMutationResult<TMethod>> {
     const fingerprint = mutationRequestFingerprint(params);
     const inFlight = this.inFlight.get(requestId);
     if (inFlight !== undefined) {
       this.assertMatchingRequest(requestId, method, fingerprint, inFlight);
-      return inFlight.response.then((result) => parseLatestRuntimeMethodResult(method, result));
+      return inFlight.response.then((result) => parseCachedMutationResult(method, result));
     }
     const settled = this.settled.get(requestId);
     if (settled !== undefined) {
       this.assertMatchingRequest(requestId, method, fingerprint, settled);
       this.settled.delete(requestId);
       this.settled.set(requestId, settled);
-      return settled.response.then((result) => parseLatestRuntimeMethodResult(method, result));
+      return settled.response.then((result) => parseCachedMutationResult(method, result));
     }
     const pending = Promise.resolve().then(action);
     const entry: MutationRequestEntry = {
@@ -1057,12 +1083,33 @@ export class RuntimeService {
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
 
+  private supportsProtocolV17(): boolean {
+    if (this.engine.supportsThreadEffort !== undefined) {
+      return this.engine.supportsThreadEffort();
+    }
+    if (this.engine.getModelCatalog === undefined) {
+      return true;
+    }
+    try {
+      return isEffortAwareModelCatalog(this.engine.getModelCatalog());
+    } catch {
+      return true;
+    }
+  }
+
+  private supportedProtocolVersions(): readonly RuntimeProtocolVersion[] {
+    return this.supportsProtocolV17()
+      ? SUPPORTED_RUNTIME_PROTOCOL_VERSIONS
+      : SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter((version) => version !== "1.7");
+  }
+
   initialize(params: InitializeParams): InitializeResult {
     this.assertOpen();
+    const supportedVersions = this.supportedProtocolVersions();
     let protocolVersion: RuntimeProtocolVersion | undefined;
     for (const candidate of params.protocolVersions) {
       const parsed = runtimeProtocolVersionSchema.safeParse(candidate);
-      if (parsed.success) {
+      if (parsed.success && supportedVersions.includes(parsed.data)) {
         protocolVersion = parsed.data;
         break;
       }
@@ -1073,7 +1120,7 @@ export class RuntimeService {
         `不支持客户端协议版本：${params.protocolVersions.join(", ")}`,
         {
           details: {
-            supportedVersions: SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
+            supportedVersions,
           },
         },
       );
@@ -1099,7 +1146,12 @@ export class RuntimeService {
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
-    if (protocolVersion === "1.4" || protocolVersion === "1.5" || protocolVersion === "1.6") {
+    if (
+      protocolVersion === "1.4" ||
+      protocolVersion === "1.5" ||
+      protocolVersion === "1.6" ||
+      protocolVersion === "1.7"
+    ) {
       const storeLimits = this.attachmentStore?.limits;
       return initializeResultSchema.parse({
         ...commonResult,
@@ -1107,7 +1159,7 @@ export class RuntimeService {
         features: [
           ...legacyFeatures,
           ...(this.attachmentStore !== undefined ? ["attachments" as const] : []),
-          ...(protocolVersion === "1.5" || protocolVersion === "1.6"
+          ...(protocolVersion === "1.5" || protocolVersion === "1.6" || protocolVersion === "1.7"
             ? ["app-output" as const]
             : []),
         ],
@@ -1458,7 +1510,7 @@ export class RuntimeService {
     return this.modelConfigController.getStatus();
   }
 
-  listModels(): LatestRuntimeMethodResult<"runtime.models.list"> {
+  listModels(): ThreadModelHostCatalog {
     this.assertOpen();
     if (!this.engine.getModelCatalog) {
       throw new RuntimeServiceError(
@@ -1469,9 +1521,7 @@ export class RuntimeService {
     return this.engine.getModelCatalog();
   }
 
-  getThreadModel(
-    params: LatestRuntimeMethodParams<"thread.model.get">,
-  ): LatestRuntimeMethodResult<"thread.model.get"> {
+  getThreadModel(params: LatestRuntimeMethodParams<"thread.model.get">): ThreadModelEngineStatus {
     this.assertOpen();
     this.requireThread(params.threadId);
     if (!this.engine.getThreadModel) {
@@ -1494,7 +1544,7 @@ export class RuntimeService {
 
   setThreadModel(
     params: LatestRuntimeMethodParams<"thread.model.set">,
-  ): Promise<LatestRuntimeMethodResult<"thread.model.set">> {
+  ): Promise<ThreadModelEngineStatus> {
     return this.mutationRequests.run(
       params.requestId,
       RUNTIME_METHODS.threadModelSet,
@@ -1528,12 +1578,16 @@ export class RuntimeService {
           return await this.engine.setThreadModel(params);
         } catch (error) {
           if (!(error instanceof ThreadModelError)) throw error;
+          const retryable =
+            error.reason === "unavailable" ||
+            error.reason === "revision-conflict" ||
+            error.reason === "config-changed";
           throw new RuntimeServiceError(
             error.reason === "unavailable"
               ? RUNTIME_ERROR_CODES.capabilityUnavailable
               : RUNTIME_ERROR_CODES.invalidParams,
             error.message,
-            { retryable: true, details: { modelSelection: error.reason } },
+            { retryable, details: { modelSelection: error.reason } },
           );
         }
       },
@@ -2198,7 +2252,7 @@ export class RuntimeService {
     ownership?.assert();
     const timestamp = new Date().toISOString();
     const commonEnvelope = {
-      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      protocolVersion: "1.6",
       runtimeInstanceId: this.runtimeInstanceId,
       sequence: this.sequence,
       timestamp,

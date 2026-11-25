@@ -4,12 +4,15 @@ import { jsonValueSchema, type JsonValue } from "@roll-agent/protocol";
 import {
   RELAY_ERROR_CODES,
   RELAY_ERROR_CODES_V11,
+  RELAY_ERROR_CODES_V14,
   RELAY_MESSAGE_TYPES_V11,
   RELAY_REQUEST_METHODS_V11,
+  RELAY_REQUEST_METHODS_V14,
   canonicalizeRelayJson,
   classifyRelayAck,
   getRelayErrorRetryability,
   getRelayErrorRetryabilityV11,
+  getRelayErrorRetryabilityV14,
   getRelayRequestMethodDispositionForVersion,
   parseRelayRequestParamsForVersion,
   parseRelayRequestResultForVersion,
@@ -19,24 +22,32 @@ import {
   relayMessageSchemaV11,
   relayMessageSchemaV12,
   relayMessageSchemaV13,
+  relayMessageSchemaV14,
   projectRelayThreadSnapshotV13,
   projectRelayMessageV13ToV12,
+  relayRuntimeRequestSchemaV11,
   relayRuntimeRequestSchemaV12,
+  relayRuntimeRequestSchemaV14,
   projectRelayThreadSnapshotV12,
   projectRelayOperationGetResultV12,
   projectRelayMessageV12ToV11,
   projectRelayCapabilitiesV11,
   type DeviceId,
   type RelayEncryptedMessageV11,
+  type RelayMessageV14,
   type RelayMessageV13,
   type RelayMessageV12,
   type RelayMessageV11 as LegacyRelayMessageV11,
   type RelayRequestId,
-  type RelayRequestMethodV12 as RelayRequestMethodV11,
-  type RelayRuntimeRequestV12 as RelayRuntimeRequestV11,
+  type RelayRequestMethodV14 as RelayRequestMethodV11,
+  type RelayRuntimeRequestV14 as RelayRuntimeRequestV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
-import { LocalApprovalDeniedError, LocalConfirmationRequiredError } from "./companion-workspace.ts";
+import {
+  LocalApprovalDeniedError,
+  LocalConfirmationRequiredError,
+  ThreadEffortUnsupportedError,
+} from "./companion-workspace.ts";
 import type {
   RemoteInteractionCandidateContext,
   RemoteInteractionResponderPolicy,
@@ -47,7 +58,7 @@ import {
   type CompanionRelayFrameReplayV11,
 } from "./relay-frame-buffer.ts";
 
-type RelayMessageV11 = RelayMessageV13 | RelayMessageV12 | LegacyRelayMessageV11;
+type RelayMessageV11 = RelayMessageV14 | RelayMessageV13 | RelayMessageV12 | LegacyRelayMessageV11;
 type RelayRuntimeResponseV11 = Extract<RelayMessageV11, { readonly type: "runtime.response" }>;
 
 export interface RelayTransportV11 {
@@ -83,7 +94,7 @@ export interface CompanionRelayBridgeV11Options {
   readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
   readonly ciphers?: ReadonlyMap<WorkspaceId, RelayPayloadCipherV11>;
   readonly maxRequestCacheEntries?: number;
-  readonly protocolVersion?: "1.1" | "1.2" | "1.3";
+  readonly protocolVersion?: "1.1" | "1.2" | "1.3" | "1.4";
 }
 
 export interface CompanionRelayConnectionV11Options {
@@ -159,7 +170,7 @@ function relayRequestFingerprintV11(request: RelayRuntimeRequestV11): string {
 function projectRelayRuntimeResultV11(
   request: RelayRuntimeRequestV11,
   value: unknown,
-  version: "1.1" | "1.2" | "1.3",
+  version: "1.1" | "1.2" | "1.3" | "1.4",
 ): JsonValue {
   let projected = value;
   if (
@@ -167,7 +178,7 @@ function projectRelayRuntimeResultV11(
     request.method === RELAY_REQUEST_METHODS_V11.threadSnapshot
   ) {
     projected =
-      version === "1.3"
+      version === "1.3" || version === "1.4"
         ? projectRelayThreadSnapshotV13(value)
         : version === "1.2"
           ? projectRelayThreadSnapshotV12(value)
@@ -181,12 +192,35 @@ function projectRelayRuntimeResultV11(
   if (version === "1.1" && request.method === "thread.capabilities") {
     projected = projectRelayCapabilitiesV11(projected);
   }
+  if (!isRelayMethodSupportedInVersion(version, request.method)) {
+    throw new InvalidRelayRequestParamsV11Error();
+  }
   return jsonValueSchema.parse(
     parseRelayRequestResultForVersion(version, request.method, projected),
   );
 }
 
-function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["error"]> {
+function isRelayMethodSupportedInVersion<TVersion extends "1.1" | "1.2" | "1.3" | "1.4">(
+  version: TVersion,
+  method: string,
+): method is import("@roll-agent/relay-protocol").RelayRequestMethodForVersion<TVersion> {
+  return getRelayRequestMethodDispositionForVersion(version, method) !== undefined;
+}
+
+function readModelSelectionReason(error: RollRpcError): string | undefined {
+  const details = error.data?.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) {
+    return undefined;
+  }
+  const reason = details.modelSelection;
+  return typeof reason === "string" ? reason : undefined;
+}
+
+function toRelayErrorV11(
+  error: unknown,
+  version: "1.1" | "1.2" | "1.3" | "1.4" = "1.1",
+  method?: string,
+): NonNullable<RelayRuntimeResponseV11["error"]> {
   if (error instanceof InvalidRelayRequestParamsV11Error) {
     return {
       code: RELAY_ERROR_CODES.invalidParams,
@@ -194,7 +228,41 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
       retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.invalidParams),
     };
   }
+  if (
+    version === "1.4" &&
+    (method === RELAY_REQUEST_METHODS_V14.threadEffortGet ||
+      method === RELAY_REQUEST_METHODS_V14.threadEffortSet) &&
+    (error instanceof ThreadEffortUnsupportedError ||
+      (error instanceof Error && error.name === "ThreadEffortUnsupportedError"))
+  ) {
+    return {
+      code: RELAY_ERROR_CODES_V14.threadEffortUnsupported,
+      message: "Runtime does not support per-thread effort",
+      retryable: getRelayErrorRetryabilityV14(RELAY_ERROR_CODES_V14.threadEffortUnsupported),
+    };
+  }
   if (error instanceof RollRpcError) {
+    if (version === "1.4" && method === RELAY_REQUEST_METHODS_V14.threadEffortSet) {
+      const reason = readModelSelectionReason(error);
+      if (reason === "revision-conflict" || reason === "config-changed") {
+        return {
+          code: RELAY_ERROR_CODES_V14.threadEffortStateStale,
+          message: "Thread effort state is stale; refresh and retry",
+          retryable: getRelayErrorRetryabilityV14(RELAY_ERROR_CODES_V14.threadEffortStateStale),
+        };
+      }
+      if (
+        reason === "effort-unsupported" ||
+        reason === "compaction-effort-incompatible" ||
+        reason === "model-unavailable"
+      ) {
+        return {
+          code: RELAY_ERROR_CODES_V14.threadEffortUnsupported,
+          message: "Requested thread effort is unsupported for the current model",
+          retryable: getRelayErrorRetryabilityV14(RELAY_ERROR_CODES_V14.threadEffortUnsupported),
+        };
+      }
+    }
     return {
       code: error.data?.rollCode ?? `JSON_RPC_${String(error.code)}`,
       message: "Runtime request failed",
@@ -233,7 +301,7 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
  * a frozen Wire 1.0 path; callers must opt into this class to project typed Interactions.
  */
 export class CompanionRelayBridgeV11 {
-  private readonly protocolVersion: "1.1" | "1.2" | "1.3";
+  private readonly protocolVersion: "1.1" | "1.2" | "1.3" | "1.4";
   private readonly deviceId: DeviceId;
   private readonly pairingToken: string;
   private readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
@@ -379,11 +447,13 @@ export class CompanionRelayBridgeV11 {
       return;
     }
     const parsed = (
-      this.protocolVersion === "1.3"
-        ? relayMessageSchemaV13
-        : this.protocolVersion === "1.2"
-          ? relayMessageSchemaV12
-          : relayMessageSchemaV11
+      this.protocolVersion === "1.4"
+        ? relayMessageSchemaV14
+        : this.protocolVersion === "1.3"
+          ? relayMessageSchemaV13
+          : this.protocolVersion === "1.2"
+            ? relayMessageSchemaV12
+            : relayMessageSchemaV11
     ).safeParse(value);
     if (!parsed.success) {
       return;
@@ -398,7 +468,13 @@ export class CompanionRelayBridgeV11 {
         return;
       }
       try {
-        const decrypted = relayRuntimeRequestSchemaV12.parse(await cipher.decrypt(message));
+        const requestSchema =
+          this.protocolVersion === "1.4"
+            ? relayRuntimeRequestSchemaV14
+            : this.protocolVersion === "1.1"
+              ? relayRuntimeRequestSchemaV11
+              : relayRuntimeRequestSchemaV12;
+        const decrypted = requestSchema.parse(await cipher.decrypt(message));
         if (
           decrypted.workspaceId !== message.workspaceId ||
           decrypted.requestId !== message.requestId
@@ -566,13 +642,16 @@ export class CompanionRelayBridgeV11 {
       }
       let params: JsonValue;
       try {
+        if (!isRelayMethodSupportedInVersion(this.protocolVersion, request.method)) {
+          throw new InvalidRelayRequestParamsV11Error();
+        }
         params = jsonValueSchema.parse(
           parseRelayRequestParamsForVersion(this.protocolVersion, request.method, request.params),
         );
       } catch {
         throw new InvalidRelayRequestParamsV11Error();
       }
-      const normalizedRequest = relayRuntimeRequestSchemaV12.parse({ ...request, params });
+      const normalizedRequest = relayRuntimeRequestSchemaV14.parse({ ...request, params });
       const context: RemoteInteractionCandidateContext = {
         signal: generation.controller.signal,
         responderPolicy: generation.responderPolicy,
@@ -592,7 +671,7 @@ export class CompanionRelayBridgeV11 {
         type: RELAY_MESSAGE_TYPES_V11.runtimeResponse,
         requestId: request.requestId,
         workspaceId: request.workspaceId,
-        error: toRelayErrorV11(error),
+        error: toRelayErrorV11(error, this.protocolVersion, request.method),
       };
     }
   }
@@ -620,7 +699,7 @@ export class CompanionRelayBridgeV11 {
     const current = materializeRelayFrameV13(workspaceId, entry);
     const v12 = projectRelayMessageV13ToV12(current);
     const message =
-      this.protocolVersion === "1.3"
+      this.protocolVersion === "1.3" || this.protocolVersion === "1.4"
         ? current
         : this.protocolVersion === "1.2"
           ? v12

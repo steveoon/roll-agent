@@ -4255,3 +4255,299 @@ test("Protocol 1.6 returns strict THREAD_BUSY session_occupied details for anoth
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("RuntimeProtocolAdapter projects 1.7 effort state to frozen 1.6 clients and rejects 1.6 effort mutations", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-adapter-v16-v17-"));
+  const store = new ThreadStore(dir);
+  const { randomUUID } = await import("node:crypto");
+  const { ThreadModelEngine } = await import("../engine/thread-model-engine.ts");
+  const { parseRuntimeMethodResultForVersion } = await import("@roll-agent/protocol");
+  const capability = {
+    kind: "levels" as const,
+    levels: ["low", "medium", "high", "xhigh"] as const,
+  };
+  const makePrepared = (effort: "low" | "medium" | "high" | "xhigh" = "medium") => ({
+    provider: "google",
+    modelName: "gemini-4-neon",
+    effort,
+    effortCapability: capability,
+    reasoning: "summary" as const,
+    model: new MockLanguageModelV4({ modelId: "gemini-4-neon" }),
+  });
+  const modelEngine = new ThreadModelEngine({
+    initial: makePrepared("medium"),
+    host: {
+      catalog: () => ({
+        configRevision: "cfg-wire",
+        defaultModel: { provider: "google", model: "gemini-4-neon" },
+        defaultEffort: "medium",
+        items: [
+          {
+            provider: "google",
+            model: "gemini-4-neon",
+            available: true,
+            effortCapability: capability,
+          },
+        ],
+      }),
+      prepareEffort: (_current, effort) => ({
+        effort,
+        effortCapability: capability,
+        reasoning: "summary",
+      }),
+      prepare: async (_id, _sig, effort) =>
+        makePrepared(
+          effort === "low" || effort === "high" || effort === "xhigh" ? effort : "medium",
+        ),
+    },
+    createEngine: (selection, lifecycle) =>
+      new ConversationEngine({
+        ...selection,
+        ...lifecycle,
+        settings: config,
+        sources: [],
+        store,
+        skillLibrary: null,
+        workspaceInstructions: null,
+      }),
+  });
+
+  const runSession = async (version: "1.6" | "1.7") => {
+    const service = new RuntimeService(modelEngine, store, { runtimeVersion: "test" });
+    const pair = memoryPair();
+    const server = new RuntimeServer(modelEngine, pair.serverConn, { runtimeService: service });
+    const client = attachRuntimeProtocolClient(pair.clientConn);
+    try {
+      const init = (await client.request(1, RUNTIME_METHODS.initialize, {
+        protocolVersions: [version],
+        client: { name: "wire-check", version: "1" },
+      })) as { readonly protocolVersion: string };
+      assert.equal(init.protocolVersion, version);
+      await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+        revision: 1,
+        serverRequestMethods: [],
+      });
+      const rawCatalog = await client.request(3, RUNTIME_METHODS.modelsList, {});
+      const parsedCatalog = parseRuntimeMethodResultForVersion(
+        version,
+        RUNTIME_METHODS.modelsList,
+        rawCatalog,
+      );
+      const created = (await client.request(4, RUNTIME_METHODS.threadCreate, {
+        requestId: randomUUID(),
+      })) as { readonly thread: { readonly id: string } };
+      const rawStatus = await client.request(5, RUNTIME_METHODS.threadModelGet, {
+        threadId: created.thread.id,
+      });
+      const parsedStatus = parseRuntimeMethodResultForVersion(
+        version,
+        RUNTIME_METHODS.threadModelGet,
+        rawStatus,
+      );
+      if (version === "1.6") {
+        assert.equal("defaultEffort" in parsedCatalog, false);
+        assert.equal("effort" in parsedStatus, false);
+        assert.equal("target" in parsedStatus, false);
+        const rejected = await client.requestError(6, RUNTIME_METHODS.threadModelSet, {
+          requestId: randomUUID(),
+          threadId: created.thread.id,
+          expectedRevision: parsedStatus.revision,
+          configRevision: parsedStatus.configRevision,
+          selection: { mode: "default" },
+          effort: { mode: "explicit", level: "high" },
+        });
+        assert.match(JSON.stringify(rejected), /-32602|INVALID_PARAMS/u);
+      } else {
+        assert.ok("defaultEffort" in parsedCatalog);
+        assert.ok("effort" in parsedStatus && "target" in parsedStatus);
+        const updatedRaw = await client.request(6, RUNTIME_METHODS.threadModelSet, {
+          requestId: randomUUID(),
+          threadId: created.thread.id,
+          expectedRevision: parsedStatus.revision,
+          configRevision: parsedStatus.configRevision,
+          effort: { mode: "explicit", level: "xhigh" },
+        });
+        const updated = parseRuntimeMethodResultForVersion(
+          "1.7",
+          RUNTIME_METHODS.threadModelSet,
+          updatedRaw,
+        );
+        assert.equal(updated.active?.effort, "xhigh");
+        assert.equal(updated.target.effectiveEffort, "xhigh");
+      }
+      await client.request(7, RUNTIME_METHODS.threadDetach, {
+        requestId: randomUUID(),
+        threadId: created.thread.id,
+      });
+    } finally {
+      await server.abortAll();
+    }
+  };
+
+  try {
+    await runSession("1.6");
+    await runSession("1.7");
+  } finally {
+    await modelEngine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService negotiates down to 1.6 for a legacy 1.6 ThreadModelHost and preserves model switching and idempotency", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-adapter-legacy-host-"));
+  const store = new ThreadStore(dir);
+  const { randomUUID } = await import("node:crypto");
+  const { ThreadModelEngine } = await import("../engine/thread-model-engine.ts");
+  const { RUNTIME_ERROR_CODES, parseRuntimeMethodResultForVersion } =
+    await import("@roll-agent/protocol");
+  const makePrepared = (name: string) => ({
+    provider: "legacy",
+    modelName: name,
+    reasoning: "summary" as const,
+    model: new MockLanguageModelV4({ modelId: name }),
+  });
+  const modelEngine = new ThreadModelEngine({
+    initial: makePrepared("a"),
+    host: {
+      catalog: () => ({
+        configRevision: "legacy-cfg-wire",
+        defaultModel: { provider: "legacy", model: "a" },
+        items: [
+          { provider: "legacy", model: "a", available: true },
+          { provider: "legacy", model: "b", available: true },
+        ],
+      }),
+      prepare: async (identity) => makePrepared(identity.model),
+    },
+    createEngine: (selection, lifecycle) =>
+      new ConversationEngine({
+        ...selection,
+        ...lifecycle,
+        settings: config,
+        sources: [],
+        store,
+        skillLibrary: null,
+        workspaceInstructions: null,
+      }),
+  });
+
+  try {
+    // 1.7-only client must be rejected with supportedVersions excluding "1.7".
+    {
+      const service = new RuntimeService(modelEngine, store, { runtimeVersion: "test" });
+      const pair = memoryPair();
+      const server = new RuntimeServer(modelEngine, pair.serverConn, { runtimeService: service });
+      const client = attachRuntimeProtocolClient(pair.clientConn);
+      try {
+        const unsupported = await client.requestError(1, RUNTIME_METHODS.initialize, {
+          protocolVersions: ["1.7"],
+          client: { name: "v17-only", version: "1" },
+        });
+        assert.ok(
+          typeof unsupported === "object" && unsupported !== null && "data" in unsupported,
+          "expected JSON-RPC error object with data",
+        );
+        const data = runtimeProtocolErrorDataV14Schema.parse(unsupported.data);
+        assert.equal(data.rollCode, RUNTIME_ERROR_CODES.protocolVersionUnsupported);
+        assert.ok(
+          typeof data.details === "object" &&
+            data.details !== null &&
+            "supportedVersions" in data.details &&
+            Array.isArray(data.details.supportedVersions),
+        );
+        assert.equal(data.details.supportedVersions.includes("1.7"), false);
+        assert.equal(data.details.supportedVersions.includes("1.6"), true);
+      } finally {
+        await server.abortAll();
+      }
+    }
+
+    // Dual-stack ["1.7", "1.6"] client must negotiate down to "1.6" and use model catalog/switching cleanly.
+    {
+      const service = new RuntimeService(modelEngine, store, { runtimeVersion: "test" });
+      const pair = memoryPair();
+      const server = new RuntimeServer(modelEngine, pair.serverConn, { runtimeService: service });
+      const client = attachRuntimeProtocolClient(pair.clientConn);
+      try {
+        const init = (await client.request(1, RUNTIME_METHODS.initialize, {
+          protocolVersions: ["1.7", "1.6"],
+          client: { name: "dual-stack", version: "1" },
+        })) as { readonly protocolVersion: string };
+        assert.equal(init.protocolVersion, "1.6");
+        await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+          revision: 1,
+          serverRequestMethods: [],
+        });
+
+        const catalog = parseRuntimeMethodResultForVersion(
+          "1.6",
+          RUNTIME_METHODS.modelsList,
+          await client.request(3, RUNTIME_METHODS.modelsList, {}),
+        );
+        assert.equal("defaultEffort" in catalog, false);
+        assert.equal(catalog.items.length, 2);
+
+        const created = (await client.request(4, RUNTIME_METHODS.threadCreate, {
+          requestId: randomUUID(),
+        })) as { readonly thread: { readonly id: string } };
+        const initialStatus = parseRuntimeMethodResultForVersion(
+          "1.6",
+          RUNTIME_METHODS.threadModelGet,
+          await client.request(5, RUNTIME_METHODS.threadModelGet, {
+            threadId: created.thread.id,
+          }),
+        );
+        assert.equal(initialStatus.status, "applied");
+        assert.equal(initialStatus.active.model, "a");
+        assert.equal("effort" in initialStatus, false);
+        assert.equal("target" in initialStatus, false);
+
+        const switchRequest = {
+          requestId: randomUUID(),
+          threadId: created.thread.id,
+          expectedRevision: initialStatus.revision,
+          configRevision: initialStatus.configRevision,
+          selection: { mode: "explicit", provider: "legacy", model: "b" },
+        };
+        const switched = parseRuntimeMethodResultForVersion(
+          "1.6",
+          RUNTIME_METHODS.threadModelSet,
+          await client.request(6, RUNTIME_METHODS.threadModelSet, switchRequest),
+        );
+        assert.equal(switched.status, "applied");
+        assert.equal(switched.active.model, "b");
+
+        // Replaying the same requestId against the idempotency cache must still succeed with valid 1.6 status.
+        const replayed = parseRuntimeMethodResultForVersion(
+          "1.6",
+          RUNTIME_METHODS.threadModelSet,
+          await client.request(7, RUNTIME_METHODS.threadModelSet, switchRequest),
+        );
+        assert.deepEqual(replayed, switched);
+
+        // Effort mutation on the downgraded 1.6 session must be rejected by strict 1.6 params schema.
+        const effortErr = await client.requestError(8, RUNTIME_METHODS.threadModelSet, {
+          requestId: randomUUID(),
+          threadId: created.thread.id,
+          expectedRevision: switched.revision,
+          configRevision: switched.configRevision,
+          selection: { mode: "default" },
+          effort: { mode: "explicit", level: "high" },
+        });
+        assert.match(JSON.stringify(effortErr), /-32602|INVALID_PARAMS/u);
+
+        await client.request(9, RUNTIME_METHODS.threadDetach, {
+          requestId: randomUUID(),
+          threadId: created.thread.id,
+        });
+      } finally {
+        await server.abortAll();
+      }
+    }
+  } finally {
+    await modelEngine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

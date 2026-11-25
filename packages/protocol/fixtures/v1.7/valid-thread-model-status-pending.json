@@ -1,0 +1,35 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "revision": "00000000-0000-4000-8000-000000000012",
+    "selection": {
+      "mode": "default"
+    },
+    "effort": {
+      "mode": "default"
+    },
+    "target": {
+      "provider": "google",
+      "model": "gemini-4-neon",
+      "effectiveEffort": "medium",
+      "effortCapability": {
+        "kind": "levels",
+        "levels": ["low", "medium", "high", "xhigh"]
+      }
+    },
+    "configRevision": "cfg-1",
+    "status": "pending",
+    "active": {
+      "provider": "google",
+      "model": "gemini-4-neon",
+      "reasoning": "summary",
+      "effort": "high",
+      "effortCapability": {
+        "kind": "levels",
+        "levels": ["low", "medium", "high", "xhigh"]
+      }
+    }
+  }
+}

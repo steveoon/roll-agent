@@ -17,6 +17,8 @@ import {
   parseRuntimeMethodParamsForVersion,
   projectClientCapabilitiesSetResult,
   projectRuntimeEventEnvelopeForVersion,
+  projectRuntimeModelCatalogForVersion,
+  projectThreadModelStatusForVersion,
   projectThreadSnapshotForVersion,
   projectOperationViewForVersion,
   runtimeMethodSchemas,
@@ -163,7 +165,8 @@ export class RuntimeProtocolAdapter {
       this.protocolVersion !== "1.3" &&
       this.protocolVersion !== "1.4" &&
       this.protocolVersion !== "1.5" &&
-      this.protocolVersion !== "1.6"
+      this.protocolVersion !== "1.6" &&
+      this.protocolVersion !== "1.7"
     ) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -350,17 +353,39 @@ export class RuntimeProtocolAdapter {
     }
 
     switch (request.method) {
-      case RUNTIME_METHODS.modelsList:
-        runtimeMethodSchemas[RUNTIME_METHODS.modelsList].params.parse(request.params);
-        return this.service.listModels();
-      case RUNTIME_METHODS.threadModelGet:
-        return this.service.getThreadModel(
-          runtimeMethodSchemas[RUNTIME_METHODS.threadModelGet].params.parse(request.params),
+      case RUNTIME_METHODS.modelsList: {
+        const modelVersion = this.protocolVersion === "1.7" ? "1.7" : "1.6";
+        parseRuntimeMethodParamsForVersion(
+          modelVersion,
+          RUNTIME_METHODS.modelsList,
+          request.params,
         );
-      case RUNTIME_METHODS.threadModelSet:
-        return this.service.setThreadModel(
-          runtimeMethodSchemas[RUNTIME_METHODS.threadModelSet].params.parse(request.params),
+        return projectRuntimeModelCatalogForVersion(modelVersion, this.service.listModels());
+      }
+      case RUNTIME_METHODS.threadModelGet: {
+        const modelVersion = this.protocolVersion === "1.7" ? "1.7" : "1.6";
+        const params = parseRuntimeMethodParamsForVersion(
+          modelVersion,
+          RUNTIME_METHODS.threadModelGet,
+          request.params,
         );
+        return projectThreadModelStatusForVersion(
+          modelVersion,
+          this.service.getThreadModel(params),
+        );
+      }
+      case RUNTIME_METHODS.threadModelSet: {
+        const modelVersion = this.protocolVersion === "1.7" ? "1.7" : "1.6";
+        const params = parseRuntimeMethodParamsForVersion(
+          modelVersion,
+          RUNTIME_METHODS.threadModelSet,
+          request.params,
+        );
+        return projectThreadModelStatusForVersion(
+          modelVersion,
+          await this.service.setThreadModel(params),
+        );
+      }
       case RUNTIME_METHODS.modelConfigGet:
         runtimeMethodSchemas[RUNTIME_METHODS.modelConfigGet].params.parse(request.params);
         return this.service.getModelConfig();
@@ -402,7 +427,8 @@ export class RuntimeProtocolAdapter {
           (this.protocolVersion === "1.3" ||
             this.protocolVersion === "1.4" ||
             this.protocolVersion === "1.5" ||
-            this.protocolVersion === "1.6") &&
+            this.protocolVersion === "1.6" ||
+            this.protocolVersion === "1.7") &&
           "recovery" in params &&
           params.recovery === true;
         return this.projectThreadSnapshot(

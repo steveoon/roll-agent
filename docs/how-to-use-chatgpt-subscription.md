@@ -29,9 +29,9 @@ CLI 参数优先级高于配置文件；未指定账号时默认使用认证服�
 
 ## 推理强度档位（/effort）
 
-Roll 的推理强度档位由各 Provider 分别适配：ChatGPT 订阅通道将 `off` 映射为 `none`，`low`、`medium`、`high`、`xhigh`、`max` 则保持原生对应，不会换算为固定 token 预算。Roll 会根据当前账号模型目录返回的 `supported_reasoning_levels` 校验模型能力，若目录未声明对应档位则不开放 `xhigh` / `max`；常规 API Key 模式仍使用原有的四档（`off` / `low` / `medium` / `high`），暂不接受 `xhigh` / `max`。
+Roll 的推理强度档位由各 Provider 分别适配：ChatGPT 订阅通道将 `off` 映射为 `none`，`low`、`medium`、`high`、`xhigh`、`max` 则保持原生对应，不会换算为固定 token 预算。Roll 会根据当前账号模型目录返回的 `supported_reasoning_levels` 校验模型能力，若目录未声明对应档位则不开放 `xhigh` / `max`；API Key 模式中，Google 的 `gemini-4-hydrogen` 与 `gemini-4-neon` 开放 `low` / `medium` / `high` / `xhigh`，`gemini-4-carbon` 与 `gemini-4-argon` 开放 `low` / `medium` / `high`（四者均不支持 `off` 与 `max`），OpenAI Pro 系列中 `gpt-5-pro` 仅开放 `high`，`gpt-5.2-pro` / `gpt-5.4-pro` / `gpt-5.5-pro` 开放 `medium` / `high`，其余常规 API Key 模型仍使用原有的四档（`off` / `low` / `medium` / `high`），不接受 `xhigh` / `max`。
 
-在全屏聊天中，可输入 `/effort` 查看当前模型支持的档位，或输入 `/effort xhigh`、`/effort max` 直接调整强度；切换快捷键仅在当前模型支持的档位之间移动。不支持关闭推理的模型会拒绝 `/think off`，报错后保留原状态，不会自动改写档位。使用 `/model` 切换模型时，若当前推理强度与目标模型不兼容，界面会先弹出档位选择器——取消选择则不切换模型，选定后一并应用新模型与新强度；将当前模型设为默认时也会同步保存当前聊天推理强度。`roll ui` 中的聊天与压缩推理档位下拉框同样按所选订阅模型动态筛选；若已保存的值不受所选模型支持，配置台会保留原值并提示调整，不做静默改写。
+在全屏聊天中，可输入 `/effort` 查看当前模型支持的档位，或输入 `/effort xhigh`、`/effort max` 直接调整强度；切换快捷键仅在当前模型支持的档位之间移动。不支持关闭推理的模型会拒绝 `/think off`，报错后保留原状态，不会自动改写档位。使用 `/model` 切换模型时，若当前推理强度与目标模型不兼容，界面会先弹出档位选择器——取消选择则不切换模型，选定后一并应用新模型与新强度；将当前模型设为默认时也会同步保存当前聊天推理强度。`roll ui` 中的聊天与压缩推理档位下拉框同样按所选模型动态筛选；若已保存的值不受所选模型支持，配置台会保留原值并提示调整，不做静默改写。
 
 聊天、MCP Sampling 与上下文压缩共用同一套档位映射，但上下文压缩支持独立配置推理强度。在会话中执行 `/effort` 仅调整聊天与 Sampling 强度，不会联动修改已初始化的压缩强度。引擎初始化与模型切换时都会同时校验聊天和压缩档位，非交互任务若遇到模型不支持的档位会明确报错退出：
 
@@ -44,7 +44,7 @@ runtime:
     thinking-level: low
 ```
 
-默认推理强度为 `medium`。调高档位可能增加响应延迟和订阅额度消耗，并不保证所有任务效果更优；`max` 也不代表固定的推理 token 数量。
+ChatGPT 订阅的默认推理强度为 `medium`。调高档位可能增加响应延迟和订阅额度消耗，并不保证所有任务效果更优；`max` 也不代表固定的推理 token 数量。
 
 ## Fast 模式
 
@@ -73,7 +73,7 @@ Fast 模式同时作用于聊天、MCP Sampling 和上下文压缩，且不改�
 `runtime.provider`、`runtime.model` 和 `runtime.chatgpt-account-id` 是 `roll chat` 与定时任务共用的默认配置，聊天中 `/model` 的“设为默认”与 `roll ui` 保存配置都会影响后续任务。各命令入口的支持边界与通道隔离规则如下：
 
 - **暂不支持订阅的服务入口**：`roll runtime serve`（及旧兼容入口 `roll chat --server`）与 `roll companion` 暂不支持 ChatGPT 订阅；当默认配置指向订阅时，这些入口会拒绝新请求（`roll ui` 保存前也会提示该限制）。
-- **与 API Key 命令互不串道**：`roll ask` 与 `roll run` 独立使用 `llm.default-provider` 和 `llm.providers` 中的 API Key 配置，将聊天切换为订阅不会阻断它们运行。即使订阅聊天配置了 `xhigh` / `max` 档位，`roll ask` / `roll run` 触发的 API Sampling 也会明确提示并回退使用默认的 `medium` 档位，不会将订阅高档位发往常规 API，也不会切换授权通道（若 API 聊天自身配置了不支持的档位仍会正常报错）。遇到不支持订阅的入口或订阅额度耗尽报错时，Roll 不会自动回退去消耗付费 API Key。
+- **与 API Key 命令互不串道**：`roll ask` 与 `roll run` 独立使用 `llm.default-provider` 和 `llm.providers` 中的 API Key 配置，将聊天切换为订阅或另一模型不会阻断它们运行。当 `runtime` 会话与独立 API 的有效 `provider/model` 不同时，ChatGPT 订阅的 `xhigh` / `max` 以及源会话合法但目标独立 API 模型无法继承的档位（例如订阅 `off` 搭配不支持关闭推理的 `google/gemini-4-neon`，或聊天 `google/gemini-4-neon` 的 `xhigh` 搭配常规四档模型），都会在 `roll ask` / `roll run` 的独立 API Sampling 上向 `stderr` 明确提示并使用目标 API 模型的默认档位（通常为 `medium`，`gpt-5-pro` 为 `high`），兼容档位则照常透传，不会切换模型或授权通道；若源配置本身非法或同一有效模型配置了不支持的档位，仍会正常报错。遇到不支持订阅的入口或订阅额度耗尽报错时，Roll 不会自动回退去消耗付费 API Key。
 - **按需加载模型目录**：使用 API Key 启动 `roll chat` 时不会请求订阅模型目录；仅在打开 `/model` 选择器时才按需拉取当前订阅账号的模型目录，网络异常不会阻断 API Key 聊天启动。
 
 定时任务（`roll schedule`）在执行时会读取任务所属工作区的配置，由本机 executor 复用相同的订阅账号认证与流式 Responses 适配器，并在每次运行时自动读取最新 token。由于后台执行无法弹出交互式模型列表或浏览器授权页，定时任务必须预先在配置中保存订阅模型。无人值守审批策略、任务超时与取消规则照常生效，需要人工批准的工具调用仍返回 `needs_confirmation`。调度完全由本机完成，不会发送订阅通道不支持的 Responses `background` 参数：

@@ -53,6 +53,12 @@ test("P0 request policy admits only the bound workspace allowlist", async () => 
     }),
     false,
   );
+  const allowlist: readonly string[] = P0_REMOTE_REQUEST_METHODS;
+  assert.equal(allowlist.includes("thread.effort.get"), true);
+  assert.equal(allowlist.includes("thread.effort.set"), true);
+  assert.equal(allowlist.includes("runtime.models.list"), false);
+  assert.equal(allowlist.includes("thread.model.set"), false);
+  assert.equal(allowlist.includes("thread.rename"), false);
   assert.equal(
     await policy({
       workspaceId: workspaceIdSchema.parse("33333333-3333-4333-8333-333333333333"),

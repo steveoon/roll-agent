@@ -12,6 +12,7 @@ import {
   ToolRegistry,
 } from "@roll-agent/runtime";
 import { createChatGptModel } from "./chatgpt-model.ts";
+import { createProviderModel, shouldRetainEmptyReasoningPart } from "./providers.ts";
 import { isRecoverableChatGptError } from "./chatgpt-recovery.ts";
 import { chatGptThinkingOptions } from "../runtime-host/chatgpt-resolution.ts";
 import { withChatGptFastMode } from "./chatgpt-fast-mode.ts";
@@ -1081,5 +1082,150 @@ describe("ChatGPT subscription Responses adapter", () => {
     assert.equal(transcriptWire.strict, false);
     assert.ok(isRecord(transcriptWire.parameters));
     assert.deepEqual(transcriptWire.parameters.required, ["checkpointId"]);
+  });
+
+  it("omits foreign empty signature text parts when replaying history through ChatGPT", async () => {
+    let capturedBody: unknown;
+    const model = createChatGptModel({
+      modelId: "subscription-slug",
+      getAccessToken: async () => "token",
+      fetch: async (_url, init) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return sse(events("ok"));
+      },
+    });
+    const result = await model.doStream({
+      prompt: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "",
+              providerOptions: { google: { thoughtSignature: "sig-r" } },
+            },
+            { type: "text", text: "Hello" },
+            { type: "text", text: "", providerOptions: { google: { thoughtSignature: "sig" } } },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "",
+              providerOptions: { google: { thoughtSignature: "sig-r-only" } },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "next" }] },
+      ],
+    });
+    await result.stream.cancel();
+    assert.ok(isRecord(capturedBody) && Array.isArray(capturedBody.input));
+    const assistantItems = capturedBody.input.filter(
+      (item: unknown): item is Record<string, unknown> =>
+        isRecord(item) && item.role === "assistant",
+    );
+    assert.deepEqual(
+      assistantItems.map((item) => item.content),
+      ["Hello"],
+    );
+  });
+
+  it("does not leak subscription-local rs/msg item_reference when switching from ChatGPT to OpenAI API", async () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs-private-subscription",
+      encrypted_content: "pretend-private-encrypted-reasoning",
+    };
+    const item = { type: "message", id: "msg-subscription" };
+    const frames = [
+      {
+        type: "response.created",
+        response: { id: "resp-fixture", created_at: 1700000000, model: "subscription-slug" },
+      },
+      { type: "response.output_item.added", output_index: 0, item: reasoning },
+      { type: "response.output_item.done", output_index: 0, item: reasoning },
+      { type: "response.output_item.added", output_index: 1, item },
+      { type: "response.output_text.delta", item_id: item.id, output_index: 1, delta: "answer" },
+      { type: "response.output_item.done", output_index: 1, item },
+      {
+        type: "response.completed",
+        response: { status: "completed", usage: { input_tokens: 4, output_tokens: 3 } },
+      },
+    ];
+
+    let subReq: unknown;
+    let apiReq: unknown;
+    const originalFetch = globalThis.fetch;
+    const subModel = createChatGptModel({
+      modelId: "subscription-slug",
+      getAccessToken: async () => "fixture",
+      fetch: async (_url, init) => {
+        subReq = JSON.parse(String(init?.body));
+        return sse(frames);
+      },
+    });
+    globalThis.fetch = async (_url, init) => {
+      apiReq = JSON.parse(String(init?.body));
+      return new Response("fixture stop", { status: 400 });
+    };
+
+    const session = new AgentSession({
+      id: "cross-chatgpt-to-openai-api",
+      model: subModel,
+      retainEmptyReasoningPart: shouldRetainEmptyReasoningPart,
+      sources: [],
+      maxSteps: 1,
+    });
+    try {
+      const firstEvents: unknown[] = [];
+      for await (const event of session.send("first")) {
+        firstEvents.push(event);
+      }
+      assert.ok(firstEvents.length > 0);
+      assert.ok(isRecord(subReq));
+      assert.equal(subReq.store, false);
+      assert.equal(
+        session
+          .getMessages()
+          .filter((message) => message.role === "assistant")
+          .some(
+            (message) =>
+              Array.isArray(message.content) &&
+              message.content.some((part) => part.type === "reasoning"),
+          ),
+        false,
+      );
+
+      session.switchModel({ model: createProviderModel("openai", "gpt-5.4", "fixture") });
+      const nextEvents: unknown[] = [];
+      for await (const event of session.send("next")) {
+        nextEvents.push(event);
+      }
+      assert.ok(nextEvents.length > 0);
+      assert.ok(isRecord(apiReq) && Array.isArray(apiReq.input));
+      assert.deepEqual(
+        apiReq.input.filter(
+          (entry: unknown) =>
+            isRecord(entry) && (entry.type === "item_reference" || entry.type === "reasoning"),
+        ),
+        [],
+      );
+      assert.equal(
+        apiReq.input.some(
+          (entry: unknown) =>
+            isRecord(entry) &&
+            entry.role === "assistant" &&
+            JSON.stringify(entry.content).includes("answer"),
+        ),
+        true,
+      );
+    } finally {
+      await session.close();
+      globalThis.fetch = originalFetch;
+    }
   });
 });

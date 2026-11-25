@@ -1,6 +1,6 @@
 # 会话内模型选择
 
-状态：本地实现；未提交、未发布。2026-11-09 根据用户反馈收缩范围。
+状态：本地实现；未提交、未发布。2026-11-09 初版实现模型选择（Runtime 1.6），2026-11-25 扩展每会话推理强度调整（Runtime 1.7 + Relay Wire 1.4）。
 
 ## 需求与职责
 
@@ -24,7 +24,7 @@ CLI 与 scheduler 继续使用原 ConversationEngine。CLI 的模型候选包含
 
 - runtime.models.list({})：configRevision、defaultModel、items。候选来自配置中的 provider/model 加有效默认值，不包含密钥、端点、providerOptions。不可用项带有限枚举原因。
 - thread.model.get({threadId})：读取已打开会话的 revision、selection、configRevision、status、active。不会自动打开未打开的会话；未打开或已关闭返回不可用。
-- thread.model.set({requestId, threadId, expectedRevision, configRevision, selection})：仅为已打开且可写的会话选择显式 provider/model 或 mode: default，返回状态。不会隐式打开或恢复会话；detach 后首次到达的旧请求返回不可用，不创建宿主或重新取得占用。
+- thread.model.set({requestId, threadId, expectedRevision, configRevision, selection?, effort?})：仅为已打开且可写的会话选择显式 provider/model、会话 effort（1.7 起支持）或 mode: default，返回状态。1.6 要求必传 selection；1.7 要求 selection 与 effort 至少提供一项，两者共享会话 revision。同模型仅切 effort 时复用轻量 setProviderOptions 保留已初始化压缩参数与请求预算；跨模型切换在接纳前同步校验显式/继承默认强度及压缩兼容性，非法组合不消耗 revision、不替换已有 pending。不会隐式打开或恢复会话；detach 后首次到达的旧请求返回不可用，不创建宿主或重新取得占用。远端 Relay Wire 1.4 仅通过 thread.effort.get/set 暴露会话级强度查询与修改，不开放模型候选目录。
 
 revision 是进程内、不透明 UUID，每次选择/重载及重新打开都产生新值，避免 detach/reopen 后旧请求误命中新实例。configRevision 标识已加载配置快照。requestId 使用既有幂等缓存；重复请求返回原始应答，查询当前状态必须使用 get。客户端遇到超时应先查状态，不得把旧应答当作当前模型。
 

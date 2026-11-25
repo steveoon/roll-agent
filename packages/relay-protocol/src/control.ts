@@ -103,7 +103,15 @@ export const relaySessionReadyControlMessageSchemaV13 =
       relayProtocolVersion: z.literal("1.3"),
     })
     .readonly();
+export const relaySessionReadyControlMessageSchemaV14 =
+  relaySessionReadyControlMessageSchema.def.innerType
+    .extend({
+      relayProtocolVersion: z.literal("1.4"),
+    })
+    .strict()
+    .readonly();
 export const relaySessionReadyControlMessageSchemaAny = z.union([
+  relaySessionReadyControlMessageSchemaV14,
   relaySessionReadyControlMessageSchemaV13,
   relaySessionReadyControlMessageSchema,
   relaySessionReadyControlMessageSchemaV12,

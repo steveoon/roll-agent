@@ -34,6 +34,18 @@ describe("loadConfig", () => {
   let previousHome: string | undefined;
   let previousUserProfile: string | undefined;
 
+  it("defaults omitted thinking-level from the effective runtime model and preserves explicit values", () => {
+    const llm = { defaultProvider: "openai", defaultModel: "gpt-5-pro" };
+    const effort = (runtime?: Record<string, string>) =>
+      validateConfigText(JSON.stringify({ llm, runtime }), "roll.config.yaml").runtime
+        .thinkingLevel;
+    assert.equal(effort(), "high");
+    assert.equal(effort({ model: "gpt-5-pro-2025-10-06" }), "high");
+    assert.equal(effort({ model: "gpt-5.4-pro" }), "medium");
+    assert.equal(effort({ provider: "chatgpt" }), "medium");
+    assert.equal(effort({ "thinking-level": "medium" }), "medium");
+  });
+
   beforeEach(() => {
     tmpDir = makeTmpDir();
     homeDir = makeTmpDir();

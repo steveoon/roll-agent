@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
-import test from "node:test";
+import { describe, test } from "node:test";
 
 import { RELAY_ERROR_CODES_V11 } from "@roll-agent/relay-protocol";
 
 import {
   RELAY_CLIENT_TRANSPORT_ERROR_CODES,
+  RELAY_ERROR_CODES_V14,
   RelayClientError,
+  isThreadEffortToggleEnabled,
+  type CreateRelayClientOptions,
+  type RelaySessionProviderInput,
   type RelayClient,
   type RelayThread,
   type RelayThreadId,
@@ -146,23 +150,29 @@ function createUuidFactory(): () => string {
   };
 }
 
-function createHarness(
-  requestTimeoutMs = 5_000,
-  scheduler?: RelayScheduler,
+function createHarness({
+  scheduler,
   reconnectDelayMs = 0,
-  relayProtocolVersions?: readonly ("1.3" | "1.2" | "1.1")[],
-): TestHarness {
+  relayProtocolVersions,
+  onGetSession,
+}: {
+  scheduler?: RelayScheduler;
+  reconnectDelayMs?: number;
+  relayProtocolVersions?: CreateRelayClientOptions["relayProtocolVersions"];
+  onGetSession?: (input: RelaySessionProviderInput) => void;
+} = {}): TestHarness {
   const sockets: FakeRelayWebSocket[] = [];
   let sessionNumber = 0;
   const client = createRelayClientForTesting(
     {
-      requestTimeoutMs,
+      requestTimeoutMs: 5_000,
       ...(relayProtocolVersions ? { relayProtocolVersions } : {}),
       getSession: async (input) => {
         assert.deepEqual(
           input.supportedRelayProtocolVersions,
           relayProtocolVersions ?? ["1.2", "1.1"],
         );
+        onGetSession?.(input);
         sessionNumber += 1;
         return {
           connectUrl: `wss://relay.example.test/browser?ticket=${sessionNumber}`,
@@ -205,13 +215,25 @@ function sessionReady(workspaceStatus: "online" | "offline" = "online") {
   } as const;
 }
 
-async function connectHarness(harness: TestHarness): Promise<FakeRelayWebSocket> {
-  const connecting = harness.client.connect();
-  await eventually(() => harness.sockets.length > 0, "WebSocket creation");
-  const socket = harness.sockets.at(-1);
+async function sendSessionReady(
+  harness: TestHarness,
+  socketIndex: number,
+  version: RelaySessionProviderInput["supportedRelayProtocolVersions"][number],
+): Promise<FakeRelayWebSocket> {
+  await eventually(() => harness.sockets.length > socketIndex, "WebSocket creation");
+  const socket = harness.sockets[socketIndex];
   assert.ok(socket);
   socket.serverOpen();
-  socket.serverMessage(sessionReady());
+  socket.serverMessage({ ...sessionReady(), relayProtocolVersion: version });
+  return socket;
+}
+
+async function connectHarness(
+  harness: TestHarness,
+  version: RelaySessionProviderInput["supportedRelayProtocolVersions"][number] = "1.1",
+): Promise<FakeRelayWebSocket> {
+  const connecting = harness.client.connect();
+  const socket = await sendSessionReady(harness, 0, version);
   await connecting;
   return socket;
 }
@@ -465,7 +487,7 @@ test("a malformed reconnect session stops instead of scheduling another retry", 
 
 test("connect timeout closes an open socket that never receives session.ready", async () => {
   const scheduler = new ManualRelayScheduler();
-  const harness = createHarness(5_000, scheduler);
+  const harness = createHarness({ scheduler });
   const connecting = harness.client.connect({ timeoutMs: 125 });
   await eventually(() => harness.sockets.length === 1, "WebSocket creation");
   const socket = harness.sockets[0];
@@ -825,7 +847,7 @@ test("an in-flight mutation reconnects with the same Relay and Runtime request I
 
 test("a sent mutation timeout surfaces OUTCOME_UNKNOWN", async () => {
   const scheduler = new ManualRelayScheduler();
-  const harness = createHarness(5_000, scheduler);
+  const harness = createHarness({ scheduler });
   try {
     const socket = await connectHarness(harness);
     const thread = await openThread(harness, socket);
@@ -946,7 +968,7 @@ test("non-text WebSocket frames fail closed", async () => {
 
 test("connect() during backoff cancels the timer and opens exactly one session", async () => {
   const scheduler = new ManualRelayScheduler();
-  const harness = createHarness(5_000, scheduler, 25);
+  const harness = createHarness({ scheduler, reconnectDelayMs: 25 });
   const socket = await connectHarness(harness);
 
   socket.serverClose();
@@ -1346,7 +1368,7 @@ test("Wire 1.1 result API reports unsupported without sending new methods", asyn
 });
 
 test("Wire 1.3 recovery state follows snapshot, live events and reconnect refresh", async () => {
-  const h = createHarness(5_000, undefined, 0, ["1.3", "1.2", "1.1"]);
+  const h = createHarness({ relayProtocolVersions: ["1.3", "1.2", "1.1"] });
   try {
     const connecting = h.client.connect();
     await eventually(() => h.sockets.length > 0, "socket");
@@ -1385,4 +1407,194 @@ test("Wire 1.3 recovery state follows snapshot, live events and reconnect refres
   } finally {
     h.client.close();
   }
+});
+
+describe("thread effort negotiation and replay", () => {
+  const initialRevision = "00000000-0000-4000-8000-000000000911";
+  const nextRevision = "00000000-0000-4000-8000-000000000912";
+  const setHigh = {
+    expectedRevision: initialRevision,
+    configRevision: "cfg-web-1",
+    effort: { mode: "explicit", level: "high" },
+  } as const;
+  const snapshot = { ...createSnapshot(), contextRecovery: null };
+  const { protocolError, outcomeUnknown } = RELAY_CLIENT_TRANSPORT_ERROR_CODES;
+
+  function effortStatus(level: "medium" | "high", revision: string) {
+    const model = {
+      provider: "google",
+      model: "gemini-4-neon",
+      effortCapability: { kind: "levels", levels: ["low", "medium", "high", "xhigh"] },
+    };
+    return {
+      threadId: THREAD_ID,
+      revision,
+      configRevision: setHigh.configRevision,
+      effort: level === "medium" ? { mode: "default" } : setHigh.effort,
+      status: "applied",
+      active: { ...model, reasoning: "summary", effort: level },
+      target: { ...model, effectiveEffort: level },
+    };
+  }
+
+  function transportError(code: typeof protocolError | typeof outcomeUnknown, retryable?: boolean) {
+    return (error: unknown) =>
+      error instanceof RelayClientError &&
+      error.details.kind === "transport" &&
+      error.details.code === code &&
+      (retryable === undefined || error.details.retryable === retryable);
+  }
+
+  test("negotiating 1.3 allows chat and rejects both effort methods locally", async (t) => {
+    for (const relayProtocolVersions of [
+      ["1.3", "1.2"],
+      ["1.4", "1.3", "1.2"],
+    ] as const) {
+      const h = createHarness({ relayProtocolVersions });
+      t.after(() => h.client.close());
+      const socket = await connectHarness(h, "1.3");
+      const thread = await openThread(h, socket, snapshot);
+      const sentBefore = socket.sent.length;
+      await assert.rejects(thread.getEffort(), transportError(protocolError));
+      await assert.rejects(thread.setEffort(setHigh), transportError(protocolError));
+      assert.equal(socket.sent.length, sentBefore);
+    }
+  });
+
+  test("1.4 round-trips effort, replays the same mutation and exposes remote retryability", async (t) => {
+    const scheduler = new ManualRelayScheduler();
+    const h = createHarness({ scheduler, relayProtocolVersions: ["1.4", "1.3", "1.2"] });
+    t.after(() => h.client.close());
+    const first = await connectHarness(h, "1.4");
+    const thread = await openThread(h, first, snapshot);
+    const getting = thread.getEffort();
+    respond(
+      first,
+      lastRequest(first, "thread.effort.get"),
+      effortStatus("medium", initialRevision),
+    );
+    const initial = await getting;
+    assert.equal(initial.active?.effort, "medium");
+
+    const requestId = "00000000-0000-4000-8000-000000000999";
+    const updating = thread.setEffort({
+      ...setHigh,
+      requestId,
+      expectedRevision: initial.revision,
+    });
+    const mutation = lastRequest(first, "thread.effort.set");
+    assert.deepEqual(mutation.params, { threadId: THREAD_ID, ...setHigh, requestId });
+    first.serverClose();
+    scheduler.runDelay(0);
+    const second = await sendSessionReady(h, 1, "1.4");
+    const replay = lastRequest(second, "thread.effort.set");
+    assert.equal(replay.requestId, mutation.requestId);
+    assert.deepEqual(replay.params, mutation.params);
+    respond(second, replay, effortStatus("high", nextRevision));
+    const updated = await updating;
+    assert.equal(updated.active?.effort, "high");
+    assert.equal(updated.revision, nextRevision);
+
+    for (const [code, retryable, expectedRevision, effort] of [
+      [RELAY_ERROR_CODES_V14.threadEffortStateStale, true, initialRevision, { mode: "default" }],
+      [
+        RELAY_ERROR_CODES_V14.threadEffortUnsupported,
+        false,
+        nextRevision,
+        { mode: "explicit", level: "off" },
+      ],
+    ] as const) {
+      const setting = thread.setEffort({
+        expectedRevision,
+        configRevision: updated.configRevision,
+        effort,
+      });
+      second.serverMessage({
+        type: "runtime.response",
+        workspaceId: WORKSPACE_ID,
+        requestId: lastRequest(second, "thread.effort.set").requestId,
+        error: { code, message: code, retryable },
+      });
+      await assert.rejects(
+        setting,
+        (err: unknown) =>
+          err instanceof RelayClientError &&
+          err.details.kind === "remote" &&
+          err.details.code === code &&
+          err.details.retryable === retryable,
+      );
+    }
+    assert.ok(
+      isThreadEffortToggleEnabled({ kind: "toggle", offLevel: "off", onLevel: "medium" }, "medium"),
+    );
+  });
+
+  test("default and legacy clients reject unoffered 1.4 before ACK or connected state", async (t) => {
+    const legacy: Array<"1.2" | "1.4"> = ["1.2"];
+    for (const relayProtocolVersions of [undefined, legacy]) {
+      const h = createHarness({
+        relayProtocolVersions,
+        onGetSession: ({ supportedRelayProtocolVersions }) => {
+          relayProtocolVersions?.push("1.4");
+          assert.ok(!supportedRelayProtocolVersions.includes("1.4"));
+        },
+      });
+      t.after(() => h.client.close());
+      const states: string[] = [];
+      h.client.subscribeConnection((state) => states.push(state.status));
+      const rejected = assert.rejects(h.client.connect(), transportError(protocolError, false));
+      const socket = await sendSessionReady(h, 0, "1.4");
+      await rejected;
+      assert.deepEqual(socket.sent, []);
+      assert.deepEqual(socket.closeCodes, [4002]);
+      assert.ok(!states.includes("connected"));
+      assert.deepEqual(h.client.getConnectionState(), { status: "closed", reason: "protocol" });
+    }
+  });
+
+  test("reconnect to unoffered 1.4 closes without ACK, replay or another retry", async (t) => {
+    const scheduler = new ManualRelayScheduler();
+    const h = createHarness({ scheduler, relayProtocolVersions: ["1.2"] });
+    t.after(() => h.client.close());
+    const first = await connectHarness(h, "1.2");
+    const thread = await openThread(h, first);
+    const rejected = assert.rejects(
+      thread.send("hello before reconnect"),
+      transportError(outcomeUnknown),
+    );
+    lastRequest(first, "turn.start");
+    first.serverClose();
+    const states: string[] = [];
+    h.client.subscribeConnection((state) => states.push(state.status));
+    scheduler.runDelay(0);
+    const second = await sendSessionReady(h, 1, "1.4");
+    await rejected;
+    assert.deepEqual(second.sent, []);
+    assert.deepEqual(second.closeCodes, [4002]);
+    assert.ok(!states.includes("connected"));
+    assert.deepEqual(h.client.getConnectionState(), { status: "closed", reason: "protocol" });
+    assert.equal(scheduler.pendingTimerCount, 0);
+  });
+
+  test("reconnect to offered 1.2 succeeds without replaying a 1.4 effort change", async (t) => {
+    const scheduler = new ManualRelayScheduler();
+    const h = createHarness({ scheduler, relayProtocolVersions: ["1.4", "1.2"] });
+    t.after(() => h.client.close());
+    const first = await connectHarness(h, "1.4");
+    const thread = await openThread(h, first, snapshot);
+    const rejected = assert.rejects(thread.setEffort(setHigh), transportError(outcomeUnknown));
+    lastRequest(first, "thread.effort.set");
+    first.serverClose();
+    scheduler.runDelay(0);
+    const second = await sendSessionReady(h, 1, "1.2");
+    await rejected;
+    assert.deepEqual(h.client.getConnectionState(), {
+      status: "connected",
+      workspaceStatus: "online",
+    });
+    const frames = parseSent(second);
+    assert.ok(frames.some((frame) => frame.type === "runtime.ack"));
+    assert.ok(!frames.some((frame) => frame.method === "thread.effort.set"));
+    await assert.rejects(thread.getEffort(), transportError(protocolError));
+  });
 });

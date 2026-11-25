@@ -7,6 +7,7 @@ import {
   ChatGptStreamInterruptedError,
   guardChatGptResponseBody,
 } from "./chatgpt-recovery.ts";
+import { omitForeignEmptyAssistantTextParts } from "./foreign-empty-text.ts";
 import { withDefaultFalseFunctionToolStrict } from "./openai-tool-strict.ts";
 import type {
   LanguageModelV4,
@@ -442,7 +443,7 @@ export function createChatGptModel(options: {
         return {
           ...params,
           includeRawChunks: true,
-          prompt: params.prompt.map((message) =>
+          prompt: omitForeignEmptyAssistantTextParts(params.prompt, "openai").map((message) =>
             message.role !== "assistant"
               ? message
               : {

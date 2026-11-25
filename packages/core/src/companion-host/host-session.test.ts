@@ -199,3 +199,118 @@ test("startup classification retains only trusted error categories, never arbitr
   });
   assert.equal(describeRuntimeStartupFailure(unknown), "");
 });
+
+test("DefaultCompanionSessionFactory uses persisted relayProtocolVersion 1.4 and preserves 1.2 legacy relay fallback", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const { DefaultCompanionSessionFactory } = await import("./host-session.ts");
+  const { createBundledRollInvocation } = await import("./invocation.ts");
+  const { credentialReferenceSchema } = await import("./schema.ts");
+  const { deviceIdSchema, workspaceIdSchema } = await import("@roll-agent/relay-protocol");
+  const { CompanionEnrollmentService } = await import("./enrollment.ts");
+  const { FileCompanionConfigStore } = await import("./config-store.ts");
+
+  const root = await mkdtemp(join(tmpdir(), "roll-companion-wire-v14-"));
+  const beforeHome = process.env["HOME"];
+  const beforeProfile = process.env["USERPROFILE"];
+  const beforeVersionEnv = process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+
+  try {
+    process.env["HOME"] = root;
+    process.env["USERPROFILE"] = root;
+    delete process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+    await writeFile(
+      join(root, "roll.config.yaml"),
+      "llm:\n  default-provider: openai\n  default-model: gpt-5.4\n  providers:\n    openai:\n      api-key: synthetic\n      base-url: https://example.invalid/v1\nask: {}\nagents:\n  data-dir: ./agents\nchat:\n  instructions: off\n",
+    );
+
+    const configPath = join(root, "companion.yaml");
+    const store = new FileCompanionConfigStore(configPath);
+    const enrollment = new CompanionEnrollmentService({
+      configStore: store,
+      credentialStore: {
+        put: async () => credentialReferenceSchema.parse("keychain:v14-device"),
+        get: async () => "credential-at-least-sixteen",
+        delete: async () => undefined,
+      },
+      enrollmentClient: {
+        redeem: async () => ({
+          deviceId: deviceIdSchema.parse("11111111-1111-4111-8111-111111111111"),
+          workspaceId: workspaceIdSchema.parse("22222222-2222-4222-8222-222222222222"),
+          deviceCredential: "credential-at-least-sixteen",
+        }),
+      },
+    });
+
+    // Enroll via product service with 1.4
+    const enrolled14 = await enrollment.enroll({
+      pairingCode: "one-time-code",
+      workspace: root,
+      relayProtocolVersion: "1.4",
+    });
+    assert.equal(enrolled14.relayProtocolVersion, "1.4");
+
+    const connectHandshakeVersion = async (persistedConfig: typeof enrolled14): Promise<string> => {
+      const sentFrames: Array<Record<string, unknown>> = [];
+      const factory = new DefaultCompanionSessionFactory({
+        invocation: createBundledRollInvocation({
+          command: process.execPath,
+          cliEntrypoint: resolve(import.meta.dirname, "../cli/index.ts"),
+          execArgv: ["--experimental-strip-types", "--experimental-sqlite"],
+        }),
+        configPath,
+        createWebSocket: () => {
+          const openListeners = new Set<() => void>();
+          queueMicrotask(() => {
+            for (const fn of openListeners) fn();
+          });
+          const socket: import("./host-session.ts").OpenableCompanionWebSocket = {
+            send(data: string) {
+              const parsed: unknown = JSON.parse(data);
+              if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+                sentFrames.push({ ...parsed });
+              }
+            },
+            close() {},
+            addEventListener(type: string, listener: (...args: never[]) => void) {
+              if (type === "open") {
+                openListeners.add(() => listener());
+              }
+            },
+            removeEventListener() {},
+          };
+          return socket;
+        },
+      });
+      const session = await factory.create(persistedConfig, "credential-at-least-sixteen");
+      try {
+        for (let i = 0; i < 40 && sentFrames.length === 0; i += 1) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        }
+        assert.equal(sentFrames[0]?.type, "device.connect");
+        return String(sentFrames[0]?.protocolVersion ?? "");
+      } finally {
+        await session.stop();
+      }
+    };
+
+    assert.equal(await connectHandshakeVersion(enrolled14), "1.4");
+
+    // Switch persisted config back to 1.2 to connect to legacy Relay
+    const switched12 = await enrollment.setEnabled(true, { relayProtocolVersion: "1.2" });
+    assert.equal(await connectHandshakeVersion(switched12), "1.2");
+
+    // Environment override selects 1.4 without test constructor injection
+    process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"] = "1.4";
+    assert.equal(await connectHandshakeVersion(switched12), "1.4");
+  } finally {
+    if (beforeHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = beforeHome;
+    if (beforeProfile === undefined) delete process.env["USERPROFILE"];
+    else process.env["USERPROFILE"] = beforeProfile;
+    if (beforeVersionEnv === undefined) delete process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"];
+    else process.env["ROLL_COMPANION_RELAY_PROTOCOL_VERSION"] = beforeVersionEnv;
+    await rm(root, { recursive: true, force: true });
+  }
+});

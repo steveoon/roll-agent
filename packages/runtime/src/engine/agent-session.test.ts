@@ -1442,6 +1442,397 @@ test("unmatched or stale native reasoning proofs do not mark SDK deltas for disp
   }
 });
 
+test("empty signature carrier deltas preserve native reasoning sync and honor host retention policy", async () => {
+  const sig = { vendor: { opaqueToken: "opaque-sig" } };
+  const other = { other: { opaqueToken: "other-sig" } };
+  const streamChunksForCarriers: LanguageModelV4StreamPart[] = [
+    { type: "stream-start", warnings: [] },
+    { type: "raw", rawValue: "chunk" },
+    { type: "reasoning-start", id: "r0" },
+    { type: "reasoning-delta", id: "r0", delta: "first" },
+    { type: "reasoning-end", id: "r0" },
+    { type: "reasoning-start", id: "r1", providerMetadata: sig },
+    { type: "reasoning-delta", id: "r1", delta: "", providerMetadata: sig },
+    { type: "reasoning-end", id: "r1" },
+    { type: "reasoning-start", id: "r-other", providerMetadata: other },
+    { type: "reasoning-delta", id: "r-other", delta: "", providerMetadata: other },
+    { type: "reasoning-end", id: "r-other" },
+    { type: "text-start", id: "t0" },
+    { type: "text-delta", id: "t0", delta: "Answer." },
+    { type: "text-end", id: "t0" },
+    { type: "reasoning-start", id: "r2", providerMetadata: sig },
+    { type: "reasoning-delta", id: "r2", delta: "second", providerMetadata: sig },
+    { type: "reasoning-end", id: "r2" },
+    { type: "text-start", id: "t1", providerMetadata: sig },
+    { type: "text-delta", id: "t1", delta: "", providerMetadata: sig },
+    { type: "text-end", id: "t1" },
+    { type: "finish", usage: usage(), finishReason: STOP },
+  ];
+  const retainVendor = (providerOptions: Record<string, unknown>): boolean =>
+    Object.keys(providerOptions).length === 1 && "vendor" in providerOptions;
+
+  // Without retainEmptyReasoningPart, Runtime preserves its default behavior: strip all reasoning parts.
+  const defaultSession = new AgentSession({
+    id: "empty-signature-carriers-default",
+    sources: [],
+    maxSteps: 1,
+    model: sequencedModel([streamChunksForCarriers]),
+    providerOptions: { fixture: { display: true } },
+    resolveReasoningPresentation: () => ({
+      kind: "summary",
+      readDeltas: (raw) => (raw === "chunk" ? ["first", "second"] : []),
+    }),
+  });
+  try {
+    const events = await collect(defaultSession.send("hi"));
+    assert.deepEqual(
+      events.flatMap((event) =>
+        event.type === "reasoning-delta" ? [[event.delta, event.presentation]] : [],
+      ),
+      [
+        ["first", "summary"],
+        ["second", "summary"],
+      ],
+    );
+    assert.deepEqual(
+      events.flatMap((event) => (event.type === "text-delta" ? [event.delta] : [])),
+      ["Answer."],
+    );
+    const assistant = defaultSession.getMessages().find((message) => message.role === "assistant");
+    assert.ok(assistant && Array.isArray(assistant.content));
+    assert.deepEqual(assistant.content, [
+      { type: "text", text: "Answer.", providerOptions: undefined },
+      { type: "text", text: "", providerOptions: sig },
+    ]);
+  } finally {
+    await defaultSession.close();
+  }
+
+  // With retainEmptyReasoningPart injected by the host, retain only matching empty reasoning carriers.
+  const hostSession = new AgentSession({
+    id: "empty-signature-carriers-host",
+    sources: [],
+    maxSteps: 1,
+    model: sequencedModel([streamChunksForCarriers]),
+    providerOptions: { fixture: { display: true } },
+    retainEmptyReasoningPart: retainVendor,
+    resolveReasoningPresentation: () => ({
+      kind: "summary",
+      readDeltas: (raw) => (raw === "chunk" ? ["first", "second"] : []),
+    }),
+  });
+  try {
+    await collect(hostSession.send("hi"));
+    const assistant = hostSession.getMessages().find((message) => message.role === "assistant");
+    assert.ok(assistant && Array.isArray(assistant.content));
+    assert.deepEqual(assistant.content, [
+      { type: "reasoning", text: "", providerOptions: sig },
+      { type: "text", text: "Answer.", providerOptions: undefined },
+      { type: "text", text: "", providerOptions: sig },
+    ]);
+
+    // Reopening with the same host policy preserves the retained carrier; reopening without it strips it.
+    const reopenedWithHost = new AgentSession({
+      id: "empty-signature-carriers-reopened-host",
+      sources: [],
+      maxSteps: 1,
+      model: sequencedModel([]),
+      initialMessages: hostSession.getMessages(),
+      retainEmptyReasoningPart: retainVendor,
+    });
+    const reopenedWithoutHost = new AgentSession({
+      id: "empty-signature-carriers-reopened-default",
+      sources: [],
+      maxSteps: 1,
+      model: sequencedModel([]),
+      initialMessages: hostSession.getMessages(),
+    });
+    try {
+      const withHostAssistant = reopenedWithHost
+        .getMessages()
+        .find((message) => message.role === "assistant");
+      assert.ok(withHostAssistant && Array.isArray(withHostAssistant.content));
+      assert.deepEqual(withHostAssistant.content, [
+        { type: "reasoning", text: "", providerOptions: sig },
+        { type: "text", text: "Answer.", providerOptions: undefined },
+        { type: "text", text: "", providerOptions: sig },
+      ]);
+      const withoutHostAssistant = reopenedWithoutHost
+        .getMessages()
+        .find((message) => message.role === "assistant");
+      assert.ok(withoutHostAssistant && Array.isArray(withoutHostAssistant.content));
+      assert.deepEqual(withoutHostAssistant.content, [
+        { type: "text", text: "Answer.", providerOptions: undefined },
+        { type: "text", text: "", providerOptions: sig },
+      ]);
+    } finally {
+      await reopenedWithHost.close();
+      await reopenedWithoutHost.close();
+    }
+  } finally {
+    await hostSession.close();
+  }
+});
+
+test("stripReasoningMessages does not persist empty reasoning with non-thoughtSignature metadata", async () => {
+  const session = new AgentSession({
+    id: "strip-non-signature-empty-reasoning",
+    sources: [],
+    maxSteps: 1,
+    model: sequencedModel([
+      [
+        { type: "stream-start", warnings: [] },
+        {
+          type: "reasoning-start",
+          id: "rs-openai",
+          providerMetadata: {
+            openai: { itemId: "rs-sub-1", reasoningEncryptedContent: "enc-sub-1" },
+          },
+        },
+        {
+          type: "reasoning-delta",
+          id: "rs-openai",
+          delta: "",
+          providerMetadata: {
+            openai: { itemId: "rs-sub-1", reasoningEncryptedContent: "enc-sub-1" },
+          },
+        },
+        { type: "reasoning-end", id: "rs-openai" },
+        {
+          type: "reasoning-start",
+          id: "rs-anthropic",
+          providerMetadata: { anthropic: { signature: "sig-ant" } },
+        },
+        {
+          type: "reasoning-delta",
+          id: "rs-anthropic",
+          delta: "",
+          providerMetadata: { anthropic: { signature: "sig-ant" } },
+        },
+        { type: "reasoning-end", id: "rs-anthropic" },
+        { type: "text-start", id: "t0", providerMetadata: { openai: { itemId: "msg-sub-1" } } },
+        { type: "text-delta", id: "t0", delta: "answer" },
+        { type: "text-end", id: "t0" },
+        { type: "finish", usage: usage(), finishReason: STOP },
+      ],
+    ]),
+  });
+  try {
+    await collect(session.send("hi"));
+    const assistant = session.getMessages().find((message) => message.role === "assistant");
+    assert.ok(assistant && Array.isArray(assistant.content));
+    assert.equal(
+      assistant.content.some((part) => part.type === "reasoning"),
+      false,
+    );
+    assert.deepEqual(assistant.content, [
+      { type: "text", text: "answer", providerOptions: { openai: { itemId: "msg-sub-1" } } },
+    ]);
+  } finally {
+    await session.close();
+  }
+});
+
+test("AgentSession 第一步完成而第二步复用同一 toolCallId 后中断时保留第一步已结算工具结果", async () => {
+  let executionsCount = 0;
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "first" }),
+    [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "partial-visible" },
+      { type: "text-end", id: "t1" },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "second-abandoned" }),
+      },
+      {
+        type: "finish",
+        usage: usage(8, 4),
+        finishReason: { unified: "interrupted", raw: undefined },
+      },
+    ],
+    textStep("continued"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "same-id-completed-then-interrupted",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        executionsCount += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+  try {
+    const events = await collect(session.send("two steps"));
+    assert.equal(
+      events.some((event) => event.type === "message-finish"),
+      false,
+    );
+    assert.equal(events.at(-1)?.type, "error");
+    assert.equal(executionsCount, 1);
+
+    const toolResults = session
+      .getMessages()
+      .filter((message) => message.role === "tool")
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []));
+    assert.equal(
+      toolResults.some(
+        (part) =>
+          part.type === "tool-result" &&
+          part.toolCallId === "c1" &&
+          JSON.stringify(part.output).includes("result-ok"),
+      ),
+      true,
+    );
+    assert.match(JSON.stringify(session.getMessages()), /partial-visible/u);
+    assert.equal(countOccurrences(JSON.stringify(session.getMessages()), '"type":"tool-call"'), 1);
+
+    const nextEvents = await collect(session.send("continue"));
+    assert.equal(
+      nextEvents.some((event) => event.type === "message-finish" && event.text === "continued"),
+      true,
+    );
+    assert.equal(executionsCount, 1);
+    const nextPrompt = JSON.stringify(model.doStreamCalls.at(-1)?.prompt);
+    assert.match(nextPrompt, /result-ok/u);
+    assert.match(nextPrompt, /partial-visible/u);
+    assert.match(nextPrompt, /not_executed/u);
+  } finally {
+    await session.close();
+  }
+});
+
+for (const finishReason of ["interrupted", "other"] as const) {
+  test(`AgentSession 流在返回完整 tool-call 后以 ${finishReason} 中断时如实结束、保留部分正文且不污染后续轮次`, async () => {
+    let sideEffectCalls = 0;
+    let interruptedToolCalls = 0;
+    const model = sequencedModel([
+      toolCallStep("echo-agent__echo", { q: "step-1" }),
+      [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "Checking..." },
+        { type: "text-end", id: "t1" },
+        {
+          type: "tool-call",
+          toolCallId: "c-interrupted",
+          toolName: "ping-agent__ping",
+          input: JSON.stringify({ q: "x" }),
+        },
+        {
+          type: "finish",
+          usage: usage(10, 5),
+          finishReason: { unified: finishReason, raw: finishReason },
+        },
+      ],
+      textStep("resumed ok"),
+    ]);
+    const persisted: ModelMessage[][] = [];
+    const session = new AgentSession({
+      id: `stream-${finishReason}-unpaired-tool`,
+      model,
+      sources: [
+        source("echo-agent", "echo", () => {
+          sideEffectCalls += 1;
+        }),
+        source("ping-agent", "ping", () => {
+          interruptedToolCalls += 1;
+        }),
+      ],
+      maxSteps: 4,
+      onPersist: (messages) => {
+        persisted.push([...messages]);
+      },
+    });
+    try {
+      const events = await collect(session.send("start"));
+      assert.equal(
+        events.some((event) => event.type === "message-finish"),
+        false,
+      );
+      const failure = events.find((event) => event.type === "error");
+      assert.ok(failure);
+      assert.equal(sideEffectCalls, 1);
+      assert.equal(interruptedToolCalls, 0);
+
+      const executions = session.getToolExecutions({}, true);
+      assert.equal(executions.length, 2);
+      assert.equal(executions[0]?.outcome.kind, "success");
+      assert.equal(executions[1]?.toolCallId, "c-interrupted");
+      assert.equal(executions[1]?.outcome.kind, "cancelled");
+      assert.match(JSON.stringify(executions[1]?.outcome), /not_executed/u);
+
+      const activeJson = JSON.stringify(session.getMessages());
+      assert.match(activeJson, /Checking\.\.\./u);
+      assert.equal(countOccurrences(activeJson, '"toolCallId":"c-interrupted"'), 0);
+      assert.doesNotMatch(activeJson, /pong/u);
+
+      const nextEvents = await collect(session.send("继续"));
+      assert.equal(
+        nextEvents.some((event) => event.type === "message-finish" && event.text === "resumed ok"),
+        true,
+      );
+      assert.equal(sideEffectCalls, 1);
+      assert.equal(interruptedToolCalls, 0);
+      const nextPrompt = JSON.stringify(model.doStreamCalls.at(-1)?.prompt);
+      assert.match(nextPrompt, /Checking\.\.\./u);
+      assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
+      assert.match(nextPrompt, /not_executed/u);
+    } finally {
+      await session.close();
+    }
+  });
+}
+
+test("AgentSession 纯正文流因 interrupted 中断时保留部分正文并如实以 error 结束", async () => {
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Partial answer" },
+      { type: "text-end", id: "t1" },
+      {
+        type: "finish",
+        usage: usage(5, 3),
+        finishReason: { unified: "interrupted", raw: undefined },
+      },
+    ],
+    textStep("continued"),
+  ]);
+  const session = new AgentSession({
+    id: "stream-interrupted-text-only",
+    model,
+    sources: [],
+    maxSteps: 2,
+  });
+  try {
+    const events = await collect(session.send("hi"));
+    assert.equal(
+      events.some((event) => event.type === "message-finish"),
+      false,
+    );
+    assert.equal(events.at(-1)?.type, "error");
+    assert.match(JSON.stringify(session.getMessages()), /Partial answer/u);
+
+    const nextEvents = await collect(session.send("next"));
+    assert.equal(
+      nextEvents.some((event) => event.type === "message-finish" && event.text === "continued"),
+      true,
+    );
+    assert.match(JSON.stringify(model.doStreamCalls.at(-1)?.prompt), /Partial answer/u);
+  } finally {
+    await session.close();
+  }
+});
+
 test("AgentSession chat 调用注入最终回复必须走 text 通道的系统提示", async () => {
   let serializedPrompt = "";
   const model = new MockLanguageModelV4({

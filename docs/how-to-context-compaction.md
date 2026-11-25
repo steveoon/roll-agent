@@ -38,7 +38,7 @@ runtime:
 | `runtime.compaction.keep-recent-tokens` | 整数（`>= 1`） | `32000` | 保留近期原文的 token 预算上限；超出时会提前切分，但至少保留最新一轮 |
 | `runtime.compaction.timeout-ms` | `10000`–`600000` | `120000` | 单次摘要模型调用的超时上限（毫秒） |
 | `runtime.compaction.max-output-tokens` | `2048`–`32768` | `8192` | 摘要模型单次输出的最大 token 数（同时不超过上下文窗口的 1/4） |
-| `runtime.compaction.thinking-level` | `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`（可选） | 沿用会话设置 | 单独指定摘要请求使用的推理强度（`xhigh`/`max` 仅支持对应档位的 ChatGPT 模型可用） |
+| `runtime.compaction.thinking-level` | `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`（可选） | 沿用会话设置 | 单独指定摘要请求使用的推理强度（`xhigh` 仅 Google `gemini-4-hydrogen` / `gemini-4-neon` 与支持对应档位的 ChatGPT 模型可用，`max` 仅支持对应档位的 ChatGPT 模型可用） |
 
 ## 按需历史回查（`roll__transcript`）
 

@@ -5,7 +5,11 @@ import { createThreadModelHost, withThreadModelReasoning } from "./thread-model-
 import { runtimeSettingsSchema, type RuntimeSettings } from "@roll-agent/runtime/host-contracts";
 import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-binding.ts";
 import type { RollConfig } from "../config/schema.ts";
-import { providerAcceptsToolSchemaIssues } from "../llm/providers.ts";
+import {
+  providerAcceptsToolSchemaIssues,
+  resolveThreadEffortCapability,
+  shouldRetainEmptyReasoningPart,
+} from "../llm/providers.ts";
 import { CoreAgentHost } from "./agent-host.ts";
 import { isDebugLogEnabled, log } from "../cli/utils/output.ts";
 import { resolveChatWorkspace } from "./workspace-identity.ts";
@@ -58,6 +62,7 @@ export interface CreateChatEngineInput {
   readonly surface: ChatEngineSurface;
   readonly modelRecovery?: NonNullable<ChatEngineOptions["modelRecovery"]>;
   readonly resolveReasoningPresentation?: ChatEngineOptions["resolveReasoningPresentation"];
+  readonly retainEmptyReasoningPart?: ChatEngineOptions["retainEmptyReasoningPart"];
   readonly policy?: NonNullable<ChatEngineOptions["policy"]>;
   readonly resolveDynamicCapabilityContext?: NonNullable<
     ChatEngineOptions["resolveDynamicCapabilityContext"]
@@ -94,19 +99,29 @@ export function createChatEngine(input: CreateChatEngineInput) {
 /** Only the multi-conversation protocol host needs independent MCP Sampling scopes. */
 export function createRuntimeChatEngine(input: CreateChatEngineInput) {
   const provider = input.config.runtime.provider ?? input.config.llm.defaultProvider;
-  const initial: PreparedThreadModel = withThreadModelReasoning({
-    provider,
-    modelName: input.config.runtime.model ?? input.config.llm.defaultModel,
-    model: input.model,
-    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
-    ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
-    ...(input.structuredOutputProviderOptions
-      ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
-      : {}),
-    ...(input.structuredOutputReasoning
-      ? { structuredOutputReasoning: input.structuredOutputReasoning }
-      : {}),
-  });
+  const modelName = input.config.runtime.model ?? input.config.llm.defaultModel;
+  const initial: PreparedThreadModel = withThreadModelReasoning(
+    {
+      provider,
+      modelName,
+      model: input.model,
+      toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
+      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+      ...(input.structuredOutputProviderOptions
+        ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+        : {}),
+      ...(input.structuredOutputReasoning
+        ? { structuredOutputReasoning: input.structuredOutputReasoning }
+        : {}),
+    },
+    {
+      effort: input.config.runtime.thinkingLevel,
+      effortCapability:
+        provider === "chatgpt"
+          ? { kind: "unknown" }
+          : resolveThreadEffortCapability(provider, modelName),
+    },
+  );
   return new input.runtime.ThreadModelEngine({
     initial,
     host: createThreadModelHost(input.config, initial),
@@ -146,6 +161,7 @@ function chatEngineOptions(input: CreateChatEngineInput): ChatEngineOptions {
     ...(input.resolveReasoningPresentation
       ? { resolveReasoningPresentation: input.resolveReasoningPresentation }
       : {}),
+    retainEmptyReasoningPart: input.retainEmptyReasoningPart ?? shouldRetainEmptyReasoningPart,
     policy: input.policy ?? createToolPolicy(input.runtime, input.config),
     maxSteps: input.config.runtime.maxSteps,
     ...(chatHostModeForSurface(input.surface) === "interactive" && input.modelRecovery

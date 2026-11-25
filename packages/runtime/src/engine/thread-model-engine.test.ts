@@ -7,10 +7,15 @@ import { test, type TestContext } from "node:test";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import {
+  isThreadEffortToggleEnabled,
+  runtimeModelCatalogV16Schema,
   threadModelSetParamsSchema,
   threadModelStatusSchema,
+  threadModelStatusV16Schema,
   parseLatestRuntimeMethodParams,
   type RuntimeModelCatalog,
+  type RuntimeModelCatalogV16,
+  type ThreadEffortLevel,
 } from "@roll-agent/protocol";
 import { RuntimeService, RuntimeServiceError } from "../service/runtime-service.ts";
 import type { AgentHost, AgentHostOperation } from "../host-contracts/agent-host.ts";
@@ -26,7 +31,48 @@ import {
   type ThreadModelHost,
 } from "./thread-model-engine.ts";
 
-function fixture(t: TestContext, ownership?: SessionOwnershipHost) {
+function streamingModel(
+  name: string,
+  beforeStream: (options: Parameters<MockLanguageModelV4["doStream"]>[0]) => void | Promise<void>,
+) {
+  return new MockLanguageModelV4({
+    modelId: name,
+    doStream: async (options) => {
+      await beforeStream(options);
+      return {
+        stream: simulateReadableStream({
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "text" },
+            { type: "text-delta", id: "text", delta: name },
+            { type: "text-end", id: "text" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: "stop" },
+              usage: {
+                inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 10, text: 10, reasoning: 0 },
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+}
+
+function fixture(
+  t: TestContext,
+  {
+    ownership,
+    buildHost,
+  }: {
+    ownership?: SessionOwnershipHost;
+    buildHost?: (base: ThreadModelHost) => ThreadModelHost;
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "roll-model-engine-"));
   const store = new ThreadStore(dir, ownership ? { ownership } : {});
   const calls: { model: string; options: unknown }[] = [];
@@ -34,52 +80,49 @@ function fixture(t: TestContext, ownership?: SessionOwnershipHost) {
   let samplingFailure = false;
   let beforeBootstrap: (input: AgentHostOperation) => Promise<void> = async () => {};
   let beforeStream: (name: string) => Promise<void> = async () => {};
-  const model = (name: string): PreparedThreadModel => ({
+  const testCapability = {
+    kind: "levels" as const,
+    levels: ["low", "medium", "high"] as const,
+  };
+  const model = (
+    name: string,
+    effort: "low" | "medium" | "high" = "medium",
+  ): PreparedThreadModel => ({
     provider: "test",
     modelName: name,
-    providerOptions: { test: { choice: name } },
+    effort,
+    effortCapability: testCapability,
+    providerOptions: { test: { choice: name, effort } },
     reasoning: name === "a" ? "summary" : "text",
-    model: new MockLanguageModelV4({
-      modelId: name,
-      doStream: async (options) => {
-        calls.push({ model: name, options });
-        await beforeStream(name);
-        return {
-          stream: simulateReadableStream({
-            initialDelayInMs: null,
-            chunkDelayInMs: null,
-            chunks: [
-              { type: "stream-start", warnings: [] },
-              { type: "text-start", id: "text" },
-              { type: "text-delta", id: "text", delta: name },
-              { type: "text-end", id: "text" },
-              {
-                type: "finish",
-                finishReason: { unified: "stop", raw: "stop" },
-                usage: {
-                  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-                  outputTokens: { total: 1, text: 1, reasoning: 0 },
-                },
-              },
-            ],
-          }),
-        };
-      },
+    model: streamingModel(name, async (options) => {
+      calls.push({ model: name, options });
+      await beforeStream(name);
     }),
   });
   let catalog: RuntimeModelCatalog = {
     configRevision: "config-1",
     defaultModel: { provider: "test", model: "a" },
-    items: ["a", "b"].map((name) => ({ provider: "test", model: name, available: true })),
+    defaultEffort: "medium",
+    items: ["a", "b"].map((name) => ({
+      provider: "test",
+      model: name,
+      available: true,
+      effortCapability: testCapability,
+    })),
   };
-  let prepare: ThreadModelHost["prepare"] = async (identity) => model(identity.model);
-  const host: ThreadModelHost = {
-    catalog: () => catalog,
-    prepare: (identity, signal) => prepare(identity, signal),
-  };
+  let prepare: ThreadModelHost["prepare"] = async (identity, _signal, effort) =>
+    model(identity.model, effort === "low" || effort === "high" ? effort : "medium");
+  const host = {
+    catalog: (): RuntimeModelCatalog => catalog,
+    prepare: (
+      identity: RuntimeModelCatalog["defaultModel"],
+      signal: AbortSignal,
+      effort?: ThreadEffortLevel,
+    ) => prepare(identity, signal, effort),
+  } satisfies ThreadModelHost;
   const engine = new ThreadModelEngine({
     initial: model("a"),
-    host,
+    host: buildHost?.(host) ?? host,
     createEngine: (selection, lifecycle) => {
       const tracked = { model: undefined as string | undefined, disposed: 0, updates: 0 };
       hosts.push(tracked);
@@ -166,7 +209,7 @@ test("a rejected model request never reopens a detached session or acquires its 
     owner: { kind: "test", label: "model-runtime" },
     probe: () => "alive",
   };
-  const f = fixture(t, ownership);
+  const f = fixture(t, { ownership });
   const service = new RuntimeService(f.engine, f.store);
   const { thread } = await service.createThread(
     parseLatestRuntimeMethodParams("thread.create", { requestId: randomUUID() }),
@@ -406,7 +449,15 @@ test("removed explicit model fails closed and follow-default recovers the same t
   f.setCatalog({
     configRevision: "config-2",
     defaultModel: { provider: "test", model: "a" },
-    items: [{ provider: "test", model: "a", available: true }],
+    defaultEffort: "medium",
+    items: [
+      {
+        provider: "test",
+        model: "a",
+        available: true,
+        effortCapability: { kind: "levels", levels: ["low", "medium", "high"] },
+      },
+    ],
   });
   await f.engine.reloadModelHost(f.host, f.model("a"));
   assert.equal(f.engine.getThreadModel(a.id).status, "failed");
@@ -420,7 +471,7 @@ test("restoring a removed model via reload clears failure fields from the public
   const f = fixture(t);
   const a = await f.engine.createSession();
   await f.engine.setThreadModel(request(f.engine, a.id, "b"));
-  const original = f.engine.getModelCatalog();
+  const original = f.host.catalog();
   f.setCatalog({
     ...original,
     configRevision: "removed",
@@ -601,3 +652,406 @@ for (const phase of ["prepare", "apply"] as const) {
     assert.equal(f.store.getMessages(session.id).filter((m) => m.role === "user").length, 2);
   });
 }
+
+test("superseded concurrent mutation returns its own accepted pending snapshot and caches its own response", async (t) => {
+  const f = fixture(t);
+  const service = new RuntimeService(f.engine, f.store);
+  try {
+    const { thread } = await service.createThread(
+      parseLatestRuntimeMethodParams("thread.create", { requestId: randomUUID() }),
+    );
+    const enteredPrepareB = Promise.withResolvers<void>();
+    const releasePrepareB = Promise.withResolvers<void>();
+    f.setPrepare(async (identity, _signal, effort) => {
+      if (identity.model === "b") {
+        enteredPrepareB.resolve();
+        await releasePrepareB.promise;
+      }
+      return f.model(identity.model, effort === "low" || effort === "high" ? effort : "medium");
+    });
+
+    const initial = service.getThreadModel({ threadId: thread.id });
+    const reqA = threadModelSetParamsSchema.parse({
+      requestId: randomUUID(),
+      threadId: thread.id,
+      expectedRevision: initial.revision,
+      configRevision: initial.configRevision,
+      selection: { mode: "explicit", provider: "test", model: "b" },
+      effort: { mode: "explicit", level: "high" },
+    });
+    const pendingCallA = service.setThreadModel(reqA);
+    await enteredPrepareB.promise;
+
+    const observedPending = threadModelStatusSchema.parse(
+      service.getThreadModel({ threadId: thread.id }),
+    );
+    assert.equal(observedPending.status, "pending");
+    assert.equal(observedPending.target.model, "b");
+    assert.equal(observedPending.target.effectiveEffort, "high");
+
+    const reqB = threadModelSetParamsSchema.parse({
+      requestId: randomUUID(),
+      threadId: thread.id,
+      expectedRevision: observedPending.revision,
+      configRevision: observedPending.configRevision,
+      selection: { mode: "explicit", provider: "test", model: "a" },
+      effort: { mode: "explicit", level: "low" },
+    });
+    const resultB = threadModelStatusSchema.parse(await service.setThreadModel(reqB));
+    releasePrepareB.resolve();
+    const resultA = threadModelStatusSchema.parse(await pendingCallA);
+
+    assert.equal(resultA.revision, observedPending.revision);
+    assert.equal(resultA.status, "pending");
+    assert.equal(resultA.target.model, "b");
+    assert.equal(resultA.target.effectiveEffort, "high");
+
+    assert.notEqual(resultB.revision, resultA.revision);
+    assert.equal(resultB.status, "applied");
+    assert.equal(resultB.target.model, "a");
+    assert.equal(resultB.target.effectiveEffort, "low");
+    assert.equal(resultB.active?.model, "a");
+    assert.equal(resultB.active?.effort, "low");
+
+    // Retrying reqA with the same requestId must return reqA's own cached snapshot, never B's.
+    assert.deepEqual(await service.setThreadModel(reqA), resultA);
+    assert.deepEqual(service.getThreadModel({ threadId: thread.id }), resultB);
+  } finally {
+    await service.close();
+  }
+});
+
+test("rejected invalid effort or default combination never consumes revision or replaces an existing pending selection", async (t) => {
+  const f = fixture(t);
+  const a = await f.engine.createSession();
+  let busy = true;
+  f.engine.setModelBusyCheck((id) => id === a.id && busy);
+
+  const validPending = threadModelStatusSchema.parse(
+    await f.engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: a.id,
+        expectedRevision: f.engine.getThreadModel(a.id).revision,
+        configRevision: f.engine.getModelCatalog().configRevision,
+        selection: { mode: "explicit", provider: "test", model: "b" },
+        effort: { mode: "explicit", level: "high" },
+      }),
+    ),
+  );
+  assert.equal(validPending.status, "pending");
+  assert.equal(validPending.active?.effort, "medium");
+  assert.equal(validPending.target.model, "b");
+  assert.equal(validPending.target.effectiveEffort, "high");
+
+  await assert.rejects(
+    f.engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: a.id,
+        expectedRevision: validPending.revision,
+        configRevision: validPending.configRevision,
+        effort: { mode: "explicit", level: "xhigh" },
+      }),
+    ),
+    (error: unknown) => error instanceof ThreadModelError && error.reason === "effort-unsupported",
+  );
+
+  // Also test fallback default validation when global defaultEffort is incompatible with target capability.levels.
+  f.setCatalog({
+    ...f.host.catalog(),
+    defaultEffort: "off",
+    items: [
+      {
+        provider: "test",
+        model: "a",
+        available: true,
+        effortCapability: { kind: "levels", levels: ["off", "low", "medium", "high"] },
+      },
+      {
+        provider: "test",
+        model: "b",
+        available: true,
+        effortCapability: { kind: "levels", levels: ["low", "medium", "high"] },
+      },
+    ],
+  });
+  await assert.rejects(
+    f.engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: a.id,
+        expectedRevision: validPending.revision,
+        configRevision: validPending.configRevision,
+        selection: { mode: "explicit", provider: "test", model: "b" },
+        effort: { mode: "default" },
+      }),
+    ),
+    (error: unknown) => error instanceof ThreadModelError && error.reason === "effort-unsupported",
+  );
+
+  // Revision and pending target must remain intact after the rejected write.
+  assert.deepEqual(f.engine.getThreadModel(a.id), validPending);
+
+  busy = false;
+  await f.engine.settleThreadModel(a.id);
+  const settled = threadModelStatusSchema.parse(f.engine.getThreadModel(a.id));
+  assert.equal(settled.status, "applied");
+  assert.equal(settled.active?.model, "b");
+  assert.equal(settled.active?.effort, "high");
+});
+
+test("same-model effort updates use the host receiver and propagate to Sampling and the next turn", async (t) => {
+  let effortUpdates = 0;
+  class EffortHost implements ThreadModelHost {
+    readonly #capability = { kind: "levels", levels: ["low", "medium", "high"] } as const;
+    readonly catalog: ThreadModelHost["catalog"];
+    constructor(base: ThreadModelHost) {
+      this.catalog = base.catalog;
+    }
+    async prepare(): Promise<PreparedThreadModel> {
+      throw new Error("unexpected full model preparation");
+    }
+    prepareEffort(current: Pick<PreparedThreadModel, "modelName">, effort: ThreadEffortLevel) {
+      effortUpdates++;
+      return {
+        effort,
+        effortCapability: this.#capability,
+        providerOptions: { test: { choice: current.modelName, effort } },
+        reasoning: effort === "high" ? ("text" as const) : ("summary" as const),
+      };
+    }
+  }
+  const f = fixture(t, { buildHost: (base) => new EffortHost(base) });
+
+  const session = await f.engine.createSession();
+  await drain(session.send("calibrate budget"));
+  assert.equal(effortUpdates, 0);
+
+  const updated = threadModelStatusSchema.parse(
+    await f.engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: f.engine.getThreadModel(session.id).revision,
+        configRevision: f.engine.getModelCatalog().configRevision,
+        effort: { mode: "explicit", level: "high" },
+      }),
+    ),
+  );
+  assert.equal(effortUpdates, 1);
+  assert.equal(updated.status, "applied");
+  assert.deepEqual(updated.selection, { mode: "default" });
+  assert.equal(updated.active?.effort, "high");
+  assert.equal(updated.active?.reasoning, "text");
+  assert.equal(f.engine.hasThreadReasoning("text"), true);
+  assert.equal(f.hosts[0]?.updates, 2, "initial Sampling + lightweight setProviderOptions update");
+
+  await drain(session.send("turn with high effort"));
+  const lastOptions = f.calls.at(-1)?.options;
+  assert.ok(
+    typeof lastOptions === "object" && lastOptions !== null && "providerOptions" in lastOptions,
+  );
+  assert.deepEqual(lastOptions.providerOptions, { test: { choice: "a", effort: "high" } });
+});
+
+function createHostEngine(t: TestContext, initial: PreparedThreadModel, host: ThreadModelHost) {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-host-"));
+  const store = new ThreadStore(dir);
+  const engine = new ThreadModelEngine({
+    initial,
+    host,
+    createEngine: (selection, lifecycle) =>
+      new ConversationEngine({
+        ...selection,
+        ...lifecycle,
+        settings: runtimeSettingsSchema.parse({ shell: { enabled: false } }),
+        store,
+        sources: [],
+        skillLibrary: null,
+        workspaceInstructions: null,
+        fileToolsEnabled: false,
+      }),
+  });
+  t.after(async () => {
+    await engine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  return engine;
+}
+
+test("legacy 1.6 ThreadModelHost remains compatible, degrades honestly without fabricating effort, and switches models", async (t) => {
+  const calls: string[] = [];
+  const prepareArgCounts: number[] = [];
+  const makeLegacyPrepared = (name: string): PreparedThreadModel => ({
+    provider: "legacy",
+    modelName: name,
+    reasoning: "summary",
+    model: streamingModel(name, () => {
+      calls.push(name);
+    }),
+  });
+  const legacyCatalog: RuntimeModelCatalogV16 = {
+    configRevision: "legacy-cfg-1",
+    defaultModel: { provider: "legacy", model: "a" },
+    items: [
+      { provider: "legacy", model: "a", available: true },
+      { provider: "legacy", model: "b", available: true },
+    ],
+  };
+  const legacyHost: ThreadModelHost = {
+    catalog: () => legacyCatalog,
+    prepare: async function prepareLegacy(identity, signal) {
+      prepareArgCounts.push(arguments.length);
+      signal.throwIfAborted();
+      return makeLegacyPrepared(identity.model);
+    },
+  };
+  const engine = createHostEngine(t, makeLegacyPrepared("a"), legacyHost);
+
+  assert.equal(engine.supportsThreadEffort(), false);
+  const catalog = runtimeModelCatalogV16Schema.parse(engine.getModelCatalog());
+  assert.equal("defaultEffort" in catalog, false);
+  assert.equal("effortCapability" in catalog.items[0]!, false);
+
+  const session = await engine.createSession();
+  const initialStatus = threadModelStatusV16Schema.parse(engine.getThreadModel(session.id));
+  assert.equal(initialStatus.status, "applied");
+  assert.equal(initialStatus.active.model, "a");
+  assert.equal("target" in initialStatus, false);
+  assert.equal("effort" in initialStatus, false);
+  assert.equal("effort" in initialStatus.active, false);
+
+  // Explicit effort or effort-only writes must fail without changing revision/state.
+  await assert.rejects(
+    engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: initialStatus.revision,
+        configRevision: initialStatus.configRevision,
+        effort: { mode: "explicit", level: "high" },
+      }),
+    ),
+    (error: unknown) => error instanceof ThreadModelError && error.reason === "effort-unsupported",
+  );
+  assert.deepEqual(engine.getThreadModel(session.id), initialStatus);
+
+  // Ordinary 1.6 model switch must work and pass only (identity, signal) to legacy prepare().
+  const switched = threadModelStatusV16Schema.parse(
+    await engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: initialStatus.revision,
+        configRevision: initialStatus.configRevision,
+        selection: { mode: "explicit", provider: "legacy", model: "b" },
+      }),
+    ),
+  );
+  assert.equal(switched.status, "applied");
+  assert.equal(switched.active.model, "b");
+  assert.deepEqual(prepareArgCounts, [2]);
+
+  await drain(session.send("ping legacy switch"));
+  assert.deepEqual(calls, ["b"]);
+});
+
+test("defaultValidateTarget enforces explicit toggle bounds while allowing host default restore", async (t) => {
+  const toggleCapability = { kind: "toggle", offLevel: "off", onLevel: "medium" } as const;
+  const buildModel = (modelName: string, effort: ThreadEffortLevel): PreparedThreadModel => ({
+    provider: "test",
+    modelName,
+    effort,
+    effortCapability: toggleCapability,
+    providerOptions: { test: { effort } },
+    reasoning: "summary",
+    model: new MockLanguageModelV4({ modelId: modelName }),
+  });
+  const catalog: RuntimeModelCatalog = {
+    configRevision: "toggle-cfg-1",
+    defaultModel: { provider: "test", model: "a" },
+    defaultEffort: "high",
+    items: [
+      {
+        provider: "test",
+        model: "a",
+        available: true,
+        effortCapability: toggleCapability,
+      },
+    ],
+  };
+  const host: ThreadModelHost = {
+    catalog: () => catalog,
+    prepare: async (identity, _signal, effort) => buildModel(identity.model, effort ?? "high"),
+  };
+  const engine = createHostEngine(t, buildModel("a", "high"), host);
+
+  const session = await engine.createSession();
+  const initial = threadModelStatusSchema.parse(engine.getThreadModel(session.id));
+  assert.equal(initial.status, "applied");
+  assert.equal(initial.active.effort, "high");
+  assert.equal(isThreadEffortToggleEnabled(toggleCapability, initial.active.effort), true);
+
+  await assert.rejects(
+    engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: initial.revision,
+        configRevision: initial.configRevision,
+        effort: { mode: "explicit", level: "xhigh" },
+      }),
+    ),
+    (error: unknown) => error instanceof ThreadModelError && error.reason === "effort-unsupported",
+  );
+  assert.deepEqual(engine.getThreadModel(session.id), initial);
+
+  const toggledOff = threadModelStatusSchema.parse(
+    await engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: initial.revision,
+        configRevision: initial.configRevision,
+        effort: { mode: "explicit", level: "off" },
+      }),
+    ),
+  );
+  assert.equal(toggledOff.status, "applied");
+  assert.equal(toggledOff.active.effort, "off");
+  assert.equal(isThreadEffortToggleEnabled(toggleCapability, toggledOff.active.effort), false);
+
+  const restoredDefault = threadModelStatusSchema.parse(
+    await engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: toggledOff.revision,
+        configRevision: toggledOff.configRevision,
+        effort: { mode: "default" },
+      }),
+    ),
+  );
+  assert.equal(restoredDefault.status, "applied");
+  assert.equal(restoredDefault.effort.mode, "default");
+  assert.equal(restoredDefault.active.effort, "high");
+  assert.equal(isThreadEffortToggleEnabled(toggleCapability, restoredDefault.active.effort), true);
+
+  const toggledOn = threadModelStatusSchema.parse(
+    await engine.setThreadModel(
+      threadModelSetParamsSchema.parse({
+        requestId: randomUUID(),
+        threadId: session.id,
+        expectedRevision: restoredDefault.revision,
+        configRevision: restoredDefault.configRevision,
+        effort: { mode: "explicit", level: "medium" },
+      }),
+    ),
+  );
+  assert.equal(toggledOn.status, "applied");
+  assert.equal(toggledOn.active.effort, "medium");
+  assert.equal(isThreadEffortToggleEnabled(toggleCapability, toggledOn.active.effort), true);
+});

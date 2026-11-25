@@ -7,7 +7,11 @@ import {
 import type { CompanionConfigStore } from "./config-store.ts";
 import type { CompanionCredentialStore } from "./credentials.ts";
 import { canonicalizeCompanionWorkspace } from "./workspace.ts";
-import { COMPANION_CONFIG_VERSION, resolveRelayEndpoint } from "./constants.ts";
+import {
+  COMPANION_CONFIG_VERSION,
+  resolveRelayEndpoint,
+  type CompanionRelayProtocolVersion,
+} from "./constants.ts";
 
 const MAX_PAIRING_CODE_BYTES = 4 * 1024;
 const ENROLLMENT_TIMEOUT_MS = 30_000;
@@ -79,6 +83,7 @@ export class CompanionEnrollmentService {
   async enroll(input: {
     readonly pairingCode: string;
     readonly workspace: string;
+    readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
     readonly signal?: AbortSignal;
   }): Promise<CompanionConfig> {
     if ((await this.configStore.load()) !== null) {
@@ -97,6 +102,9 @@ export class CompanionEnrollmentService {
       cwd,
       enabled: true,
       credentialRef,
+      ...(input.relayProtocolVersion === undefined
+        ? {}
+        : { relayProtocolVersion: input.relayProtocolVersion }),
     };
     try {
       await this.configStore.save(config);
@@ -117,9 +125,18 @@ export class CompanionEnrollmentService {
     return true;
   }
 
-  async setEnabled(enabled: boolean): Promise<CompanionConfig> {
+  async setEnabled(
+    enabled: boolean,
+    options?: { readonly relayProtocolVersion?: CompanionRelayProtocolVersion },
+  ): Promise<CompanionConfig> {
     const current = await this.requireConfig();
-    const updated: CompanionConfig = { ...current, enabled };
+    const updated: CompanionConfig = {
+      ...current,
+      enabled,
+      ...(options?.relayProtocolVersion === undefined
+        ? {}
+        : { relayProtocolVersion: options.relayProtocolVersion }),
+    };
     await this.configStore.save(updated);
     return updated;
   }

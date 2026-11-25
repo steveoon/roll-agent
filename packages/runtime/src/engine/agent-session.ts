@@ -219,6 +219,13 @@ export interface SessionCompactionSettings {
 
 export type ToolSchemaPolicy = (issues: readonly JsonSchemaRefIssue[]) => boolean;
 
+/**
+ * Host predicate deciding whether an empty assistant `reasoning` part carries
+ * replayable opaque provider state that should be retained across turns and
+ * restarts. When omitted, Runtime strips every `reasoning` part by default.
+ */
+export type RetainEmptyReasoningPartPolicy = (providerOptions: SharedV4ProviderOptions) => boolean;
+
 export interface SessionToolExclusion {
   readonly toolId: string;
   readonly agentName: string;
@@ -244,6 +251,7 @@ export interface AgentSessionOptions {
     model: Pick<LanguageModelV4, "provider" | "modelId">,
     options: SharedV4ProviderOptions | undefined,
   ) => ReasoningPresentation | undefined;
+  readonly retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy;
   /** @internal Synchronous engine admission before accepting input or starting compaction. */
   readonly onBeforeTurn?: () => void;
   /** Execution admission is separate from ownership checks so failed models remain repairable. */
@@ -626,6 +634,30 @@ function unpersistedStepEntries(activeTurn: ActiveTurn): TimestampedModelMessage
     );
 }
 
+/**
+ * Repair each unpersisted model step independently so an interrupted step that
+ * reuses an earlier provider toolCallId only drops its own unsettled call and
+ * never strips already settled tool results from completed earlier steps.
+ */
+function repairedUnpersistedStepEntries(
+  activeTurn: ActiveTurn,
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
+): TimestampedModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, remembered]) =>
+      dropEmptyCarrierOnlyAssistantEntries(
+        repairActiveToolProtocolEntries(
+          stripReasoningTimestampedMessages(
+            materializeTimestampedStep(activeTurn, remembered.stepKey, remembered.messages),
+            retainEmptyReasoningPart,
+          ),
+        ),
+        retainEmptyReasoningPart,
+      ),
+    );
+}
+
 function unpersistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
   return unpersistedStepEntries(activeTurn).map((entry) => entry.message);
 }
@@ -819,13 +851,67 @@ function resolveCancellationReason(
     : SESSION_CANCELLATION_REASONS.runtime;
 }
 
-function stripReasoningMessages(messages: readonly ModelMessage[]): ModelMessage[] {
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSharedProviderOptions(value: unknown): value is SharedV4ProviderOptions {
+  if (!isPlainRecord(value)) {
+    return false;
+  }
+  const values = Object.values(value);
+  return values.length > 0 && values.every((entry) => entry === undefined || isPlainRecord(entry));
+}
+
+function hasOpaqueProviderOptions(providerOptions: unknown): boolean {
+  return isPlainRecord(providerOptions) && Object.keys(providerOptions).length > 0;
+}
+
+function isRetainedEmptyReasoningCarrier(
+  part: {
+    readonly type: string;
+    readonly text?: string;
+    readonly providerOptions?: unknown;
+  },
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
+): boolean {
+  return (
+    retainEmptyReasoningPart !== undefined &&
+    part.type === "reasoning" &&
+    part.text === "" &&
+    isSharedProviderOptions(part.providerOptions) &&
+    retainEmptyReasoningPart(part.providerOptions)
+  );
+}
+
+function isOpaqueEmptyCarrierPart(
+  part: {
+    readonly type: string;
+    readonly text?: string;
+    readonly providerOptions?: unknown;
+  },
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
+): boolean {
+  return (
+    (part.type === "text" && part.text === "" && hasOpaqueProviderOptions(part.providerOptions)) ||
+    isRetainedEmptyReasoningCarrier(part, retainEmptyReasoningPart)
+  );
+}
+
+function stripReasoningMessages(
+  messages: readonly ModelMessage[],
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
+): ModelMessage[] {
   return messages.flatMap((message) => {
     if (message.role !== "assistant" || !Array.isArray(message.content)) {
       return [message];
     }
 
-    const content = message.content.filter((part) => part.type !== "reasoning");
+    const content = message.content.filter(
+      (part) =>
+        part.type !== "reasoning" ||
+        isRetainedEmptyReasoningCarrier(part, retainEmptyReasoningPart),
+    );
     if (content.length === 0) {
       return [];
     }
@@ -836,11 +922,49 @@ function stripReasoningMessages(messages: readonly ModelMessage[]): ModelMessage
   });
 }
 
+function dropEmptyCarrierOnlyAssistantEntries(
+  entries: readonly TimestampedModelMessage[],
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
+): TimestampedModelMessage[] {
+  return entries.filter(({ message }) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) {
+      return true;
+    }
+    return message.content.some(
+      (part) => !isOpaqueEmptyCarrierPart(part, retainEmptyReasoningPart),
+    );
+  });
+}
+
+function hasUnresolvedStepToolCalls(
+  steps: readonly { readonly response: { readonly messages: readonly ModelMessage[] } }[],
+): boolean {
+  for (const step of steps) {
+    const pendingCounts = new Map<string, number>();
+    for (const message of step.response.messages) {
+      if (!Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (part.type === "tool-call") {
+          pendingCounts.set(part.toolCallId, (pendingCounts.get(part.toolCallId) ?? 0) + 1);
+        } else if (part.type === "tool-result") {
+          const current = pendingCounts.get(part.toolCallId) ?? 0;
+          if (current > 0) pendingCounts.set(part.toolCallId, current - 1);
+        }
+      }
+    }
+    for (const remaining of pendingCounts.values()) {
+      if (remaining > 0) return true;
+    }
+  }
+  return false;
+}
+
 function stripReasoningTimestampedMessages(
   entries: readonly TimestampedModelMessage[],
+  retainEmptyReasoningPart?: RetainEmptyReasoningPartPolicy,
 ): TimestampedModelMessage[] {
   return entries.flatMap((entry) =>
-    stripReasoningMessages([entry.message]).map((message) => ({
+    stripReasoningMessages([entry.message], retainEmptyReasoningPart).map((message) => ({
       message,
       createdAt: entry.createdAt,
     })),
@@ -880,6 +1004,7 @@ export class AgentSession {
   readonly id: string;
   private model: LanguageModelV4;
   private readonly resolveReasoningPresentation: AgentSessionOptions["resolveReasoningPresentation"];
+  private readonly retainEmptyReasoningPart: RetainEmptyReasoningPartPolicy | undefined;
   private modelRecovery: ModelTurnRecovery | undefined;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
@@ -986,11 +1111,12 @@ export class AgentSession {
     this.id = options.id;
     this.model = options.model;
     this.resolveReasoningPresentation = options.resolveReasoningPresentation;
+    this.retainEmptyReasoningPart = options.retainEmptyReasoningPart;
     this.modelRecovery = options.modelRecovery;
     this.contextWindowSource = options.contextWindowSource;
     this.maxSteps = options.maxSteps;
     const initialMessages = options.initialMessages
-      ? stripReasoningMessages(options.initialMessages)
+      ? stripReasoningMessages(options.initialMessages, this.retainEmptyReasoningPart)
       : [];
     this.messages = [...repairActiveToolProtocol(initialMessages).messages];
     this.onPersist = options.onPersist;
@@ -2086,6 +2212,7 @@ export class AgentSession {
                 queue.push({ type: "reasoning-start", reasoningId: part.id });
                 break;
               case "reasoning-delta": {
+                if (part.text.length === 0) break;
                 const kind = nativeDeltas?.[nativeIndex] === part.text ? display?.kind : undefined;
                 if (kind) nativeIndex++;
                 else nativeDeltas = undefined; // Never resynchronize by searching ahead for a match.
@@ -2101,6 +2228,7 @@ export class AgentSession {
                 queue.push({ type: "reasoning-end", reasoningId: part.id });
                 break;
               case "text-delta": {
+                if (part.text.length === 0) break;
                 if (!sawToolCall) {
                   const candidate = pendingEchoText + part.text;
                   if (isPotentialInputEcho(candidate, explicitSkillContext.userPrompt)) {
@@ -2383,7 +2511,10 @@ export class AgentSession {
             });
             return;
           }
-          const settled = stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn));
+          const settled = stripReasoningTimestampedMessages(
+            unpersistedStepEntries(activeTurn),
+            this.retainEmptyReasoningPart,
+          );
           this.messages.push(...settled.map((entry) => entry.message));
           if (settled.length > 0) this.persistTimestampedMessages(settled, "raw_transcript");
           markTurnSegmentPersisted(activeTurn);
@@ -2510,6 +2641,7 @@ export class AgentSession {
           }
           const settledEntries = stripReasoningTimestampedMessages(
             unpersistedStepEntries(activeTurn),
+            this.retainEmptyReasoningPart,
           );
           const coveredResults = new Map<string, number>();
           for (const { message } of settledEntries) {
@@ -2634,6 +2766,8 @@ export class AgentSession {
         }
 
         let responseEntries: TimestampedModelMessage[];
+        let resolvedLastStepFinishReason: string | undefined;
+        let unresolvedStepToolCalls = false;
         this.debug(queue, "model", "awaiting response messages", turnStartedAt);
         const responseTimer = this.scheduleDebug(
           queue,
@@ -2643,6 +2777,8 @@ export class AgentSession {
         );
         try {
           const steps = await result.steps;
+          resolvedLastStepFinishReason = steps.at(-1)?.finishReason;
+          unresolvedStepToolCalls = hasUnresolvedStepToolCalls(steps);
           responseEntries = canonicalTimestampedMessagesForSteps(activeTurn, steps);
         } catch (error) {
           this.clearDebugTimer(responseTimer);
@@ -2719,7 +2855,31 @@ export class AgentSession {
           return;
         }
 
-        const visibleResponseEntries = stripReasoningTimestampedMessages(responseEntries);
+        const streamInterrupted =
+          lastStepFinishReason === "interrupted" || resolvedLastStepFinishReason === "interrupted";
+        const hasUnpairedToolCalls =
+          activeTurn.pendingToolCalls.size > 0 || unresolvedStepToolCalls;
+        if (streamInterrupted || hasUnpairedToolCalls) {
+          if (totalUsage) {
+            turnUsage = turnUsage === undefined ? totalUsage : addUsage(turnUsage, totalUsage);
+            this.sessionUsage = addUsage(this.sessionUsage, totalUsage);
+          }
+          this.messages.splice(turnStart);
+          this.persistFailedTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
+          queue.push({
+            type: "error",
+            stage: "execute",
+            message: hasUnpairedToolCalls
+              ? "模型响应在返回工具调用后中断，未执行待处理工具。"
+              : "模型响应中断，未完整完成。",
+          });
+          return;
+        }
+
+        const visibleResponseEntries = stripReasoningTimestampedMessages(
+          responseEntries,
+          this.retainEmptyReasoningPart,
+        );
         this.messages.push(...visibleResponseEntries.map((entry) => entry.message));
         const stopMessage = userRejectionMessage ?? invalidScheduleRetryGuard.message;
         if (stopMessage !== undefined) {
@@ -2987,17 +3147,23 @@ export class AgentSession {
     if (this.closed) {
       return;
     }
-    const completedMessages = completedStepMessages(activeTurn);
+    const unpersistedEntries = repairedUnpersistedStepEntries(
+      activeTurn,
+      this.retainEmptyReasoningPart,
+    );
+    const persistedMessages = persistedStepMessages(activeTurn);
+    const visibleCompletedMessages = [
+      ...persistedMessages,
+      ...unpersistedEntries.map((entry) => entry.message),
+    ];
     const hadProgress =
-      completedMessages.length > 0 ||
+      unpersistedEntries.length > 0 ||
+      persistedMessages.length > 0 ||
       activeTurn.toolExecutions.length > 0 ||
       activeTurn.pendingToolCalls.size > 0;
     if (!hadProgress) {
       return;
     }
-    const unpersistedEntries = repairActiveToolProtocolEntries(
-      stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn)),
-    );
     if (
       !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
     ) {
@@ -3017,7 +3183,7 @@ export class AgentSession {
         {
           message: createCancelledTurnRecoveryMessage({
             context: this.failedTurnContextMessage(activeTurn),
-            completedMessages,
+            completedMessages: visibleCompletedMessages,
             toolExecutions: activeTurn.toolExecutions,
           }),
           createdAt: markerCreatedAt,
@@ -3987,12 +4153,13 @@ export class AgentSession {
       this.messages.splice(turnStart);
       const keepRaw = stepPolicy === INTERRUPTED_STEP_POLICIES.keepRaw;
       const appendedStepEntries = keepRaw
-        ? repairActiveToolProtocolEntries(
-            stripReasoningTimestampedMessages(unpersistedStepEntries(activeTurn)),
-          )
+        ? repairedUnpersistedStepEntries(activeTurn, this.retainEmptyReasoningPart)
         : [];
       const visibleStepMessages = keepRaw
-        ? completedStepMessages(activeTurn)
+        ? [
+            ...persistedStepMessages(activeTurn),
+            ...appendedStepEntries.map((entry) => entry.message),
+          ]
         : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
       const recordCreatedAt = advanceTurnTimeline(activeTurn, {

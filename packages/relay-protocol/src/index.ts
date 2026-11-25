@@ -8,6 +8,7 @@ import {
   approvalRequestResultSchema,
   getApprovalExplanation,
   interactionIdSchema,
+  isThreadEffortToggleEnabled,
   jsonValueSchema,
   normalizeUserInputResult,
   operationGetResultSchema,
@@ -25,7 +26,13 @@ import {
   runtimeMethodSchemasV11,
   runtimeInstanceIdSchema,
   streamIdSchema,
+  THREAD_MODEL_FAILURES_V17,
+  threadEffortCapabilitySchema,
+  threadEffortLevelSchema,
+  threadEffortSelectionSchema,
   threadIdSchema,
+  threadModelStatusV17Schema,
+  threadModelTargetSchema,
   threadSnapshotV11Schema,
   timestampSchema,
   uuidSchema,
@@ -35,11 +42,14 @@ import {
   type JsonValue,
   type OperationView,
   type PendingApproval,
+  type ThreadEffortCapability,
+  type ThreadEffortLevel,
+  type ThreadEffortSelection,
   type ThreadSnapshotV11,
 } from "@roll-agent/protocol";
 import { z } from "zod/v4";
 
-export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.3", "1.2", "1.1", "1.0"] as const;
+export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.4", "1.3", "1.2", "1.1", "1.0"] as const;
 export type RelayProtocolVersion = (typeof SUPPORTED_RELAY_PROTOCOL_VERSIONS)[number];
 export const LATEST_RELAY_PROTOCOL_VERSION = SUPPORTED_RELAY_PROTOCOL_VERSIONS[0];
 
@@ -285,6 +295,25 @@ export const RELAY_ERROR_RETRYABILITY_V11 = {
 
 export function getRelayErrorRetryabilityV11(code: RelayErrorCodeV11): boolean {
   return RELAY_ERROR_RETRYABILITY_V11[code];
+}
+
+/** Wire 1.4 adds narrow public error categories for remote per-thread effort updates. */
+export const RELAY_ERROR_CODES_V14 = {
+  ...RELAY_ERROR_CODES_V11,
+  threadEffortStateStale: "THREAD_EFFORT_STATE_STALE",
+  threadEffortUnsupported: "THREAD_EFFORT_UNSUPPORTED",
+} as const;
+
+export type RelayErrorCodeV14 = (typeof RELAY_ERROR_CODES_V14)[keyof typeof RELAY_ERROR_CODES_V14];
+
+export const RELAY_ERROR_RETRYABILITY_V14 = {
+  ...RELAY_ERROR_RETRYABILITY_V11,
+  [RELAY_ERROR_CODES_V14.threadEffortStateStale]: true,
+  [RELAY_ERROR_CODES_V14.threadEffortUnsupported]: false,
+} as const satisfies Readonly<Record<RelayErrorCodeV14, boolean>>;
+
+export function getRelayErrorRetryabilityV14(code: RelayErrorCodeV14): boolean {
+  return RELAY_ERROR_RETRYABILITY_V14[code];
 }
 
 export const relayProtocolVersionSchema = z.enum(SUPPORTED_RELAY_PROTOCOL_VERSIONS);
@@ -1247,7 +1276,198 @@ export function projectRelayMessageV13ToV12(message: RelayMessageV13): RelayMess
   return relayMessageSchemaV12.parse(message);
 }
 
+/** Wire 1.4 exposes per-thread effort query/mutation without exposing model catalog or config APIs. */
+export const RELAY_REQUEST_METHODS_V14 = {
+  ...RELAY_REQUEST_METHODS_V12,
+  threadEffortGet: "thread.effort.get",
+  threadEffortSet: "thread.effort.set",
+} as const;
+export const RELAY_REQUEST_METHOD_VALUES_V14 = [
+  ...RELAY_REQUEST_METHOD_VALUES_V12,
+  RELAY_REQUEST_METHODS_V14.threadEffortGet,
+  RELAY_REQUEST_METHODS_V14.threadEffortSet,
+] as const;
+export const RELAY_REQUEST_METHOD_DISPOSITIONS_V14 = {
+  ...RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
+  [RELAY_REQUEST_METHODS_V14.threadEffortGet]: "query",
+  [RELAY_REQUEST_METHODS_V14.threadEffortSet]: "mutation",
+} as const;
+export const RELAY_MUTATION_REQUEST_METHODS_V14 = [
+  ...RELAY_MUTATION_REQUEST_METHODS_V11,
+  RELAY_REQUEST_METHODS_V14.threadEffortSet,
+] as const;
+
+export const relayThreadEffortGetParamsSchemaV14 = z
+  .object({
+    threadId: threadIdSchema,
+  })
+  .strict()
+  .readonly();
+
+export const relayActiveThreadEffortSchemaV14 = z
+  .object({
+    provider: z.string().min(1).max(128),
+    model: z.string().min(1).max(512),
+    reasoning: z.enum(["summary", "text"]).nullable(),
+    effort: threadEffortLevelSchema,
+    effortCapability: threadEffortCapabilitySchema,
+  })
+  .strict()
+  .readonly();
+
+export const relayTargetThreadEffortSchemaV14 = threadModelTargetSchema;
+
+const relayThreadEffortRevisionSchemaV14 = uuidSchema;
+const relayThreadEffortConfigRevisionSchemaV14 = z.string().min(1).max(128);
+
+const relayThreadEffortStatusFieldsV14 = {
+  threadId: threadIdSchema,
+  revision: relayThreadEffortRevisionSchemaV14,
+  configRevision: relayThreadEffortConfigRevisionSchemaV14,
+  effort: threadEffortSelectionSchema,
+  target: relayTargetThreadEffortSchemaV14,
+  active: relayActiveThreadEffortSchemaV14.nullable(),
+} as const;
+
+export const relayThreadEffortStatusSchemaV14 = z
+  .discriminatedUnion("status", [
+    z
+      .object({
+        ...relayThreadEffortStatusFieldsV14,
+        active: relayActiveThreadEffortSchemaV14,
+        status: z.literal("applied"),
+      })
+      .strict()
+      .readonly(),
+    z
+      .object({
+        ...relayThreadEffortStatusFieldsV14,
+        status: z.literal("pending"),
+      })
+      .strict()
+      .readonly(),
+    z
+      .object({
+        ...relayThreadEffortStatusFieldsV14,
+        status: z.literal("failed"),
+        reason: z.enum(THREAD_MODEL_FAILURES_V17),
+      })
+      .strict()
+      .readonly(),
+  ])
+  .readonly();
+
+export const relayThreadEffortSetParamsSchemaV14 = z
+  .object({
+    requestId: uuidSchema,
+    threadId: threadIdSchema,
+    expectedRevision: relayThreadEffortRevisionSchemaV14,
+    configRevision: relayThreadEffortConfigRevisionSchemaV14,
+    effort: threadEffortSelectionSchema,
+  })
+  .strict()
+  .readonly();
+
+export const relayRequestMethodSchemasV14 = {
+  ...relayRequestMethodSchemasV13,
+  [RELAY_REQUEST_METHODS_V14.threadEffortGet]: {
+    params: relayThreadEffortGetParamsSchemaV14,
+    result: relayThreadEffortStatusSchemaV14,
+  },
+  [RELAY_REQUEST_METHODS_V14.threadEffortSet]: {
+    params: relayThreadEffortSetParamsSchemaV14,
+    result: relayThreadEffortStatusSchemaV14,
+  },
+} as const;
+
+export const relayDeviceConnectSchemaV14 = relayDeviceConnectSchemaV12.def.innerType
+  .extend({ protocolVersion: z.literal("1.4") })
+  .strict()
+  .readonly();
+export const relayRuntimeRequestSchemaV14 = relayRuntimeRequestSchemaV11.def.innerType
+  .extend({ method: z.enum(RELAY_REQUEST_METHOD_VALUES_V14) })
+  .strict()
+  .readonly();
+export const relayMessageSchemaV14 = z.discriminatedUnion("type", [
+  relayDeviceConnectSchemaV14,
+  relayRuntimeRequestSchemaV14,
+  relayRuntimeResponseSchemaV11,
+  relayRuntimeEventSchemaV13,
+  relayAckSchemaV11,
+  relayGapSchemaV11,
+  relayEncryptedMessageSchemaV11,
+  relayInteractionRequestSchemaV11,
+  relayInteractionResolvedSchemaV11,
+  relayInteractionCancelledSchemaV11,
+]);
+
+export type RelayMessageV14 = z.output<typeof relayMessageSchemaV14>;
+export type RelayRuntimeRequestV14 = z.output<typeof relayRuntimeRequestSchemaV14>;
+export type RelayRequestMethodV14 = (typeof RELAY_REQUEST_METHOD_VALUES_V14)[number];
+export type RelayThreadEffortStatusV14 = z.output<typeof relayThreadEffortStatusSchemaV14>;
+export type RelayThreadEffortSetParamsV14 = z.output<typeof relayThreadEffortSetParamsSchemaV14>;
+export type RelayThreadEffortGetParamsV14 = z.output<typeof relayThreadEffortGetParamsSchemaV14>;
+export { isThreadEffortToggleEnabled };
+export type { ThreadEffortCapability, ThreadEffortLevel, ThreadEffortSelection };
+
+export function projectRelayThreadEffortStatusV14(value: unknown): RelayThreadEffortStatusV14 {
+  const parsed = threadModelStatusV17Schema.parse(value);
+  const active =
+    parsed.active === null
+      ? null
+      : {
+          provider: parsed.active.provider,
+          model: parsed.active.model,
+          reasoning: parsed.active.reasoning,
+          effort: parsed.active.effort,
+          effortCapability: parsed.active.effortCapability,
+        };
+  const shared = {
+    threadId: parsed.threadId,
+    revision: parsed.revision,
+    configRevision: parsed.configRevision,
+    effort: parsed.effort,
+    target: parsed.target,
+  };
+  if (parsed.status === "applied") {
+    return relayThreadEffortStatusSchemaV14.parse({
+      ...shared,
+      status: "applied",
+      active,
+    });
+  }
+  if (parsed.status === "failed") {
+    return relayThreadEffortStatusSchemaV14.parse({
+      ...shared,
+      status: "failed",
+      active,
+      reason: parsed.reason,
+    });
+  }
+  return relayThreadEffortStatusSchemaV14.parse({
+    ...shared,
+    status: "pending",
+    active,
+  });
+}
+
+export function projectRelayMessageV14ToV13(message: RelayMessageV14): RelayMessageV13 {
+  if (message.type === "device.connect") {
+    return relayDeviceConnectSchemaV13.parse({ ...message, protocolVersion: "1.3" });
+  }
+  return relayMessageSchemaV13.parse(message);
+}
+
 export const RELAY_PROTOCOL_REGISTRY = {
+  "1.4": {
+    messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
+    messageSchema: relayMessageSchemaV14,
+    requestMethods: RELAY_REQUEST_METHOD_VALUES_V14,
+    requestMethodSchemas: relayRequestMethodSchemasV14,
+    requestMethodDispositions: RELAY_REQUEST_METHOD_DISPOSITIONS_V14,
+    mutationMethods: RELAY_MUTATION_REQUEST_METHODS_V14,
+    localOnlyMethods: RELAY_LOCAL_ONLY_REQUEST_METHODS_V11,
+  },
   "1.3": {
     messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
     messageSchema: relayMessageSchemaV13,
@@ -1575,7 +1795,11 @@ export type RelayGap = z.infer<typeof relayGapSchema>;
 /** @deprecated Legacy generic Relay types remain pinned to Wire 1.0. */
 export type RelayEncryptedMessage = z.infer<typeof relayEncryptedMessageSchema>;
 
-export type RelaySupportedMessage = RelayMessageV11 | RelayMessageV12;
+export type RelaySupportedMessage =
+  | RelayMessageV11
+  | RelayMessageV12
+  | RelayMessageV13
+  | RelayMessageV14;
 
 /** Keep legacy capability payloads free of unsupported App-output claims. */
 export function projectRelayCapabilitiesV11(value: unknown): JsonValue {

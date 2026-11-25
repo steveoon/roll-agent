@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { defaultApiThinkingLevel } from "../llm/thinking-levels.ts";
 import { agentsConfigSchema, installConfigSchema, rollConfigSchema } from "./schema.ts";
 import type { RollConfig } from "./schema.ts";
 import { DEFAULT_CONFIG, CONFIG_FILE_NAMES } from "./defaults.ts";
@@ -325,6 +326,15 @@ export function validateConfigText(
     throw new Error(`Config validation failed (${configPath}):\n${issues}`);
   }
 
+  const { llm, runtime } = result.data;
+  const provider = runtime.provider ?? llm.defaultProvider;
+  // The merged config already contains the schema default, so check the user's input for omission.
+  if (
+    provider !== "chatgpt" &&
+    (!isRecord(transformed.runtime) || transformed.runtime.thinkingLevel === undefined)
+  ) {
+    runtime.thinkingLevel = defaultApiThinkingLevel(provider, runtime.model ?? llm.defaultModel);
+  }
   return expandPaths(result.data, configPath);
 }
 

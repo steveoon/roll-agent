@@ -6,8 +6,8 @@
 |---|---|
 | Node.js | `>=22.6.0` |
 | 默认命令 | `roll runtime serve --stdio` |
-| 最新协议 | Roll Runtime Protocol `"1.6"` |
-| 无 Server Request handler 时 | 默认帧预算下广告 `["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]`；`1.2–1.6` capability 集合为空 |
+| 最新协议 | Roll Runtime Protocol `"1.7"` |
+| 无 Server Request handler 时 | 默认帧预算下广告 `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]`；`1.2–1.7` capability 集合为空 |
 | 默认请求超时 | `30,000 ms` |
 | 默认本地帧上限 | `17 MiB` |
 | 默认读取重试 | 最多 `1` 次，间隔 `100 ms` |
@@ -34,18 +34,18 @@
 | `clientVersion` | `string` | 当前 `@roll-agent/client-node` 包版本 | 初始化客户端版本 |
 | `onStderr` | `(line) => void` | 无 | 逐行接收 Runtime 日志 |
 | `onTurnOutcomeUnknown` | `(turnId) => void` | 无 | Turn 结果无法确认时调用 |
-| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 `17 MiB` 时不广告 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"` |
+| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 `17 MiB` 时不广告 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"` |
 | `requestTimeoutMs` | `number` | `30,000` | 单次请求超时 |
 | `maxReadRetries` | `number` | `1` | 明确可重试读取的最大重试次数 |
 | `readRetryDelayMs` | `number` | `100` | 读取重试间隔 |
 | `shutdownOptions` | `RuntimeShutdownOptions` | 见关闭阶段 | 默认关闭预算 |
-| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client 类型化 handler；`1.2–1.6` 通过 capability handshake 协商，`1.1` 仍要求覆盖必需方法 |
-| `onUserInputRequest` | `UserInputRequestHandler` | 无 | `1.2–1.6` `userInput.request` 的类型化快捷处理器；不可与 `serverRequestHandlers["userInput.request"]` 同时传入不同函数 |
+| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client 类型化 handler；`1.2–1.7` 通过 capability handshake 协商，`1.1` 仍要求覆盖必需方法 |
+| `onUserInputRequest` | `UserInputRequestHandler` | 无 | `1.2–1.7` `userInput.request` 的类型化快捷处理器；不可与 `serverRequestHandlers["userInput.request"]` 同时传入不同函数 |
 
 客户端构造成功后的 `initialize` 协商失败会进入有界关闭，不会把未完成初始化的子进程交给
 调用方。
 
-`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `1.2–1.6`（`"1.6"`、`"1.5"`、`"1.4"`、`"1.3"` 或 `"1.2"`），
+`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `1.2–1.7`（`"1.7"`、`"1.6"`、`"1.5"`、`"1.4"`、`"1.3"` 或 `"1.2"`），
 还会发送首个 `client.capabilities.set` 并等待 Runtime ACK；因此返回的 Client 已经可以
 安全接收当前声明的 Server Request，ACK 前不会向调用方暴露连接。连接成功后再次通过
 `request("initialize", ...)` 初始化会被客户端拒绝，既不会写入 Transport，也不会改变
@@ -78,17 +78,17 @@ interface RuntimeClientTransport {
 | 方法 | 返回 | 说明 |
 |---|---|---|
 | `request(method, input)` | 方法对应 result | 校验 params/result 并发送 JSON-RPC 请求 |
-| `getOperationResult(input)` | `OperationResultGetResult` | 调用 `1.5–1.6` `operation.result.get` 按需读取工具的有界结构化输出 |
-| `browseThreads(input?)` | Thread 浏览分页 | 调用可选的 `1.6` `thread.browse`；包含项目归属和安全占用信息 |
-| `listModels()` | 模型目录 | 调用可选的 `1.6` `runtime.models.list`；返回配置候选、默认值和 `configRevision`，不含凭证 |
-| `getThreadModel({ threadId })` | 会话模型状态 | 调用可选的 `1.6` `thread.model.get`；读取已打开会话的内存选择及 `active` 模型 |
-| `setThreadModel(input)` | 会话模型状态 | 调用可选的 `1.6` `thread.model.set`；按 `expectedRevision` / `configRevision` 选择模型，仅当前实例有效 |
+| `getOperationResult(input)` | `OperationResultGetResult` | 调用 `1.5–1.7` `operation.result.get` 按需读取工具的有界结构化输出 |
+| `browseThreads(input?)` | Thread 浏览分页 | 调用可选的 `1.6–1.7` `thread.browse`；包含项目归属和安全占用信息 |
+| `listModels()` | 模型目录 | 调用可选的 `1.6–1.7` `runtime.models.list`；返回配置候选、默认值、`configRevision`（`1.7` 含 `defaultEffort` 与 `effortCapability`），不含凭证 |
+| `getThreadModel({ threadId })` | 会话模型状态 | 调用可选的 `1.6–1.7` `thread.model.get`；读取已打开会话的内存模型/强度选择及 `active` / `target` 状态 |
+| `setThreadModel(input)` | 会话模型状态 | 调用可选的 `1.6–1.7` `thread.model.set`；按 `expectedRevision` / `configRevision` 选择模型或会话推理强度（协商 `1.6` 时本地拒绝含 `effort` 的写请求） |
 | `onEvent(listener)` | 取消订阅函数 | 订阅已通过 Schema 校验的 Runtime 事件 |
-| `createEventRecovery(options?)` | `RuntimeEventRecoveryManager` | 创建当前连接唯一的 `1.3–1.6` durable event 恢复管理器 |
+| `createEventRecovery(options?)` | `RuntimeEventRecoveryManager` | 创建当前连接唯一的 `1.3–1.7` durable event 恢复管理器 |
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |
 | `getInitializationResult()` | `InitializeResult` | 读取协商版本、实例 ID、`features` 与 `limits` |
 | `getOutcomeUnknownTurnIds()` | `readonly TurnId[]` | 当前客户端生命周期内累计的未知 Turn |
-| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 注册或替换 typed handler；`1.2–1.6` 自动同步递增 capability revision |
+| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 注册或替换 typed handler；`1.2–1.7` 自动同步递增 capability revision |
 | `onUserInputRequest(handler)` | 取消注册函数 | `registerServerRequestHandler("userInput.request", handler)` 的类型化快捷方法 |
 | `shutdown(options?)` | `Promise<RuntimeClientExit>` | 可等待且幂等的有界关闭 |
 | `close()` | `void` | 触发异步关闭并立即返回，不向调用方抛出关闭阶段的异常 |
@@ -182,12 +182,12 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
-| 注册 `approval.request` | `["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` | 新 Runtime 为 `"1.6"`；旧 Runtime 可逐级回退 |
-| 仅注册 `userInput.request` | `["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | 新 Runtime 为 `"1.6"`；旧 Runtime 可回退 `1.5/1.4/1.3/1.2/1.0` |
-| 无 handler / 空对象 | `["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | 新 Runtime 为 `"1.6"` 且 ACK 空 capability；旧 Runtime 可回退 `1.5/1.4/1.3/1.2/1.0` |
-| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"` | 不会协商 `1.3–1.6`；按 handler 规则回落到 `1.2/1.1/1.0` |
+| 注册 `approval.request` | `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` | 新 Runtime 为 `"1.7"`；旧 Runtime 可逐级回退 |
+| 仅注册 `userInput.request` | `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | 新 Runtime 为 `"1.7"`；旧 Runtime 可回退 `1.6/1.5/1.4/1.3/1.2/1.0` |
+| 无 handler / 空对象 | `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | 新 Runtime 为 `"1.7"` 且 ACK 空 capability；旧 Runtime 可回退 `1.6/1.5/1.4/1.3/1.2/1.0` |
+| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"` | 不会协商 `1.3–1.7`；按 handler 规则回落到 `1.2/1.1/1.0` |
 
-`1.2–1.6` 没有前置强制 handler；所有 Server Request 都由初始化后的
+`1.2–1.7` 没有前置强制 handler；所有 Server Request 都由初始化后的
 `client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
 `approval.request`。必需方法表由
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 提供；未来协议版本新增必需方法时，
@@ -200,7 +200,7 @@ Client 必须覆盖该版本的全部方法才会广告它。`userInput.request`
 `registerServerRequestHandler()` 会抛错；应把初始 handler 传给
 `serverRequestHandlers`。
 
-协商到 `1.2–1.6` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
+协商到 `1.2–1.7` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
 handler 都会串行发送更高 revision。ACK 的 accepted methods 可以为空或为请求集的任意子集，
 并按 Runtime registry 排序；Client 按集合语义应用结果，不要求顺序与请求完全一致。只有
 revision 不匹配或 ACK 出现未请求 method 才是协议违例。未被接受的 method 不再本地投递；
