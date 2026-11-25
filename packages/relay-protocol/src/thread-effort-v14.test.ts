@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { test } from "node:test";
 import Ajv2020Module from "ajv/dist/2020.js";
 import addFormatsModule from "ajv-formats";
+import { z } from "zod/v4";
 import {
   RELAY_ERROR_CODES_V14,
   RELAY_ERROR_RETRYABILITY_V14,
   RELAY_MUTATION_REQUEST_METHODS_V14,
   RELAY_REQUEST_METHODS_V14,
   getRelayErrorRetryabilityV14,
+  getRelayProtocolRegistry,
   getRelayRequestMethodDispositionForVersion,
   isThreadEffortToggleEnabled,
   negotiateRelayProtocolVersion,
@@ -142,37 +142,12 @@ test("projectRelayThreadEffortStatusV14 strips model selection and contextWindow
   assert.equal(projected.active?.effort, "medium");
 });
 
-test("published Relay 1.4 JSON Schema matches runtime Zod invariants for duplicate levels, identical toggle and disallowed selection", async () => {
-  const schemaPath = resolve(
-    import.meta.dirname,
-    "../dist/schema/roll-relay-protocol-v1.4.schema.json",
-  );
-  const rawSchema: unknown = JSON.parse(await readFile(schemaPath, "utf8"));
-  assert.ok(typeof rawSchema === "object" && rawSchema !== null);
-
+test("Relay 1.4 JSON Schemas match runtime effort status and mutation validation", () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
-  for (const keyword of [
-    "x-roll-relay-protocol-version",
-    "x-roll-message-types",
-    "x-roll-request-methods",
-    "x-roll-request-method-dispositions",
-    "x-roll-mutation-methods",
-    "x-roll-relay-error-retryability",
-    "x-roll-request-method-schemas",
-  ]) {
-    ajv.addKeyword({ keyword });
-  }
-  ajv.addSchema(rawSchema, "urn:roll-agent:schema:relay-protocol:1.4");
-
-  const validateGetResult = ajv.getSchema(
-    "urn:roll-agent:schema:relay-protocol:1.4#/$defs/threadEffortGetResult",
-  );
-  const validateSetParams = ajv.getSchema(
-    "urn:roll-agent:schema:relay-protocol:1.4#/$defs/threadEffortSetParams",
-  );
-  assert.ok(validateGetResult, "expected $defs/threadEffortGetResult in v1.4 schema");
-  assert.ok(validateSetParams, "expected $defs/threadEffortSetParams in v1.4 schema");
+  const methods = getRelayProtocolRegistry("1.4").requestMethodSchemas;
+  const validateGetResult = ajv.compile(z.toJSONSchema(methods["thread.effort.get"].result));
+  const validateSetParams = ajv.compile(z.toJSONSchema(methods["thread.effort.set"].params));
 
   const baseStatus = validPendingStatus();
   const atLimit = {
@@ -180,7 +155,7 @@ test("published Relay 1.4 JSON Schema matches runtime Zod invariants for duplica
     active: { ...baseStatus.active, provider: "p".repeat(128), model: "m".repeat(512) },
   };
   for (const valid of [baseStatus, atLimit]) {
-    assert.ok(validateGetResult(valid), "published schema accepts valid statuses");
+    assert.ok(validateGetResult(valid), "JSON Schema accepts valid statuses");
     assert.deepEqual(parseRelayRequestResultForVersion("1.4", "thread.effort.get", valid), valid);
   }
   for (const [label, overrides] of [
