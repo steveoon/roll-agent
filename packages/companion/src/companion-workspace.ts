@@ -47,15 +47,21 @@ import { WorkspaceLeaseManager } from "./lease-manager.ts";
 import {
   RELAY_REQUEST_METHODS,
   RELAY_REQUEST_METHODS_V11,
+  RELAY_REQUEST_METHODS_V14,
+  projectRelayThreadEffortStatusV14,
   relayApprovalCandidateParamsSchema,
   relayInteractionCandidateParamsSchemaV11,
+  relayThreadEffortGetParamsSchemaV14,
+  relayThreadEffortSetParamsSchemaV14,
   type RelayApprovalCandidateInput,
   type RelayApprovalCandidateParams,
   type RelayApprovalCandidateResult,
   type RelayInteractionCandidateParamsV11,
   type RelayInteractionCandidateResultV11,
   type RelayRuntimeRequest,
-  type RelayRuntimeRequestV12 as RelayRuntimeRequestV11,
+  type RelayRuntimeRequestV14 as RelayRuntimeRequestV11,
+  type RelayThreadEffortGetParamsV14,
+  type RelayThreadEffortSetParamsV14,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 
@@ -82,6 +88,12 @@ export interface CompanionRuntimeClient {
   getOperationResult?(
     input: LatestRuntimeMethodInput<"operation.result.get">,
   ): Promise<LatestRuntimeMethodResult<"operation.result.get">>;
+  getThreadModel?(
+    input: LatestRuntimeMethodInput<"thread.model.get">,
+  ): Promise<RuntimeMethodResultForVersion<RuntimeProtocolVersion, "thread.model.get">>;
+  setThreadModel?(
+    input: LatestRuntimeMethodInput<"thread.model.set">,
+  ): Promise<RuntimeMethodResultForVersion<RuntimeProtocolVersion, "thread.model.set">>;
   onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void;
   getInitializationResult?(): Pick<InitializeResult, "protocolVersion">;
   close(): void;
@@ -123,6 +135,33 @@ export class InvalidRelayRequestParamsError extends Error {
     this.name = "InvalidRelayRequestParamsError";
     this.method = method;
   }
+}
+
+export class ThreadEffortUnsupportedError extends Error {
+  constructor(message = "Runtime does not support per-thread effort") {
+    super(message);
+    this.name = "ThreadEffortUnsupportedError";
+  }
+}
+
+function supportsAppResultsRuntimeProtocol(version: string | undefined): boolean {
+  return version === "1.5" || version === "1.6" || version === "1.7";
+}
+
+function parseRelayThreadEffortGetParamsV14(input: unknown): RelayThreadEffortGetParamsV14 {
+  const parsed = relayThreadEffortGetParamsSchemaV14.safeParse(input);
+  if (!parsed.success) {
+    throw new InvalidRelayRequestParamsError(RELAY_REQUEST_METHODS_V14.threadEffortGet);
+  }
+  return parsed.data;
+}
+
+function parseRelayThreadEffortSetParamsV14(input: unknown): RelayThreadEffortSetParamsV14 {
+  const parsed = relayThreadEffortSetParamsSchemaV14.safeParse(input);
+  if (!parsed.success) {
+    throw new InvalidRelayRequestParamsError(RELAY_REQUEST_METHODS_V14.threadEffortSet);
+  }
+  return parsed.data;
 }
 
 function parseRelayRuntimeMethodParams<TMethod extends RuntimeMethod>(
@@ -721,7 +760,9 @@ export class CompanionWorkspace {
     switch (request.method) {
       case "operation.result.get": {
         if (
-          !["1.5", "1.6"].includes(this.client.getInitializationResult?.().protocolVersion ?? "") ||
+          !supportsAppResultsRuntimeProtocol(
+            this.client.getInitializationResult?.().protocolVersion,
+          ) ||
           !this.client.getOperationResult
         ) {
           throw new LocalApprovalDeniedError("Runtime does not support App results");
@@ -745,6 +786,37 @@ export class CompanionWorkspace {
           return { result: { ...result.result, output: { status: "denied" } } };
         }
         return result;
+      }
+      case RELAY_REQUEST_METHODS_V14.threadEffortGet: {
+        const params = parseRelayThreadEffortGetParamsV14(request.params);
+        const negotiated = this.client.getInitializationResult?.().protocolVersion;
+        if ((negotiated !== undefined && negotiated !== "1.7") || !this.client.getThreadModel) {
+          throw new ThreadEffortUnsupportedError();
+        }
+        const status = await this.client.getThreadModel(params);
+        if (!("effort" in status)) {
+          throw new ThreadEffortUnsupportedError();
+        }
+        return projectRelayThreadEffortStatusV14(status);
+      }
+      case RELAY_REQUEST_METHODS_V14.threadEffortSet: {
+        const params = parseRelayThreadEffortSetParamsV14(request.params);
+        const negotiated = this.client.getInitializationResult?.().protocolVersion;
+        if ((negotiated !== undefined && negotiated !== "1.7") || !this.client.setThreadModel) {
+          throw new ThreadEffortUnsupportedError();
+        }
+        const setInput: LatestRuntimeMethodInput<"thread.model.set"> = {
+          requestId: params.requestId,
+          threadId: params.threadId,
+          expectedRevision: params.expectedRevision,
+          configRevision: params.configRevision,
+          effort: params.effort,
+        };
+        const status = await this.client.setThreadModel(setInput);
+        if (!("effort" in status)) {
+          throw new ThreadEffortUnsupportedError();
+        }
+        return projectRelayThreadEffortStatusV14(status);
       }
       case RELAY_REQUEST_METHODS_V11.interactionCandidate:
         return this.submitInteractionCandidateV11(
@@ -796,8 +868,9 @@ export class CompanionWorkspace {
             RUNTIME_METHODS.threadCapabilities,
             parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCapabilities, request.params),
           ),
-          ["1.5", "1.6"].includes(this.client.getInitializationResult?.().protocolVersion ?? "") &&
-            this.client.getOperationResult !== undefined,
+          supportsAppResultsRuntimeProtocol(
+            this.client.getInitializationResult?.().protocolVersion,
+          ) && this.client.getOperationResult !== undefined,
           async (agent, tool) =>
             !context.signal.aborted && (await this.remoteAppOutputPolicy(agent, tool)),
         );

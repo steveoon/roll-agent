@@ -46,8 +46,10 @@ export function hasUnresolvedEnvPlaceholder(value: string): boolean {
 }
 
 /**
- * Defer thinking-level validation only when capability depends on an unresolved identity.
- * Providers with model-independent capability tables (e.g. OpenAI API) still validate strictly.
+ * Defer thinking-level validation only when an unresolved identity could legitimately expand
+ * the allowed level set (ChatGPT subscription or Google Gemini 4 `xhigh`). Other API providers
+ * never exceed `legacyThinkingLevels`, so validating with their fallback table still rejects
+ * unsupported `xhigh`/`max` without false-failing unresolved model placeholders.
  */
 export function hasUnresolvedThinkingIdentity(
   input: {

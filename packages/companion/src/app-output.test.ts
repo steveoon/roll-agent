@@ -28,14 +28,14 @@ const context = {
   responderContext: {},
 };
 
-test("App result reads require producer and live host grants and never cache an earlier grant", async () => {
+async function checkAppResultAccess(protocolVersion: "1.5" | "1.7") {
   let granted = false;
   let producerAllows = true;
   let reads = 0;
   const client: CompanionRuntimeClient = {
     request: () => Promise.reject(new Error("unexpected legacy method")),
     onEvent: () => () => undefined,
-    getInitializationResult: () => ({ protocolVersion: "1.5" }),
+    getInitializationResult: () => ({ protocolVersion }),
     getOperationResult: async () => {
       reads++;
       return operationResultGetResultSchema.parse({
@@ -86,7 +86,12 @@ test("App result reads require producer and live host grants and never cache an 
   );
   assert.equal(reads, 4);
   await workspace.closeIfIdle();
-});
+}
+
+for (const version of ["1.5", "1.7"] as const) {
+  test(`App result reads on Runtime ${version} require live producer and host grants`, () =>
+    checkAppResultAccess(version));
+}
 
 test("capabilities advertise only currently effective remote output access", async () => {
   const { projectRemoteAppOutputCapabilities } = await import("./remote-app-output.ts");

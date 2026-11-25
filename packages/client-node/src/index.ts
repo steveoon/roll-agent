@@ -176,13 +176,14 @@ type MutableRuntimeServerRequestHandlers = {
 
 type DynamicCapabilityRuntimeProtocolVersion = Extract<
   RuntimeProtocolVersion,
-  "1.6" | "1.5" | "1.4" | "1.3" | "1.2"
+  "1.7" | "1.6" | "1.5" | "1.4" | "1.3" | "1.2"
 >;
 
 function usesDynamicServerRequestCapabilities(
   version: RuntimeProtocolVersion,
 ): version is DynamicCapabilityRuntimeProtocolVersion {
   return (
+    version === "1.7" ||
     version === "1.6" ||
     version === "1.5" ||
     version === "1.4" ||
@@ -230,7 +231,7 @@ function supportsRuntimeProtocolVersion(
 }
 
 function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
+  version: "1.7" | "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestHandlerParams<TMethod> {
@@ -271,7 +272,7 @@ function parseClientRuntimeMethodResult<TMethod extends LatestRuntimeMethod>(
 }
 
 function parseClientRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
+  version: "1.7" | "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestResultForSupportedVersions<TMethod> {
@@ -636,7 +637,11 @@ export class RollNodeClient {
     this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
       (version) =>
         supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
-        ((version !== "1.3" && version !== "1.4" && version !== "1.5" && version !== "1.6") ||
+        ((version !== "1.3" &&
+          version !== "1.4" &&
+          version !== "1.5" &&
+          version !== "1.6" &&
+          version !== "1.7") ||
           this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
     );
     if (!Number.isInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
@@ -1013,15 +1018,32 @@ export class RollNodeClient {
   }
 
   getThreadModel(
-    input: RuntimeMethodInputForVersion<"1.6", "thread.model.get">,
+    input: RuntimeMethodInputForVersion<"1.7", "thread.model.get">,
   ): Promise<RuntimeClientMethodResult<"thread.model.get">> {
     return this.request(RUNTIME_METHODS.threadModelGet, input);
   }
 
   setThreadModel(
-    input: RuntimeMethodInputForVersion<"1.6", "thread.model.set">,
+    input: RuntimeMethodInputForVersion<"1.7", "thread.model.set">,
   ): Promise<RuntimeClientMethodResult<"thread.model.set">> {
     return this.request(RUNTIME_METHODS.threadModelSet, input);
+  }
+
+  private assertThreadModelMutationSupported(
+    protocolVersion: RuntimeProtocolVersion | undefined,
+    method: LatestRuntimeMethod,
+    input: unknown,
+  ): void {
+    if (
+      method === RUNTIME_METHODS.threadModelSet &&
+      protocolVersion === "1.6" &&
+      isRecord(input) &&
+      input.effort !== undefined
+    ) {
+      throw new Error(
+        'Negotiated Runtime Protocol 1.6 does not support per-thread effort in "thread.model.set"',
+      );
+    }
   }
 
   private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {
@@ -1039,7 +1061,8 @@ export class RollNodeClient {
       protocolVersion !== "1.3" &&
       protocolVersion !== "1.4" &&
       protocolVersion !== "1.5" &&
-      protocolVersion !== "1.6"
+      protocolVersion !== "1.6" &&
+      protocolVersion !== "1.7"
     ) {
       return this.request(RUNTIME_METHODS.threadSnapshot, { threadId, limit: 1 });
     }
@@ -1074,7 +1097,8 @@ export class RollNodeClient {
       negotiatedVersion !== "1.3" &&
       negotiatedVersion !== "1.4" &&
       negotiatedVersion !== "1.5" &&
-      negotiatedVersion !== "1.6"
+      negotiatedVersion !== "1.6" &&
+      negotiatedVersion !== "1.7"
     ) {
       return Promise.reject(
         new RuntimeEventRecoveryError(
@@ -1111,6 +1135,7 @@ export class RollNodeClient {
       throw new Error("Roll Runtime client has already completed initialization");
     }
     const protocolVersion = this.initializationResult?.protocolVersion;
+    this.assertThreadModelMutationSupported(protocolVersion, method, input);
     const params =
       protocolVersion === undefined
         ? parseLatestRuntimeMethodParams(method, input)
@@ -1604,7 +1629,7 @@ export class RollNodeClient {
   }
 
   private async dispatchServerRequest<TMethod extends RuntimeServerRequestMethod>(
-    protocolVersion: "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
+    protocolVersion: "1.7" | "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
     id: JsonRpcId,
     method: TMethod,
     input: unknown,

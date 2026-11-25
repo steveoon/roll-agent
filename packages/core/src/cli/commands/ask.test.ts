@@ -465,3 +465,89 @@ test(
     }
   },
 );
+
+test(
+  "standalone roll run/ask resolve model-supported high effort for openai/gpt-5-pro across routing and sampling",
+  { timeout: 45_000 },
+  async () => {
+    const fixture = createSamplingCliFixture();
+    try {
+      const providers = {
+        google: { apiKey: "test-google-key" },
+        openai: { apiKey: "test-openai-key" },
+      };
+
+      // 1. Cross-model Neon xhigh -> gpt-5-pro falls back to high for both run and ask.
+      for (const args of [
+        ["run", "sampling-demo", "echo_sampling", "--json"],
+        ["ask", "invoke echo sampling", "--json"],
+      ] as const) {
+        const outcome = await fixture.invokeCli(
+          {
+            llm: { defaultProvider: "openai", defaultModel: "gpt-5-pro", providers },
+            runtime: { provider: "google", model: "gemini-4-neon", thinkingLevel: "xhigh" },
+          },
+          args,
+        );
+        assert.equal(outcome.code, 0, outcome.stderr);
+        assert.match(outcome.stderr, /独立 API Sampling 模型 openai\/gpt-5-pro.*默认 high/);
+        const lastRequest = outcome.requests.at(-1);
+        assert.equal(lastRequest?.body["model"], "gpt-5-pro");
+        const reasoning = lastRequest?.body["reasoning"];
+        assert.ok(isRecord(reasoning));
+        assert.equal(reasoning["effort"], "high");
+        if (args[0] === "ask") {
+          const parsed: unknown = JSON.parse(outcome.stdout);
+          assert.ok(isRecord(parsed));
+          assert.equal(parsed["status"], "success");
+        }
+      }
+
+      // 2. Explicit gpt-5-pro + high succeeds in roll ask without fallback warnings.
+      const configuredProAsk = await fixture.invokeCli(
+        {
+          llm: { defaultProvider: "openai", defaultModel: "gpt-5-pro", providers },
+          runtime: { thinkingLevel: "high" },
+        },
+        ["ask", "invoke echo sampling", "--json"],
+      );
+      assert.equal(configuredProAsk.code, 0, configuredProAsk.stderr);
+      assert.doesNotMatch(configuredProAsk.stderr, /默认 high/);
+      assert.ok(configuredProAsk.requests.length >= 2);
+      const samplingRequest = configuredProAsk.requests.at(-1);
+      assert.equal(samplingRequest?.body["model"], "gpt-5-pro");
+      const samplingReasoning = samplingRequest?.body["reasoning"];
+      assert.ok(isRecord(samplingReasoning));
+      assert.equal(samplingReasoning["effort"], "high");
+      const configuredOutput: unknown = JSON.parse(configuredProAsk.stdout);
+      assert.ok(isRecord(configuredOutput));
+      assert.equal(configuredOutput["status"], "success");
+
+      const llm = { defaultProvider: "openai", defaultModel: "gpt-5-pro", providers };
+      for (const args of [
+        ["run", "sampling-demo", "echo_sampling", "--json"],
+        ["ask", "invoke echo sampling", "--json"],
+      ] as const) {
+        const implicit = await fixture.invokeCli({ llm }, args);
+        assert.equal(implicit.code, 0, implicit.stderr);
+        assert.deepEqual(implicit.requests.at(-1)?.body["reasoning"], samplingReasoning);
+        assert.equal(implicit.requests.at(-1)?.body["model"], "gpt-5-pro");
+
+        const explicit = await fixture.invokeCli(
+          { llm, runtime: { thinkingLevel: "medium" } },
+          args,
+        );
+        assert.notEqual(explicit.code, 0);
+        assert.match(explicit.stderr, /不支持推理强度/);
+        assert.equal(explicit.requests.length, 0);
+        if (args[0] === "ask") {
+          const result: unknown = JSON.parse(explicit.stdout);
+          assert.ok(isRecord(result));
+          assert.equal(result["status"], "failed");
+        }
+      }
+    } finally {
+      fixture.close();
+    }
+  },
+);

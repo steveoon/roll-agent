@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "thread.model.set",
+  "params": {
+    "requestId": "00000000-0000-4000-8000-000000000010",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "expectedRevision": "00000000-0000-4000-8000-000000000011",
+    "configRevision": "cfg-1",
+    "effort": {
+      "mode": "explicit",
+      "level": "high"
+    }
+  }
+}

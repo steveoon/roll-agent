@@ -6,6 +6,7 @@ import type {
 } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import { resolveReasoningPresentation } from "../llm/reasoning-presentation.ts";
+import { resolveThreadEffortCapability } from "../llm/providers.ts";
 import { createThreadModelHost } from "./thread-model-host.ts";
 import { resolveChatLlmReadiness, resolveChatLlmSwitch } from "./engine-factory.ts";
 
@@ -42,7 +43,12 @@ export function createRuntimeModelConfig(
         return { status: "failed", reason: "invalid-config" };
       }
       const reasoning = resolveReasoningPresentation(selection.model, selection.providerOptions);
-      const prepared = { ...selection, ...(reasoning ? { reasoning: reasoning.kind } : {}) };
+      const prepared = {
+        ...selection,
+        ...(reasoning ? { reasoning: reasoning.kind } : {}),
+        effort: latest.runtime.thinkingLevel,
+        effortCapability: resolveThreadEffortCapability(selection.provider, selection.modelName),
+      };
       const result = {
         status: "applied",
         model: { provider: selection.provider, model: selection.modelName },

@@ -4,29 +4,30 @@
 
 | 项目 | 值 |
 |---|---|
-| 最新 Wire protocol | `"1.6"` |
-| 兼容 Wire protocol | `"1.5"`、`"1.4"`、`"1.3"`、`"1.2"`、`"1.1"`、`"1.0"` |
+| 最新 Wire protocol | `"1.7"` |
+| 兼容 Wire protocol | `"1.6"`、`"1.5"`、`"1.4"`、`"1.3"`、`"1.2"`、`"1.1"`、`"1.0"` |
 | 正式命令 | `roll runtime serve --stdio` |
 | 兼容命令 | `roll chat --server` |
 | Event notification | `runtime.event` |
 | Server Request cancel notification | `runtime.serverRequest.cancel` |
 | 分帧 | NDJSON，一行一个 JSON-RPC 消息 |
 | Runtime 默认接收入站帧上限 | `4 MiB`；通过初始化结果返回 |
-| 1.3–1.6 Client 入站帧最低能力 | `17 MiB`；预算更低的 Client 不得广告 `"1.6"`、`"1.5"`、`"1.4"` 或 `"1.3"` |
-| Event replay | `1.3–1.6` 只重放 durable event；`1.0–1.2` 不支持 |
-| Attachments | `1.4–1.6` 提供 `attachment.stage` / `attachment.chunk` / `attachment.commit` / `attachment.release` 与 `turn.start.input.attachments`；仅当 `initialize` 结果 `features` 含 `"attachments"` 时可用 |
-| App output | `1.5–1.6` 提供只读 `operation.result.get` 与 `OperationView` / `tool.completed` 的 `appOutput` 描述符；仅当 `features` 含 `"app-output"` 时可用 |
-| Context recovery | `1.6` 在 Snapshot 新增 `contextRecovery` 并新增 durable `context.recovery.changed` 事件；`features` 含 `"context-recovery"` |
+| 1.3–1.7 Client 入站帧最低能力 | `17 MiB`；预算更低的 Client 不得广告 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 或 `"1.3"` |
+| Event replay | `1.3–1.7` 只重放 durable event；`1.0–1.2` 不支持 |
+| Attachments | `1.4–1.7` 提供 `attachment.stage` / `attachment.chunk` / `attachment.commit` / `attachment.release` 与 `turn.start.input.attachments`；仅当 `initialize` 结果 `features` 含 `"attachments"` 时可用 |
+| App output | `1.5–1.7` 提供只读 `operation.result.get` 与 `OperationView` / `tool.completed` 的 `appOutput` 描述符；仅当 `features` 含 `"app-output"` 时可用 |
+| Context recovery | `1.6–1.7` 在 Snapshot 保留可空 `contextRecovery` 并保留 durable `context.recovery.changed` 事件兼容 |
+| Per-thread effort | `1.7` 在 `runtime.models.list` 与 `thread.model.get/set` 扩展每会话推理强度（effort）查询、能力公告与原子更新 |
 
 Schema 单一数据源位于 `@roll-agent/protocol`。构建后可读取最新的
 `@roll-agent/protocol/schema`（或等价别名 `@roll-agent/protocol/schema/latest`），也可按版本显式读取
-`@roll-agent/protocol/schema/1.6`、`schema/1.5`、`schema/1.4`、`schema/1.3`、`schema/1.2`、`schema/1.1`、
+`@roll-agent/protocol/schema/1.7`、`schema/1.6`、`schema/1.5`、`schema/1.4`、`schema/1.3`、`schema/1.2`、`schema/1.1`、
 `schema/1.0` 的 JSON Schema Draft 2020-12 根 Schema；其 `$defs`
 包含各方法 `params` / `result` / `request`、Server Request 以及 JSON-RPC response/event
 定义，`x-roll-methods` 和 `x-roll-server-request-methods` 提供代码生成索引。
 包同时导出子路径模块 `@roll-agent/protocol/app-output`（结构化应用输出契约校验、状态 Schema 与预算常量）与
 `@roll-agent/protocol/observation-retention`（可替换观测保留元数据声明 Schema）。
-跨语言一致性测试夹具位于 `@roll-agent/protocol/fixtures/v1.6/*`、`fixtures/v1.5/*`、`fixtures/v1.4/*`、
+跨语言一致性测试夹具位于 `@roll-agent/protocol/fixtures/v1.7/*`、`fixtures/v1.6/*`、`fixtures/v1.5/*`、`fixtures/v1.4/*`、
 `fixtures/v1.3/*` 与 `fixtures/v1.2/*`；冻结的 `1.1/1.0` 夹具继续共用
 `@roll-agent/protocol/fixtures/v1/*`。
 
@@ -64,7 +65,7 @@ TypeScript 宿主可直接从包根导入：
   `RuntimeServerRequestInput/Params/ResultForSupportedVersions<TMethod>`、
   `ThreadSnapshot`、`OperationResultView`、`ContextRecoveryView`、`RuntimeEventEnvelope` 等 DTO 类型。
 
-不带 `ForVersion` 后缀的 `parseRuntimeMethod*`、Approval 参数/取消/错误辅助函数均为冻结的 `"1.1"` 兼容门面；而 `runtimeMethodSchemas`、`parseLatestRuntimeMethod*` 与 `LatestRuntimeServerRequest*` 则始终指向最新协议注册表。编写跨 `1.0–1.6` 多版本兼容的新代码时，应根据实际协商出的版本号调用 `*ForVersion` 系列函数，避免将高版本扩展字段意外写入旧版连接。
+不带 `ForVersion` 后缀的 `parseRuntimeMethod*`、Approval 参数/取消/错误辅助函数均为冻结的 `"1.1"` 兼容门面；而 `runtimeMethodSchemas`、`parseLatestRuntimeMethod*` 与 `LatestRuntimeServerRequest*` 则始终指向最新协议注册表。编写跨 `1.0–1.7` 多版本兼容的新代码时，应根据实际协商出的版本号调用 `*ForVersion` 系列函数，避免将高版本扩展字段意外写入旧版连接。
 
 `@roll-agent/protocol` 只定义协议、Schema 和类型，不负责启动 Runtime 或管理连接。Node
 进程生命周期由 [`@roll-agent/client-node`](./client-node-reference.md) 负责；远程
@@ -76,34 +77,40 @@ Web 接入使用由
 Schema 生成与 fixture 标注；它不表示任意调用方已经实现该版本要求的入站能力。直接使用
 `@roll-agent/protocol` 的 Client 升级依赖后，必须审查新增的 Runtime→Client Request 与
 Notification，并只在 `initialize.protocolVersions` 中广告自己确实实现的版本。
-`RollNodeClient` 会按强制 handler 规则与帧预算生成版本列表，并在 `1.2–1.6` 初始化后自动完成
+`RollNodeClient` 会按强制 handler 规则与帧预算生成版本列表，并在 `1.2–1.7` 初始化后自动完成
 Client capability handshake。
 
-协议 `1.3–1.6` 的单条 durable event 记录上限为 `16 MiB`；加上外层 Runtime 信封与
-JSON-RPC 通知元数据后，客户端广告 `"1.6"`、`"1.5"`、`"1.4"` 或 `"1.3"` 即代表承诺能够接收至少 `17 MiB` 的单个
-Runtime→Client NDJSON 帧。若本地入站帧预算低于 `17 MiB`，客户端必须同时省略 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`。初始化结果中的
+协议 `1.3–1.7` 的单条 durable event 记录上限为 `16 MiB`；加上外层 Runtime 信封与
+JSON-RPC 通知元数据后，客户端广告 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 或 `"1.3"` 即代表承诺能够接收至少 `17 MiB` 的单个
+Runtime→Client NDJSON 帧。若本地入站帧预算低于 `17 MiB`，客户端必须同时省略 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`。初始化结果中的
 `limits.maxFrameBytes` 表示 Runtime 接收 Client 出站帧的上限；初始化完成后，Client 出站帧上限仍取本地预算与该返回值的较小者，不得将 `17 MiB` 入站要求视为同等的出站发送额度。
 
-## 会话内模型选择（1.6 可选扩展）
+## 会话内模型选择与推理强度（1.6–1.7 可选扩展）
 
 | 方法 | 参数 | 返回 |
 |---|---|---|
-| `runtime.models.list` | `{}` | `{ configRevision, defaultModel, items }`，仅包含安全的已配置模型标识与可用状态 |
-| `thread.model.get` | `{ threadId }` | 已打开会话的 `{ threadId, revision, configRevision, selection, status, active, reason? }` |
-| `thread.model.set` | `{ requestId, threadId, expectedRevision, configRevision, selection }` | 结构同 `thread.model.get`；存在活动轮次时返回状态可能为 `pending` |
+| `runtime.models.list` | `{}` | `1.6` 返回 `{ configRevision, defaultModel, items }`；`1.7` 新增 `defaultEffort` 与每项 `effortCapability` |
+| `thread.model.get` | `{ threadId }` | `1.6` 返回 `{ threadId, revision, configRevision, selection, status, active, reason? }`；`1.7` 新增 `effort`、`active.effort`、`active.effortCapability` 与 `target` |
+| `thread.model.set` | `1.6`：`{ requestId, threadId, expectedRevision, configRevision, selection }`；`1.7`：`selection` 与 `effort` 至少提供一项 | 结构同对应版本的 `thread.model.get`；存在活动轮次时返回状态可能为 `pending` |
 
-`selection` 取值为 `{ mode: "default" }` 或 `{ mode: "explicit", provider, model }`。会话级模型覆盖仅驻留在当前 Runtime 进程内存中，执行 `thread.detach`、关闭连接或重启 Runtime 后即自动丢弃，不会写回配置文件或会话数据库，也不会引入新的数据库迁移。应用可在本地自行持久化用户的模型偏好，并在重新打开会话后先拉取最新候选列表与 `revision`，再显式调用 `thread.model.set` 恢复；CLI 不会自动继承该内存覆盖。
+`selection` 取值为 `{ mode: "default" }` 或 `{ mode: "explicit", provider, model }`；`1.7` 的 `effort` 取值为 `{ mode: "default" }` 或 `{ mode: "explicit", level }`（`level` 为 `"off"` / `"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"`）。模型与推理强度共享同一个会话 `revision`：省略 `selection` 仅调整当前会话强度（保留“模型跟随默认”或既有显式模型、保留已初始化的压缩参数与请求预算）；省略 `effort` 则保留已有强度意图并在目标模型上原子校验（含继承默认值的实际解析档位及跨模型压缩兼容性）。非法组合在接纳前拒绝，不会消耗 `revision`，也不会替换已受理的 `pending` 状态。
 
-`revision` 是当前会话实例的不透明 UUID，每次变更模型选择或重载配置后都会更新；`configRevision` 标识当前已加载的配置快照。若传入过期的 `expectedRevision`、未知的模型候选或失效的 `configRevision`，服务端返回 `INVALID_PARAMS`；不支持该能力的宿主或定时调度（scheduled）会话返回 `CAPABILITY_UNAVAILABLE`。`thread.model.get` 与 `thread.model.set` 均不会隐式打开会话：`thread.model.set` 必须在已通过 `thread.open` 显式打开且仍可写的会话上调用，会话 `detach` 后迟到的首次请求不会重新获取会话占用。`thread.model.set` 遵循标准 `requestId` 幂等契约：重复发送同一 `requestId` 返回首次响应快照，查询实时生效进度应调用 `thread.model.get`。
+`effortCapability` 按实际已确认的 Provider/模型系列正向公告四类能力：`{ kind: "levels", levels }`（无重复有序档位）、`{ kind: "toggle", offLevel, onLevel }`（互斥开关档位；读取到任何非 `offLevel` 的有效档位均视为开启，可用 `isThreadEffortToggleEnabled()` 判断）、`{ kind: "fixed" }` 或 `{ kind: "unknown" }`。`active.effort` 表示当前已生效档位，`target.effectiveEffort` 表示服务端解析后的目标生效档位（含 `mode: "default"`）。协商到 `"1.6"` 时，服务端出站严格剥离全部 `1.7` 字段，且 `@roll-agent/client-node` 会在本地直接拒绝携带 `effort` 的 `setThreadModel()` 请求。
+
+会话级模型与推理强度覆盖仅驻留在当前 Runtime 进程内存中，执行 `thread.detach`、关闭连接或重启 Runtime 后即自动丢弃，不会写回配置文件或会话数据库，也不会引入新的数据库迁移。应用可在本地自行持久化偏好，并在重新打开会话后先拉取最新候选/能力与 `revision`，再显式调用 `thread.model.set` 恢复；CLI 不会自动继承该内存覆盖。
+
+当模型只有一个有效档位时，Core 会在 `mode: "default"` 下采用该档位。例如，全局为 `medium` 时，切到 `gpt-5-pro` 的会话实际使用 `high`，再切回原模型会重新采用 `medium`。客户端也可以显式提交 `high` 来固定该会话的选择。其他显式档位和不兼容的显式压缩配置仍会在切换前被拒绝。
+
+`revision` 是当前会话实例的不透明 UUID，每次变更模型/强度选择或重载配置后都会更新；`configRevision` 标识当前已加载的配置快照。若传入过期的 `expectedRevision`、不兼容的模型/强度组合、失效的 `configRevision` 或只读定时调度（scheduled）会话，服务端返回 `INVALID_PARAMS`（模型/强度选择错误通过 `details.modelSelection` 标明具体原因）；不支持模型选择的宿主返回 `CAPABILITY_UNAVAILABLE`。未实现 effort 能力的旧版 `1.6` `ThreadModelHost` 在 `initialize` 握手时自动降级协商至 `"1.6"`，避免凭空报告未实现的档位。`thread.model.get` 与 `thread.model.set` 均不会隐式打开会话，且遵循标准 `requestId` 幂等契约。
 
 返回的 `status` 为 `applied`、`pending` 或 `failed`：
 
-- `active` 结构为 `{ provider, model, reasoning, contextWindow? }`（其中 `reasoning` 为 `"summary"`、`"text"` 或 `null`）；尚未建立有效模型时可能为 `null`，而 `status: "applied"` 时 `active` 必为非空对象；
-- `status: "failed"` 时附带固定错误原因 `reason`：`model-unavailable`、`prepare-failed`、`apply-failed`、`config-changed` 或 `settlement-failed`；
-- 若调用时当前会话存在进行中的 Turn，该轮对话继续使用原模型，待该轮结算完成后再自动切换 `pending` 选择；若模型准备或切换失败，后续新 Turn 将被门禁拦截，直至客户端重新设置有效的模型选择（关闭会话、过期准备结果或投影异常均不能绕过该门禁）；
-- 执行默认配置重载（`runtime.modelConfig.reload`）时，Runtime 会保留并重新校验当前会话实例内的显式模型选择。
+- `active` 在 `1.6` 为 `{ provider, model, reasoning, contextWindow? }`，在 `1.7` 额外包含 `effort` 与 `effortCapability`；尚未建立有效模型时可能为 `null`，而 `status: "applied"` 时 `active` 必为非空对象；
+- `status: "failed"` 时附带固定错误原因 `reason`：`model-unavailable`、`prepare-failed`、`apply-failed`、`config-changed`、`settlement-failed`（`1.7` 另含 `effort-unsupported`，向 `1.6` 投影为 `config-changed`）；
+- 若调用时当前会话存在进行中的 Turn，本轮全部模型请求（含工具返回后的续答与本会话 MCP Sampling）继续使用本轮开始时的模型与强度，待该轮终态结算完成后再自动应用 `pending` 选择；
+- 执行默认配置重载（`runtime.modelConfig.reload`）时，Runtime 会保留并重新校验当前会话实例内的显式模型与强度选择。
 
-这三个方法属于可选的 `1.6` 宿主扩展，客户端不能仅凭协商到 `"1.6"` 就假定必定可用，需妥善处理 JSON-RPC `-32601`（Method not found）或 `CAPABILITY_UNAVAILABLE`。协议不为此下发额外的模型变更事件，客户端统一通过 `thread.model.get` 轮询或确认生效结果。切换模型后的推理展示模式以 `active.reasoning` 为准（初始化握手时的 `features` 仍保持初始含义）；若切换到支持推理文本的模型且需在本地展示，仍须显式调用 `reasoning.text.subscribe`。
+这三个方法属于可选的 `1.6+` 宿主扩展，客户端不能仅凭协商到 `"1.6"` 或 `"1.7"` 就假定必定可用，需妥善处理 JSON-RPC `-32601`（Method not found）或 `CAPABILITY_UNAVAILABLE`。协议不为此下发额外的模型变更事件，客户端统一通过 `thread.model.get` 轮询或确认生效结果。切换模型或开关档位后的推理展示模式以 `active.reasoning` 为准；若切换到支持推理文本的状态且需在本地展示，仍须显式调用 `reasoning.text.subscribe`。
 
 ## 初始化
 
@@ -115,7 +122,7 @@ Runtime→Client NDJSON 帧。若本地入站帧预算低于 `17 MiB`，客户�
   "id": 1,
   "method": "initialize",
   "params": {
-    "protocolVersions": ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
+    "protocolVersions": ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
     "client": { "name": "my-gui", "version": "1.0.0" }
   }
 }
@@ -143,24 +150,24 @@ Runtime 按客户端 `protocolVersions` 的顺序选择第一个双方支持的�
 
 | Client 能力 | 广告版本 | 新 Runtime 协商结果 | Approval 控制路径 |
 |---|---|---|---|
-| 已注册 `approval.request` handler | `["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` | `"1.6"` | capability ACK 后的 Server Request |
-| 未注册 Server Request handler | `["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | `"1.6"` | ACK 空集合；Runtime 不投递 Approval |
+| 已注册 `approval.request` handler | `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` | `"1.7"` | capability ACK 后的 Server Request |
+| 未注册 Server Request handler | `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"]` | `"1.7"` | ACK 空集合；Runtime 不投递 Approval |
 | N-1 Client | `["1.1", "1.0"]` | `"1.1"` | Server Request |
 | 旧 Client | `["1.0"]` | `"1.0"` | Event + `approval.respond` |
 | 无共同版本 | 例如 `["2.0"]` | `PROTOCOL_VERSION_UNSUPPORTED` | 不建立协议会话 |
 
 版本能力表由 `RUNTIME_PROTOCOL_CAPABILITIES` 提供：
 
-| 字段 | `"1.6"` | `"1.5"` | `"1.4"` | `"1.3"` | `"1.2"` | `"1.1"` | `"1.0"` |
-|---|---|---|---|---|---|---|---|
-| `serverRequests` | `true` | `true` | `true` | `true` | `true` | `true` | `false` |
-| `serverRequestCapabilityNegotiation` | `true` | `true` | `true` | `true` | `true` | `false` | `false` |
-| `approvalResolvedEvents` | `true` | `true` | `true` | `true` | `true` | `true` | `false` |
-| `clientApprovalResponses` | `false` | `false` | `false` | `false` | `false` | `false` | `true` |
-| `requiredServerRequestMethods` | `[]` | `[]` | `[]` | `[]` | `[]` | `["approval.request"]` | `[]` |
+| 字段 | `"1.7"` | `"1.6"` | `"1.5"` | `"1.4"` | `"1.3"` | `"1.2"` | `"1.1"` | `"1.0"` |
+|---|---|---|---|---|---|---|---|---|
+| `serverRequests` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `false` |
+| `serverRequestCapabilityNegotiation` | `true` | `true` | `true` | `true` | `true` | `true` | `false` | `false` |
+| `approvalResolvedEvents` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `false` |
+| `clientApprovalResponses` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `true` |
+| `requiredServerRequestMethods` | `[]` | `[]` | `[]` | `[]` | `[]` | `[]` | `["approval.request"]` | `[]` |
 
-新 Client 向旧 Runtime 发送 `["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` 时，旧 Runtime 可按自身支持的最高版本选择 `"1.5"`、`"1.4"`、`"1.3"`、`"1.2"`、
-`"1.1"` 或 `"1.0"`；严格的 `initialize` 入参未添加额外的 capability 字段。协商结果绑定当前连接，`1.0/1.1` 连接不能动态开启 `1.2–1.6` 的能力握手。`@roll-agent/client-node` 始终可广告无前置强制 handler 的 `"1.2"`；当本地入站帧预算不少于 `17 MiB` 时，还会一并广告 `"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`；仅当注册了 `approval.request` 时才同时广告要求该 handler 的 `"1.1"`。
+新 Client 向旧 Runtime 发送 `["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]` 时，旧 Runtime 可按自身支持的最高版本选择 `"1.6"`、`"1.5"`、`"1.4"`、`"1.3"`、`"1.2"`、
+`"1.1"` 或 `"1.0"`；严格的 `initialize` 入参未添加额外的 capability 字段。协商结果绑定当前连接，`1.0/1.1` 连接不能动态开启 `1.2–1.7` 的能力握手。`@roll-agent/client-node` 始终可广告无前置强制 handler 的 `"1.2"`；当本地入站帧预算不少于 `17 MiB` 时，还会一并广告 `"1.7"`、`"1.6"`、`"1.5"`、`"1.4"` 与 `"1.3"`；仅当注册了 `approval.request` 时才同时广告要求该 handler 的 `"1.1"`。
 同一连接重复调用 `initialize` 会返回 `CAPABILITY_UNAVAILABLE`，且不会改变已经固定的协议版本与控制路径。
 
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 只描述某个 wire 版本的**必需**
@@ -255,22 +262,22 @@ Interaction 链路必须分开以下身份：
 | `thread.delete` | mutation | `requestId`, `threadId` | `{ deleted: true }` |
 | `thread.detach` | mutation | `requestId`, `threadId` | `{ detached: boolean }` |
 | `thread.capabilities` | 只读 | `threadId` | 安全 Capability manifest |
-| `runtime.modelConfig.get` | `1.6` 可选只读 | `{}` | 模型配置应用状态 |
-| `runtime.modelConfig.reload` | `1.6` 可选 mutation | `requestId` | 模型配置应用状态 |
-| `runtime.models.list` | `1.6` 可选只读 | `{}` | 已配置模型候选目录 `{ configRevision, defaultModel, items }` |
-| `thread.model.get` | `1.6` 可选只读 | `threadId` | 已打开会话的内存模型选择与 `active` 状态 |
-| `thread.model.set` | `1.6` 可选 mutation | `requestId`, `threadId`, `expectedRevision`, `configRevision`, `selection` | 更新后的会话模型状态 |
-| `reasoning.text.subscribe` | `1.6` 可选连接级订阅 | `{}` | `{ subscribed: boolean }` |
-| `turn.start` | mutation | `requestId`, `threadId`, `turnId`, 文本输入；`1.4–1.6` 可加 `attachments` | 立即返回 `{ accepted: true, turnId }` |
+| `runtime.modelConfig.get` | `1.6+` 可选只读 | `{}` | 模型配置应用状态 |
+| `runtime.modelConfig.reload` | `1.6+` 可选 mutation | `requestId` | 模型配置应用状态 |
+| `runtime.models.list` | `1.6+` 可选只读 | `{}` | 已配置模型候选目录（`1.7` 新增 `defaultEffort` 与 `items[].effortCapability`） |
+| `thread.model.get` | `1.6+` 可选只读 | `threadId` | 已打开会话的内存模型/强度选择与 `active`（`1.7` 含 `effort` / `target`） |
+| `thread.model.set` | `1.6+` 可选 mutation | `requestId`, `threadId`, `expectedRevision`, `configRevision`, `selection`（`1.7`：`selection` 与 `effort` 至少其一） | 更新后的会话模型/强度状态 |
+| `reasoning.text.subscribe` | `1.6+` 可选连接级订阅 | `{}` | `{ subscribed: boolean }` |
+| `turn.start` | mutation | `requestId`, `threadId`, `turnId`, 文本输入；`1.4+` 可加 `attachments` | 立即返回 `{ accepted: true, turnId }` |
 | `turn.cancel` | mutation | `requestId`, `threadId`, `turnId` | `{ cancelling: boolean }` |
 | `approval.respond` | `"1.0"` mutation | `requestId`, IDs, decision | `{ resolved: true }` |
-| `approval.preview` | `1.6` 可选只读 | `threadId`, `turnId`, `approvalId`, `offset?`, `maxChars?` | 分页脱敏变更快照 `{ text, totalChars, nextOffset }` |
+| `approval.preview` | `1.6+` 可选只读 | `threadId`, `turnId`, `approvalId`, `offset?`, `maxChars?` | 分页脱敏变更快照 `{ text, totalChars, nextOffset }` |
 | `operation.get` | 只读 | `threadId`, `operationId` | 脱敏 `OperationView`（`1.5+` 含 `appOutput` 描述符）或 `null` |
-| `operation.result.get` | `1.5–1.6` 只读 | `threadId`, `operationId` | `{ result: OperationResultView | null }` |
-| `attachment.stage` | `1.4–1.6` mutation | `requestId`, `threadId`, `fileName`, `mediaType`, `bytes`, `sha256`, `source`, `sourcePath?` | `{ attachmentId, state, descriptor? }` |
-| `attachment.chunk` | `1.4–1.6` mutation | `requestId`, `threadId`, `attachmentId`, `sequence`, `dataBase64` | `{ receivedBytes, nextSequence }` |
-| `attachment.commit` | `1.4–1.6` mutation | `requestId`, `threadId`, `attachmentId` | `{ descriptor }` |
-| `attachment.release` | `1.4–1.6` mutation | `requestId`, `threadId`, `attachmentId` | `{ released }` |
+| `operation.result.get` | `1.5+` 只读 | `threadId`, `operationId` | `{ result: OperationResultView | null }` |
+| `attachment.stage` | `1.4+` mutation | `requestId`, `threadId`, `fileName`, `mediaType`, `bytes`, `sha256`, `source`, `sourcePath?` | `{ attachmentId, state, descriptor? }` |
+| `attachment.chunk` | `1.4+` mutation | `requestId`, `threadId`, `attachmentId`, `sequence`, `dataBase64` | `{ receivedBytes, nextSequence }` |
+| `attachment.commit` | `1.4+` mutation | `requestId`, `threadId`, `attachmentId` | `{ descriptor }` |
+| `attachment.release` | `1.4+` mutation | `requestId`, `threadId`, `attachmentId` | `{ released }` |
 
 `thread.open` 会恢复并附着活动 Session，因此不是纯读取；它没有 `requestId`，不进入
 mutation 幂等缓存，也不应被客户端自动重试。`turn.start` 的输入在 `1.3` 及更早版本仅支持

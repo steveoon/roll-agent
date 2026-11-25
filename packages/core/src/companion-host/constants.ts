@@ -3,6 +3,48 @@ export const COMPANION_CONFIG_VERSION = 1 as const;
 const OFFICIAL_RELAY_HOST: string | null = "sponge-mcp.duliday.com";
 
 export const RELAY_HOST_OVERRIDE_ENV = "ROLL_COMPANION_RELAY_HOST";
+export const RELAY_PROTOCOL_VERSION_OVERRIDE_ENV = "ROLL_COMPANION_RELAY_PROTOCOL_VERSION";
+
+export const COMPANION_RELAY_PROTOCOL_VERSIONS = ["1.2", "1.3", "1.4"] as const;
+export type CompanionRelayProtocolVersion = (typeof COMPANION_RELAY_PROTOCOL_VERSIONS)[number];
+export const DEFAULT_COMPANION_RELAY_PROTOCOL_VERSION =
+  "1.2" as const satisfies CompanionRelayProtocolVersion;
+
+export function isCompanionRelayProtocolVersion(
+  value: string,
+): value is CompanionRelayProtocolVersion {
+  return value === "1.2" || value === "1.3" || value === "1.4";
+}
+
+export function parseCompanionRelayProtocolVersion(
+  value: string,
+  source = RELAY_PROTOCOL_VERSION_OVERRIDE_ENV,
+): CompanionRelayProtocolVersion {
+  const normalized = value.trim();
+  if (!isCompanionRelayProtocolVersion(normalized)) {
+    throw new Error(
+      `Invalid ${source} value "${value}"; expected one of ${COMPANION_RELAY_PROTOCOL_VERSIONS.join(", ")}`,
+    );
+  }
+  return normalized;
+}
+
+export function resolveCompanionRelayProtocolVersion(
+  options: {
+    readonly explicit?: CompanionRelayProtocolVersion;
+    readonly persisted?: CompanionRelayProtocolVersion;
+    readonly env?: NodeJS.ProcessEnv;
+  } = {},
+): CompanionRelayProtocolVersion {
+  if (options.explicit !== undefined) {
+    return options.explicit;
+  }
+  const envOverride = (options.env ?? process.env)[RELAY_PROTOCOL_VERSION_OVERRIDE_ENV]?.trim();
+  if (envOverride !== undefined && envOverride !== "") {
+    return parseCompanionRelayProtocolVersion(envOverride, RELAY_PROTOCOL_VERSION_OVERRIDE_ENV);
+  }
+  return options.persisted ?? DEFAULT_COMPANION_RELAY_PROTOCOL_VERSION;
+}
 
 export const OFFICIAL_RELAY_PROFILE = {
   id: "roll-cloud-v1",

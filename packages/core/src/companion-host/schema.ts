@@ -2,7 +2,13 @@ import { environmentDiagnosticsSchema } from "../config/environment-diagnostic-s
 import { z } from "zod/v4";
 import { isAbsolute } from "node:path";
 import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
-import { COMPANION_CONFIG_VERSION, COMPANION_CONTROL_PROTOCOL_VERSION } from "./constants.ts";
+import {
+  COMPANION_CONFIG_VERSION,
+  COMPANION_CONTROL_PROTOCOL_VERSION,
+  COMPANION_RELAY_PROTOCOL_VERSIONS,
+} from "./constants.ts";
+
+export const companionRelayProtocolVersionSchema = z.enum(COMPANION_RELAY_PROTOCOL_VERSIONS);
 
 export const credentialReferenceSchema = z
   .string()
@@ -19,6 +25,7 @@ export const companionConfigSchema = z
     cwd: z.string().min(1).refine(isAbsolute, "cwd must be absolute"),
     enabled: z.boolean(),
     credentialRef: credentialReferenceSchema,
+    relayProtocolVersion: companionRelayProtocolVersionSchema.optional(),
     remoteAppOutputs: z
       .array(z.object({ agentName: z.string().min(1), toolName: z.string().min(1) }).strict())
       .optional(),

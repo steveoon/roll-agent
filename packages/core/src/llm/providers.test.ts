@@ -17,7 +17,11 @@ import {
   thinkingProviderOptions,
   UnsupportedThinkingLevelError,
 } from "./providers.ts";
-import { apiSamplingThinkingLevel } from "./thinking-levels.ts";
+import {
+  apiSamplingThinkingLevel,
+  apiThinkingLevels,
+  runtimeThinkingLevels,
+} from "./thinking-levels.ts";
 import { inlineAcyclicLocalJsonSchemaReferences } from "../tool-runtime/json-schema-refs.ts";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
 
@@ -1949,6 +1953,98 @@ describe("apiSamplingThinkingLevel xAI boundary", () => {
           error.message.includes(`模型 ${model} 不支持关闭思考`) &&
           error.message.includes("runtime.compaction.thinking-level"),
       );
+    }
+  });
+});
+
+describe("OpenAI Pro reasoning effort intersections and pre-request rejection", () => {
+  it("intersects supported Pro efforts with Core-sendable levels and rejects disallowed tiers before HTTP", async () => {
+    for (const { models, allowed } of [
+      { models: ["gpt-5-pro", "gpt-5-pro-2025-10-06"], allowed: ["high"] },
+      {
+        models: [
+          "gpt-5.2-pro",
+          "gpt-5.4-pro",
+          "gpt-5.4-pro-2026-03-05",
+          "gpt-5.5-pro",
+          "gpt-5.5-pro-2026-06-01",
+        ],
+        allowed: ["medium", "high"],
+      },
+    ] as const) {
+      for (const model of models) {
+        assert.deepEqual(apiThinkingLevels("openai", model), allowed, model);
+        for (const level of runtimeThinkingLevels) {
+          const options = () => thinkingProviderOptions("openai", model, level);
+          if (allowed.some((candidate) => candidate === level)) {
+            assert.deepEqual(options(), { openai: { reasoningEffort: level } }, model);
+          } else {
+            assert.throws(options, UnsupportedThinkingLevelError, `${model}: ${level}`);
+          }
+        }
+      }
+    }
+
+    const originalFetch = globalThis.fetch;
+    const sentBodies: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const parsed: unknown = JSON.parse(bodyText);
+      assert.ok(isRecord(parsed));
+      sentBodies.push(parsed);
+      return new Response(
+        JSON.stringify({
+          id: "resp_pro_test",
+          object: "response",
+          created_at: 1,
+          model: parsed.model,
+          output: [
+            {
+              type: "message",
+              id: "msg_1",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ok", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      for (const purpose of ["chat", "structured-output"] as const) {
+        assert.throws(
+          () => resolveLLMCall("openai", "gpt-5-pro", "test-key", purpose, undefined, "low"),
+          UnsupportedThinkingLevelError,
+        );
+      }
+      assert.equal(sentBodies.length, 0, "disallowed OpenAI Pro efforts must make 0 HTTP calls");
+
+      for (const [model, allowed] of [
+        ["gpt-5-pro-2025-10-06", "high"],
+        ["gpt-5.4-pro-2026-03-05", "medium"],
+      ] as const) {
+        const call = resolveLLMCall(
+          "openai",
+          model,
+          "test-key",
+          "chat",
+          "https://api.openai.test/v1",
+          allowed,
+        );
+        await generateText({
+          model: call.model,
+          prompt: "ping",
+          ...(call.providerOptions ? { providerOptions: call.providerOptions } : {}),
+        });
+        const body = sentBodies.at(-1);
+        assert.ok(body && isRecord(body.reasoning));
+        assert.equal(body.reasoning.effort, allowed);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

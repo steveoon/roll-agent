@@ -2,7 +2,7 @@ import type { AgentSession, EngineModelSwitch } from "@roll-agent/runtime";
 import type { RollConfig } from "../../config/schema.ts";
 import { withChatGptFastMode } from "../../llm/chatgpt-fast-mode.ts";
 import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
-import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { resolveChatOrSamplingProviderOptions } from "../../llm/providers.ts";
 import {
   apiThinkingLevels,
   chatGptThinkingLevels,
@@ -90,7 +90,12 @@ export function createInteractiveChatModelControls(options: InteractiveChatModel
               chatGptThinkingOptions(level, getCurrentSubscriptionModel()),
               state.fastMode,
             )
-          : thinkingProviderOptions(state.provider, state.model, level);
+          : resolveChatOrSamplingProviderOptions(
+              state.provider,
+              state.model,
+              options.config.llm.providers[state.provider]?.baseUrl,
+              level,
+            );
       options.getSession().setProviderOptions(nextOptions);
       options.setSelection({ ...state.selection, providerOptions: nextOptions ?? {} });
       options.setThinkingLevel(level);

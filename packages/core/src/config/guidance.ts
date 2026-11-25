@@ -270,7 +270,8 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     title: "推理强度",
     purpose:
       "控制 Chat 与 MCP sampling 的推理强度；常规 API 使用 `off/low/medium/high`，Google `gemini-4-hydrogen` / `gemini-4-neon` 支持 `low/medium/high/xhigh`，`gemini-4-carbon` / `gemini-4-argon` 支持 `low/medium/high`（四者均不支持关闭），ChatGPT 订阅按模型能力额外开放 `xhigh/max`。",
-    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.thinkingLevel}\`；各 provider 分别映射原生 effort 或预算，不支持的模型档位会明确拒绝（独立 \`roll ask\` / \`roll run\` 若与会话模型不同且无法继承源会话合法档位，仅在独立 sampling 上提示并回退 \`medium\`）。`,
+    defaultBehavior:
+      "省略时通常使用 `medium`，仅支持高档的 `openai/gpt-5-pro` 使用 `high`。显式配置不支持的档位会报错。独立 `roll ask` / `roll run` 跨模型无法继承有效档位时，会提示并使用目标模型的默认档位。",
     example: `runtime:\n  thinking-level: ${DEFAULT_CONFIG.runtime.thinkingLevel}`,
   },
 

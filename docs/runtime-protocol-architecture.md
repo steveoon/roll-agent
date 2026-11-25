@@ -9,7 +9,7 @@
 Electron / Tauri / Qt / Python / IDE / Gateway
           │ Request / Notification / Response
           ▼
- Roll Runtime Protocol v1（最新 1.6）
+ Roll Runtime Protocol v1（最新 1.7）
           │ JSON-RPC + NDJSON + stdio
           ▼
  RuntimeProtocolAdapter（连接级协商）
@@ -54,10 +54,10 @@ Embedded Runtime SDK 仍可供 Roll 第一方组件或锁定内部版本的高�
 | 分帧 | 一行一个 JSON（NDJSON） | stdio Adapter 契约 |
 | Transport | stdio | v1 正式入口 |
 
-协议版本从 `"1.0"` 开始，当前最新版本为 `"1.6"`，与 npm 包版本独立演进。未来扩展新的
+协议版本从 `"1.0"` 开始，当前最新版本为 `"1.7"`，与 npm 包版本独立演进。未来扩展新的
 Transport 时，无需改变 Thread、Turn 或事件的核心领域语义。
 
-`RUNTIME_PROTOCOL_VERSION` 仅代表协议包内置的最新 wire schema 版本，并不意味着任意客户端天然具备该版本所需的入站处理能力。协议 `1.2–1.6` 保持 `initialize` 的严格入参结构不变，并在握手完成后通过
+`RUNTIME_PROTOCOL_VERSION` 仅代表协议包内置的最新 wire schema 版本，并不意味着任意客户端天然具备该版本所需的入站处理能力。协议 `1.2–1.7` 保持 `initialize` 的严格入参结构不变，并在握手完成后通过
 `client.capabilities.set` 显式声明当前客户端可处理的 Server Request 方法。`1.1` 与 `1.0` 客户端继续按原有契约逐级回退，严禁将 `1.2+` 的能力协商字段塞入旧版初始化握手中。
 
 ## Runtime → Client 双向 RPC
@@ -150,7 +150,7 @@ Local Companion（主动出站）
 
 | 包 | 负责 | 不负责 |
 |---|---|---|
-| `@roll-agent/relay-protocol` | Relay Wire（`1.3` / `1.2` / `1.1` / `1.0`）、Browser Control `1.0`、方向白名单、ID Schema、JSON Schema、fixtures 与 TypeScript 类型 | 网络传输、账号体系、数据库、业务策略与服务部署 |
+| `@roll-agent/relay-protocol` | Relay Wire（`1.4` / `1.3` / `1.2` / `1.1` / `1.0`）、Browser Control `1.0`、方向白名单、ID Schema、JSON Schema、fixtures 与 TypeScript 类型 | 网络传输、账号体系、数据库、业务策略与服务部署 |
 | `@roll-agent/relay-client` | Browser Session 握手、请求关联、Chat/Interaction 状态归约、ACK/缺口恢复、断线重连与 Snapshot 收敛 | 具体前端组件、第三方登录鉴权、Cloud Relay 管理接口与原始帧操作 API |
 | `@roll-agent/companion` | 消费 Relay 契约；提供本机桥接、Workspace 租约、本地审批与 `appOutput` 策略、ACK/缺口帧缓冲、幂等去重与主动出站重连 | 定义独立 Wire Schema、生产级 Cloud Relay 服务端或浏览器端业务状态机 |
 | `@roll-agent/core` 内部 Companion Host | `roll companion` 命令、系统级设备凭据存储、Workspace 绑定、Runtime 子进程守护、本机 IPC 与用户级后台服务 | 对外承诺稳定的第三方 Host SDK、Cloud Relay 服务端或第三方业务界面 |
@@ -166,13 +166,13 @@ Local Companion（主动出站）
 
 `@roll-agent/companion` 是底层桥接库，普通第三方无需用它自行拼装桌面守护进程。官方守护进程内置于 Core 并统一通过 `roll companion` 管理，当前不单独发布面向第三方的 `companion-host` SDK。安装任何 npm 包均不会自动完成设备绑定或启动后台服务；运行 `roll chat`、纯本地 Electron 客户端或 `roll runtime serve --stdio` 也不会发起任何 Relay 网络连接。
 
-`authentication.request` 与文件选择器（File Picker）没有远程投影器，始终保持仅限本地使用。Runtime `1.3–1.6` 的持久事件恢复仅重放既有安全事件投影，不会将此类本机敏感交互带入 Relay；未来若需支持远程调用，必须先通过专项安全架构评审。
+`authentication.request` 与文件选择器（File Picker）没有远程投影器，始终保持仅限本地使用。Runtime `1.3–1.7` 的持久事件恢复仅重放既有安全事件投影，不会将此类本机敏感交互带入 Relay；未来若需支持远程调用，必须先通过专项安全架构评审。
 
 Cloud Relay 与高级自定义传输层应直接使用 `@roll-agent/relay-protocol` 校验协议帧；普通 Web 前端只需依赖 `@roll-agent/relay-client`，不应为了校验帧结构而引入 `@roll-agent/companion`。
 
-Relay Wire `1.1–1.3` 提供通用的 `interaction.request` / `interaction.resolved` / `interaction.cancelled` 与 `interaction.candidate`：其中 Wire `1.2` 新增按需读取工具结构化输出的 `operation.result.get` 及 `appOutput` 描述符，Wire `1.3` 新增 Snapshot `contextRecovery` 与 `context.recovery.changed` 事件投影；冻结的 Wire `1.0` 仅保留旧版 Approval 专属路径。Runtime `1.3–1.6` 的 `eventCursor` 不会被映射为 Relay ACK，新增的本地 Runtime 方法也不会在未升级 Relay 版本的情况下自动对远端暴露。
+Relay Wire `1.1–1.4` 提供通用的 `interaction.request` / `interaction.resolved` / `interaction.cancelled` 与 `interaction.candidate`：其中 Wire `1.2` 新增按需读取工具结构化输出的 `operation.result.get` 及 `appOutput` 描述符，Wire `1.3` 新增 Snapshot `contextRecovery` 与 `context.recovery.changed` 事件投影，Wire `1.4` 新增受限的会话级推理强度查询与修改 `thread.effort.get` / `thread.effort.set`；冻结的 Wire `1.0` 仅保留旧版 Approval 专属路径。Runtime `1.3–1.7` 的 `eventCursor` 不会被映射为 Relay ACK，新增的本地 Runtime 方法也不会在未升级 Relay 版本的情况下自动对远端暴露。
 
-实时推送事件与主动拉取查询遵循同一套脱敏安全边界。在 Wire `1.1–1.3` 下，`thread.open` 与 `thread.snapshot` 必须按协商版本经过 `projectRelayThreadSnapshotV11()` / `projectRelayThreadSnapshotV12()` / `projectRelayThreadSnapshotV13()` 投影，`operation.get` 必须经过 `projectRelayOperationGetResultV11()` / `projectRelayOperationGetResultV12()` 投影；遇到畸形的 Runtime 返回值时投影器会立即抛错并按 fail-closed 拒绝。`CompanionRelayBridgeV11` 内置了上述按版本投影逻辑，并将各类内部异常统一收敛为稳定的错误码、`retryable` 标记与固定公开文案；高级自定义宿主在构造 `runtime.response` 前也必须执行同等投影，严禁将 Runtime 或本地策略的原始错误消息直接回传远端。冻结的 Wire `1.0` 不具备该远程脱敏保证，仅限处于同等本地信任边界内的旧版对端使用；面向 Cloud / Browser 接入时，若无法协商到 Wire `1.1` 及以上版本必须直接拒绝连接。
+实时推送事件与主动拉取查询遵循同一套脱敏安全边界。在 Wire `1.1–1.4` 下，`thread.open` 与 `thread.snapshot` 必须按协商版本经过 `projectRelayThreadSnapshotV11()` / `projectRelayThreadSnapshotV12()` / `projectRelayThreadSnapshotV13()` 投影，`operation.get` 必须经过 `projectRelayOperationGetResultV11()` / `projectRelayOperationGetResultV12()` 投影，`thread.effort.get` / `thread.effort.set` 必须经过 `projectRelayThreadEffortStatusV14()` 投影；遇到畸形的 Runtime 返回值时投影器会立即抛错并按 fail-closed 拒绝。`CompanionRelayBridgeV11` 内置了上述按版本投影逻辑，并将各类内部异常统一收敛为稳定的错误码、`retryable` 标记与固定公开文案；高级自定义宿主在构造 `runtime.response` 前也必须执行同等投影，严禁将 Runtime 或本地策略的原始错误消息直接回传远端。冻结的 Wire `1.0` 不具备该远程脱敏保证，仅限处于同等本地信任边界内的旧版对端使用；面向 Cloud / Browser 接入时，若无法协商到 Wire `1.1` 及以上版本必须直接拒绝连接。
 
 跨层接线必须严格区分以下关联、幂等与流控游标：
 
@@ -190,19 +190,19 @@ Relay Wire `1.1–1.3` 提供通用的 `interaction.request` / `interaction.reso
 `@roll-agent/companion` 当前提供的本机底层能力包括：
 
 - Browser 客户端租约与后台 Shell 租约由完成鉴权的宿主显式获取和释放；
-- 仅通过 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有运行租约；`CompanionInteractionBroker` 统一托管 Runtime `1.2–1.6` 的 Approval / User Input，并为 Runtime `"1.1"` Approval 提供兼容适配层，在返回结果、中止、超时或 Turn 终态时保证单次原子结算（已弃用的 `CompanionApprovalRequestBroker` 仅为旧版兼容保留）；
+- 仅通过 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有运行租约；`CompanionInteractionBroker` 统一托管 Runtime `1.2–1.7` 的 Approval / User Input，并为 Runtime `"1.1"` Approval 提供兼容适配层，在返回结果、中止、超时或 Turn 终态时保证单次原子结算（已弃用的 `CompanionApprovalRequestBroker` 仅为旧版兼容保留）；
 - 释放 Browser 租约不会关闭仍持有 Turn、后台 Shell 或未决 Interaction 租约的 Runtime；
 - 单 Workspace 帧缓冲上限默认为 `10,000` 条或 `32 MiB`，超出窗口时下发 `runtime.gap` 通知前端回退读取 Snapshot；
 - Relay 桥接器仅针对写操作的 `workspaceId + requestId` 维护有界响应缓存，并通过规范化 JSON 的 SHA-256 指纹校验参数一致性；执行中的请求不会被淘汰，已完成结果按 LRU 保留，只读查询不进入缓存以免驻留大体积 Snapshot；
 - ACK 仅允许推进至当前连接周期（generation）已实际发出的最高连续序号；每次重连均创建独立发送队列，旧连接中挂起的发送或加解密任务不会阻塞新连接握手与帧重投；
 - 参数完全一致的重复写操作直接复用缓存结果，相同 `requestId` 搭配不同方法或参数则返回冲突错误；本地 Runtime 自身的有界 `requestId` 与已完成 `turnId` 窗口构成第二道幂等防线；
-- Relay Wire `1.1–1.3` 的浏览器交互响应统一通过 `interaction.candidate` 提交；冻结的 Wire `"1.0"` 仅在受信本地兼容场景下保留旧版审批路径（Runtime `"1.1"` 走 `approval.candidate`，Runtime `"1.0"` 走 `approval.respond`）。提交候选成功仅返回 `{ accepted: true }`，权威终态仍由有序事件流给出。外层 Wire `"1.0"` 绝不能承载 Runtime `1.2–1.6` 的新增字段；
-- 远端提交的 `approve` 候选在落盘前仍需通过本地审批策略校验（返回 `require-local-confirmation` 时抛出 `LocalConfirmationRequiredError`，不会自动创建弹窗），而远端 `reject` 仅收窄权限可直接生效；Wire `1.2–1.3` 的 `operation.result.get` 还受 `CompanionWorkspace` 的 `remoteAppOutputPolicy` 动态门禁约束；
+- Relay Wire `1.1–1.4` 的浏览器交互响应统一通过 `interaction.candidate` 提交；冻结的 Wire `"1.0"` 仅在受信本地兼容场景下保留旧版审批路径（Runtime `"1.1"` 走 `approval.candidate`，Runtime `"1.0"` 走 `approval.respond`）。提交候选成功仅返回 `{ accepted: true }`，权威终态仍由有序事件流给出。外层 Wire `"1.0"` 绝不能承载 Runtime `1.2–1.7` 的新增字段；
+- 远端提交的 `approve` 候选在落盘前仍需通过本地审批策略校验（返回 `require-local-confirmation` 时抛出 `LocalConfirmationRequiredError`，不会自动创建弹窗），而远端 `reject` 仅收窄权限可直接生效；Wire `1.2–1.4` 的 `operation.result.get` 还受 `CompanionWorkspace` 的 `remoteAppOutputPolicy` 动态门禁约束；
 - 绑定了 payload cipher 的 Workspace 仅接受 `runtime.encrypted` 请求；明文请求在触达 Runtime 前即以 `RELAY_ENCRYPTION_REQUIRED`（`retryable: false`）拒绝，所有响应、事件与交互帧也一律封装为加密信封。
 
-Wire `1.1–1.3` 宿主还必须为每次连接注入 `requestPolicy`。桥接器会在查询幂等缓存与转发至 Runtime 之前对每条 `runtime.request` 执行该策略；被拒绝的请求统一返回固定错误码 `REMOTE_REQUEST_DENIED`。官方 `roll companion` 默认协商 Wire `"1.2"`（可选 `"1.3"`），仅放行已绑定 Workspace 的 `thread.list`、`thread.create`、`thread.open`、`thread.snapshot`、`thread.capabilities`、`turn.start`、`turn.cancel`、`operation.get`、`operation.result.get` 与 `interaction.candidate` 共 10 个方法。
+Wire `1.1–1.4` 宿主还必须为每次连接注入 `requestPolicy`。桥接器会在查询幂等缓存与转发至 Runtime 之前对每条 `runtime.request` 执行该策略；被拒绝的请求统一返回固定错误码 `REMOTE_REQUEST_DENIED`。官方 `roll companion` 默认协商 Wire `"1.2"`（可选 `"1.3"` 或 `"1.4"`），仅放行已绑定 Workspace 的 `thread.list`、`thread.create`、`thread.open`、`thread.snapshot`、`thread.capabilities`、`thread.effort.get`、`thread.effort.set`、`turn.start`、`turn.cancel`、`operation.get`、`operation.result.get` 与 `interaction.candidate` 共 12 个方法（其中 `thread.effort.*` 仅在协商 Wire `"1.4"` 时生效）。
 
-上述 Relay 帧缓冲、ACK 进度、幂等缓存与租约均为 Companion 进程内存态，并非持久化队列。Companion 进程重启后，宿主必须重新建立连接与租约；本地 Runtime 协商到 `1.3–1.6` 时可通过 durable event replay 恢复事件，否则通过 `thread.snapshot` 收敛界面。
+上述 Relay 帧缓冲、ACK 进度、幂等缓存与租约均为 Companion 进程内存态，并非持久化队列。Companion 进程重启后，宿主必须重新建立连接与租约；本地 Runtime 协商到 `1.3–1.7` 时可通过 durable event replay 恢复事件，否则通过 `thread.snapshot` 收敛界面。
 
 官方生产 Cloud Relay 已部署于 `sponge-mcp.duliday.com`；独立的 `roll-cloud-relay` 服务在协议包之外负责实现：
 

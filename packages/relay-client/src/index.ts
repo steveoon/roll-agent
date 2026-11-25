@@ -1,6 +1,8 @@
 export {
+  RELAY_ERROR_CODES_V14,
   RelayClientError,
   createRelayClient,
+  isThreadEffortToggleEnabled,
   type CreateRelayClientOptions,
   type RelayClient,
   type RelayOperationResult,
@@ -13,6 +15,8 @@ export {
   type RelaySessionProviderInput,
   type RelayThread,
   type RelayThreadCreateInput,
+  type RelayThreadEffortSetInput,
+  type RelayThreadEffortStatus,
   type RelayThreadId,
   type RelayThreadListInput,
   type RelayThreadListResult,
@@ -23,6 +27,9 @@ export {
   type RelayTurnId,
   type RelayTurnStartResult,
   type RelayUnsubscribe,
+  type ThreadEffortCapability,
+  type ThreadEffortLevel,
+  type ThreadEffortSelection,
 } from "./client.ts";
 export {
   RELAY_CLIENT_TRANSPORT_ERROR_CODES,

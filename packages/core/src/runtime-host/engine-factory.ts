@@ -7,6 +7,7 @@ import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-bindi
 import type { RollConfig } from "../config/schema.ts";
 import {
   providerAcceptsToolSchemaIssues,
+  resolveThreadEffortCapability,
   shouldRetainEmptyReasoningPart,
 } from "../llm/providers.ts";
 import { CoreAgentHost } from "./agent-host.ts";
@@ -98,19 +99,29 @@ export function createChatEngine(input: CreateChatEngineInput) {
 /** Only the multi-conversation protocol host needs independent MCP Sampling scopes. */
 export function createRuntimeChatEngine(input: CreateChatEngineInput) {
   const provider = input.config.runtime.provider ?? input.config.llm.defaultProvider;
-  const initial: PreparedThreadModel = withThreadModelReasoning({
-    provider,
-    modelName: input.config.runtime.model ?? input.config.llm.defaultModel,
-    model: input.model,
-    toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
-    ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
-    ...(input.structuredOutputProviderOptions
-      ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
-      : {}),
-    ...(input.structuredOutputReasoning
-      ? { structuredOutputReasoning: input.structuredOutputReasoning }
-      : {}),
-  });
+  const modelName = input.config.runtime.model ?? input.config.llm.defaultModel;
+  const initial: PreparedThreadModel = withThreadModelReasoning(
+    {
+      provider,
+      modelName,
+      model: input.model,
+      toolSchemaPolicy: (issues) => providerAcceptsToolSchemaIssues(provider, issues),
+      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+      ...(input.structuredOutputProviderOptions
+        ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+        : {}),
+      ...(input.structuredOutputReasoning
+        ? { structuredOutputReasoning: input.structuredOutputReasoning }
+        : {}),
+    },
+    {
+      effort: input.config.runtime.thinkingLevel,
+      effortCapability:
+        provider === "chatgpt"
+          ? { kind: "unknown" }
+          : resolveThreadEffortCapability(provider, modelName),
+    },
+  );
   return new input.runtime.ThreadModelEngine({
     initial,
     host: createThreadModelHost(input.config, initial),

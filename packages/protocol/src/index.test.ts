@@ -29,6 +29,7 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13,
+  SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V16,
   USER_INPUT_CHOICE_OPTION_MAX_COUNT,
   USER_INPUT_CONTROL_ID_MAX_CHARS,
   USER_INPUT_CONTROL_MAX_COUNT,
@@ -81,6 +82,7 @@ import {
   runtimeEventEnvelopeV11Schema,
   runtimeEventEnvelopeV13Schema,
   runtimeEventEnvelopeV16Schema,
+  runtimeEventEnvelopeV17Schema,
   runtimeEventCursorDistance,
   runtimeEventCursorSchema,
   runtimeEventIdSchema,
@@ -225,14 +227,32 @@ function userInputRequestParams(controls: UserInputForm["controls"]): UserInputR
   });
 }
 
-test("initialize advertises v1.6 first without changing the strict request shape", () => {
+test("initialize advertises v1.7 first without changing the strict request shape", () => {
   const input = {
     protocolVersions: [...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS],
     client: { name: "fixture-client", version: "1.0.0" },
   } as const;
   const parsed = initializeParamsSchema.parse(input);
-  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.6");
-  assert.deepEqual(parsed.protocolVersions, ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.7");
+  assert.deepEqual(parsed.protocolVersions, [
+    "1.7",
+    "1.6",
+    "1.5",
+    "1.4",
+    "1.3",
+    "1.2",
+    "1.1",
+    "1.0",
+  ]);
+  assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V16, [
+    "1.6",
+    "1.5",
+    "1.4",
+    "1.3",
+    "1.2",
+    "1.1",
+    "1.0",
+  ]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13, ["1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11, ["1.1", "1.0"]);
@@ -576,11 +596,15 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
       delta: "hello",
     },
   } as const;
-  const parsed = runtimeEventEnvelopeV16Schema.parse(input);
+  const parsed = runtimeEventEnvelopeV17Schema.parse(input);
   assert.equal(parsed.sequence, 7);
   assert.equal(parsed.event.type, "message.delta");
+  assert.equal(
+    runtimeEventEnvelopeV16Schema.parse({ ...input, protocolVersion: "1.6" }).sequence,
+    7,
+  );
   assert.throws(() =>
-    runtimeEventEnvelopeV16Schema.parse({
+    runtimeEventEnvelopeV17Schema.parse({
       ...input,
       durability: "durable",
       eventId: IDS.event,
@@ -596,7 +620,7 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
   );
 });
 
-test("local thinking subscription and ephemeral event are available only on 1.6", () => {
+test("local thinking subscription and ephemeral event are available only on 1.6+", () => {
   const envelope = {
     protocolVersion: "1.6",
     runtimeInstanceId: IDS.runtime,
@@ -607,8 +631,17 @@ test("local thinking subscription and ephemeral event are available only on 1.6"
     durability: "ephemeral",
     event: { type: "reasoning.text.delta", reasoningId: "r", delta: "thinking" },
   };
-  assert.equal(isRuntimeMethodAvailable("1.6", "reasoning.text.subscribe"), true);
-  assert.equal(runtimeEventEnvelopeSchema.safeParse(envelope).success, true);
+  for (const modernVersion of ["1.6", "1.7"] as const) {
+    assert.equal(isRuntimeMethodAvailable(modernVersion, "reasoning.text.subscribe"), true);
+    assert.equal(
+      runtimeEventEnvelopeSchema.safeParse({ ...envelope, protocolVersion: modernVersion }).success,
+      true,
+    );
+    assert.equal(
+      projectRuntimeEventEnvelopeForVersion(modernVersion, envelope).protocolVersion,
+      modernVersion,
+    );
+  }
   assert.equal(
     runtimeEventEnvelopeSchema.safeParse({
       ...envelope,
@@ -619,7 +652,7 @@ test("local thinking subscription and ephemeral event are available only on 1.6"
     false,
   );
   for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
-    (version) => version !== "1.6",
+    (version) => version !== "1.6" && version !== "1.7",
   )) {
     assert.equal(isRuntimeMethodAvailable(version, "reasoning.text.subscribe"), false);
     assert.equal(

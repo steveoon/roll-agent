@@ -4,6 +4,7 @@ import { runtimeConfigSchema } from "../config/schema.ts";
 import {
   apiThinkingLevels,
   chatGptThinkingLevels,
+  defaultApiThinkingLevel,
   normalizeGoogleModelId,
   requireApiThinkingLevel,
   requireLegacyThinkingLevel,
@@ -322,4 +323,78 @@ test("standalone API Sampling downgrades cross-model incompatible efforts to med
       item.name,
     );
   }
+});
+
+test("model ID normalization trims whitespace/newlines and matches OpenAI Pro case-insensitively", () => {
+  assert.equal(normalizeGoogleModelId("  gemini-4-neon\n"), "gemini-4-neon");
+  assert.deepEqual(apiThinkingLevels("google", " gemini-4-neon\n"), [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+  assert.deepEqual(apiThinkingLevels("openai", " GPT-5-PRO "), ["high"]);
+  assert.deepEqual(apiThinkingLevels("openai", "GPT-5.4-PRO-2026-03-05"), ["medium", "high"]);
+});
+
+test("defaultApiThinkingLevel and API Sampling fall back to a model-supported level for gpt-5-pro", () => {
+  assert.equal(defaultApiThinkingLevel("openai", "gpt-5-pro"), "high");
+  assert.equal(defaultApiThinkingLevel("openai", "gpt-5-pro-2025-10-06"), "high");
+  assert.equal(defaultApiThinkingLevel("openai", "gpt-5.4-pro"), "medium");
+  assert.equal(defaultApiThinkingLevel("google", "gemini-4-neon"), "medium");
+
+  assert.equal(
+    resolveLLMCall("openai", "gpt-5-pro", "fixture", "structured-output").reasoning,
+    "high",
+  );
+  assert.throws(
+    () =>
+      resolveLLMCall("openai", "gpt-5-pro", "fixture", "structured-output", undefined, "medium"),
+    UnsupportedThinkingLevelError,
+  );
+
+  for (const downgradeCase of [
+    {
+      name: "Google Neon xhigh -> OpenAI gpt-5-pro",
+      runtime: { provider: "google", model: "gemini-4-neon", thinkingLevel: "xhigh" as const },
+    },
+    {
+      name: "ChatGPT xhigh -> OpenAI gpt-5-pro",
+      runtime: { provider: "chatgpt", model: "gpt-sub", thinkingLevel: "xhigh" as const },
+    },
+    {
+      name: "ChatGPT off -> OpenAI gpt-5-pro",
+      runtime: { provider: "chatgpt", model: "gpt-sub", thinkingLevel: "off" as const },
+    },
+  ]) {
+    const warnings: string[] = [];
+    assert.equal(
+      apiSamplingThinkingLevel(
+        downgradeCase.runtime,
+        "openai",
+        (message) => warnings.push(message),
+        "gpt-5-pro",
+      ),
+      "high",
+      downgradeCase.name,
+    );
+    assert.equal(warnings.length, 1, downgradeCase.name);
+    assert.match(warnings[0] ?? "", /独立 API Sampling.*默认 high/, downgradeCase.name);
+  }
+
+  assert.equal(
+    apiSamplingThinkingLevel(
+      { provider: "openai", model: "gpt-5-pro", thinkingLevel: "high" },
+      "openai",
+      () => {
+        throw new Error("compatible gpt-5-pro high must not warn");
+      },
+      "gpt-5-pro",
+    ),
+    "high",
+  );
+  assert.throws(
+    () => apiSamplingThinkingLevel({ thinkingLevel: "medium" }, "openai", () => {}, "gpt-5-pro"),
+    UnsupportedThinkingLevelError,
+  );
 });

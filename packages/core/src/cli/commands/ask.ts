@@ -105,18 +105,37 @@ export default defineCommand({
       return;
     }
 
-    const { model, providerOptions: structuredOutputProviderOptions } = resolveLLMCall(
-      routerProvider,
-      routerModelName,
-      providerConfig.apiKey,
-      "structured-output",
-      providerConfig.baseUrl,
-    );
-
-    log.info(`分析意图: "${args.message}"`);
+    let routingCall;
+    let samplingCall;
     let decision;
     try {
-      decision = await routeWithLLM(args.message, agents, model, structuredOutputProviderOptions);
+      samplingCall = resolveLLMCall(
+        routerProvider,
+        config.llm.defaultModel,
+        providerConfig.apiKey,
+        "sampling",
+        providerConfig.baseUrl,
+        apiSamplingThinkingLevel(
+          config.runtime,
+          routerProvider,
+          (message) => log.warn(message),
+          config.llm.defaultModel,
+        ),
+      );
+      routingCall = resolveLLMCall(
+        routerProvider,
+        routerModelName,
+        providerConfig.apiKey,
+        "structured-output",
+        providerConfig.baseUrl,
+      );
+      log.info(`分析意图: "${args.message}"`);
+      decision = await routeWithLLM(
+        args.message,
+        agents,
+        routingCall.model,
+        routingCall.providerOptions,
+      );
     } catch (err) {
       const result: AskFailedResult = {
         status: "failed",
@@ -162,20 +181,6 @@ export default defineCommand({
       return;
     }
 
-    const samplingCall = resolveLLMCall(
-      routerProvider,
-      config.llm.defaultModel,
-      providerConfig.apiKey,
-      "sampling",
-      providerConfig.baseUrl,
-      apiSamplingThinkingLevel(
-        config.runtime,
-        routerProvider,
-        (message) => log.warn(message),
-        config.llm.defaultModel,
-      ),
-    );
-
     const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "ask");
     let failureStage: "connect" | "execute" = "connect";
     try {
@@ -209,8 +214,8 @@ export default defineCommand({
       const extractedInput = await extractToolInput(
         args.message,
         targetTool,
-        model,
-        structuredOutputProviderOptions,
+        routingCall.model,
+        routingCall.providerOptions,
       );
       const finalDecision = { ...decision, input: extractedInput };
 

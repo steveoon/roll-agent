@@ -759,3 +759,65 @@ test("/model at xhigh rejects unknown models immediately without opening effort 
     await harness.dispose();
   }
 });
+
+test("onThinkingChange preserves openai store:false when custom baseUrl is configured", () => {
+  const config = rollConfigSchema.parse({
+    ask: {},
+    agents: { dataDir: "/unused" },
+    llm: {
+      defaultProvider: "openai",
+      defaultModel: "gpt-5.4",
+      providers: {
+        openai: {
+          apiKey: "test-key",
+          baseUrl: "https://openai.example.test/v1",
+          models: ["gpt-5.4"],
+        },
+      },
+    },
+    runtime: {
+      thinkingLevel: "medium",
+    },
+  });
+  let appliedOptions: unknown;
+  let thinkingLevel: "off" | "low" | "medium" | "high" | "xhigh" | "max" = "medium";
+  let selection: EngineModelSwitch = {
+    provider: "openai",
+    modelName: "gpt-5.4",
+    model: new MockLanguageModelV4({ provider: "openai.responses", modelId: "gpt-5.4" }),
+    providerOptions: { openai: { reasoningEffort: "medium", store: false } },
+  };
+  const controls = createInteractiveChatModelControls({
+    config,
+    getSession: () => ({
+      setProviderOptions: (next) => {
+        appliedOptions = next;
+      },
+    }),
+    switchEngineModel: () => undefined,
+    getState: () => ({
+      provider: "openai",
+      model: "gpt-5.4",
+      thinkingLevel,
+      fastMode: false,
+      selection,
+      subscriptionModels: [],
+      subscriptionAccountId: undefined,
+    }),
+    setSelection: (next) => {
+      selection = next;
+    },
+    setThinkingLevel: (next) => {
+      thinkingLevel = next;
+    },
+    setModelIdentity: () => {},
+  });
+
+  controls.onThinkingChange("high");
+  assert.deepEqual(appliedOptions, { openai: { reasoningEffort: "high", store: false } });
+  assert.equal(thinkingLevel, "high");
+
+  controls.onThinkingChange("off");
+  assert.deepEqual(appliedOptions, { openai: { reasoningEffort: "none", store: false } });
+  assert.equal(thinkingLevel, "off");
+});

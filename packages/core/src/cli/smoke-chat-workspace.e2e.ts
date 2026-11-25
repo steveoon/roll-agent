@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { RollNodeClient } from "@roll-agent/client-node";
+import { RollNodeClient, type RuntimeServerRequestHandlers } from "@roll-agent/client-node";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -73,73 +73,8 @@ describe("chat workspace real execution", { concurrency: suiteConcurrency }, () 
       };
       f.save(configured);
       const initialBytes = readFileSync(f.configPath);
-      const agent = join(f.root, "sampling-agent");
-      mkdirSync(agent);
-      const require = createRequire(import.meta.url);
-      const moduleUrl = (name: string) => JSON.stringify(pathToFileURL(require.resolve(name)).href);
-      const entry = join(agent, "server.mjs");
-      writeFileSync(
-        entry,
-        `
-const {Server} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/index.js")});
-const {StdioServerTransport} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/stdio.js")});
-const {ListToolsRequestSchema,CallToolRequestSchema} = await import(${moduleUrl("@modelcontextprotocol/sdk/types.js")});
-const server=new Server({name:"sampling-fixture",version:"1"},{capabilities:{tools:{}}});
-server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:[{name:"sample",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}));
-server.setRequestHandler(CallToolRequestSchema,async()=>{
- const result=await server.createMessage({messages:[{role:"user",content:{type:"text",text:"SAMPLING_EVIDENCE"}}],maxTokens:64});
- return {content:[{type:"text",text:JSON.stringify(result)}]};
-});
-await server.connect(new StdioServerTransport());
-`,
-      );
-      const agents = join(f.source, "agents");
-      mkdirSync(agents, { recursive: true });
-      writeFileSync(
-        join(agents, "agents.json"),
-        JSON.stringify({
-          agents: [
-            {
-              skill: {
-                name: "sampling-fixture",
-                description: "Local sampling evidence",
-                metadata: {},
-              },
-              transport: { type: "stdio", command: process.execPath, args: [entry] },
-              runtime: { ownership: "on-demand" },
-              installPath: agent,
-              registeredAt: new Date(0).toISOString(),
-              status: "idle",
-              source: { type: "local-path", path: agent },
-            },
-          ],
-        }),
-      );
-      const connectRuntime = async () => {
-        const child = f.startNode(f.cli, [
-          "runtime",
-          "serve",
-          "--stdio",
-          "--config",
-          f.configPath,
-          "--config-workspace",
-          f.source,
-        ]);
-        const client = await RollNodeClient.connect({
-          transport: {
-            stdin: child.child.stdin,
-            stdout: child.child.stdout,
-            onExit: (listener) => {
-              child.child.once("exit", listener);
-            },
-            close: () => {
-              child.child.stdin.end();
-            },
-          },
-        });
-        return { child, client };
-      };
-      const { child, client } = await connectRuntime();
+      f.installSamplingAgent();
+      const { child, client } = await f.connectRuntime();
       const completed = new Set<string>();
       const off = client.onEvent((event) => {
         if (event.turnId && event.event.type === "turn.completed") completed.add(event.turnId);
@@ -263,7 +198,7 @@ await server.connect(new StdioServerTransport());
         off();
         await client.shutdown();
       }
-      const restarted = await connectRuntime();
+      const restarted = await f.connectRuntime();
       try {
         await restarted.client.request("thread.open", { threadId: a });
         const fresh = await restarted.client.getThreadModel({ threadId: a });
@@ -525,7 +460,87 @@ globalThis.fetch = (input, options) => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(root, { recursive: true, force: true });
     });
+    function installSamplingAgent() {
+      const agent = join(root, "sampling-agent");
+      mkdirSync(agent);
+      const require = createRequire(import.meta.url);
+      const moduleUrl = (name: string) => JSON.stringify(pathToFileURL(require.resolve(name)).href);
+      const entry = join(agent, "server.mjs");
+      writeFileSync(
+        entry,
+        `
+const {Server} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/index.js")});
+const {StdioServerTransport} = await import(${moduleUrl("@modelcontextprotocol/sdk/server/stdio.js")});
+const {ListToolsRequestSchema,CallToolRequestSchema} = await import(${moduleUrl("@modelcontextprotocol/sdk/types.js")});
+const server=new Server({name:"sampling-fixture",version:"1"},{capabilities:{tools:{}}});
+server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:[{name:"sample",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}));
+server.setRequestHandler(CallToolRequestSchema,async()=>{
+ const result=await server.createMessage({messages:[{role:"user",content:{type:"text",text:"SAMPLING_EVIDENCE"}}],maxTokens:64});
+ return {content:[{type:"text",text:JSON.stringify(result)}]};
+});
+await server.connect(new StdioServerTransport());
+`,
+      );
+      const agents = join(source, "agents");
+      mkdirSync(agents, { recursive: true });
+      writeFileSync(
+        join(agents, "agents.json"),
+        JSON.stringify({
+          agents: [
+            {
+              skill: {
+                name: "sampling-fixture",
+                description: "Local sampling evidence",
+                metadata: {},
+              },
+              transport: { type: "stdio", command: process.execPath, args: [entry] },
+              runtime: { ownership: "on-demand" },
+              installPath: agent,
+              registeredAt: new Date(0).toISOString(),
+              status: "idle",
+              source: { type: "local-path", path: agent },
+            },
+          ],
+        }),
+      );
+    }
+
+    async function connectRuntime(serverRequestHandlers: RuntimeServerRequestHandlers = {}) {
+      const child = startNode(cli, [
+        "runtime",
+        "serve",
+        "--stdio",
+        "--config",
+        configPath,
+        "--config-workspace",
+        source,
+      ]);
+      try {
+        const client = await RollNodeClient.connect({
+          transport: {
+            stdin: child.child.stdin,
+            stdout: child.child.stdout,
+            onExit: (listener) => {
+              child.child.once("exit", listener);
+            },
+            close: () => {
+              child.child.stdin.end();
+            },
+          },
+          serverRequestHandlers,
+        });
+        return { child, client };
+      } catch (cause) {
+        throw new Error(
+          `Runtime connection failed: ${String(cause)}\nstderr:\n${child.output.stderr}`,
+          { cause },
+        );
+      }
+    }
+
     return {
+      installSamplingAgent,
+      connectRuntime,
       root,
       source,
       a,
@@ -1139,6 +1154,565 @@ process.stdin.once('data', () => { claim.release(); store.close(); process.stdin
         client.close();
       }
       assert.equal((await waitForSpawnedRollExit(child, "legacy server reload")).code, 0);
+    },
+  );
+
+  test(
+    "real stdio per-thread effort covers busy tool/Sampling isolation, compaction & budget preservation, Google thinkingConfig, toggle reasoning subscription and invalid-pending protection",
+    { timeout: 120_000 },
+    async (t) => {
+      const f = await fixture(t);
+      const googleBody = z.object({
+        generationConfig: z.object({ thinkingConfig: z.unknown() }),
+        contents: z.array(z.unknown()),
+        tools: z
+          .array(
+            z.object({
+              functionDeclarations: z.array(z.object({ name: z.string() })).optional(),
+            }),
+          )
+          .optional(),
+      });
+      const deepseekBody = z.object({
+        model: z.string(),
+        thinking: z.looseObject({ type: z.string() }),
+      });
+      const googleRequests: Array<{
+        stream: boolean;
+        thinkingConfig: unknown;
+        hasFunctionResponse: boolean;
+      }> = [];
+      const deepseekThinking: Array<z.infer<typeof deepseekBody>["thinking"]> = [];
+      const providerFailures: string[] = [];
+
+      const multiProviderServer = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          try {
+            const urlPath = req.url ?? "";
+            const rawBody: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            if (urlPath.startsWith("/google/")) {
+              const { contents, generationConfig, tools } = googleBody.parse(rawBody);
+              const stream = urlPath.includes(":streamGenerateContent");
+              const lastEntryText = JSON.stringify(contents.at(-1) ?? {});
+              const hasFunctionResponse = lastEntryText.includes('"functionResponse"');
+              googleRequests.push({
+                stream,
+                thinkingConfig: generationConfig.thinkingConfig,
+                hasFunctionResponse,
+              });
+
+              if (!stream) {
+                const isSampling = JSON.stringify(contents).includes("SAMPLING_EVIDENCE");
+                const payload = {
+                  candidates: [
+                    {
+                      content: {
+                        role: "model",
+                        parts: [
+                          { text: isSampling ? "sampled-google-ok" : "compacted-summary-ok" },
+                        ],
+                      },
+                      finishReason: "STOP",
+                    },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 32,
+                    candidatesTokenCount: 8,
+                    totalTokenCount: 40,
+                  },
+                };
+                res.writeHead(200, { "content-type": "application/json" });
+                res.end(JSON.stringify(payload));
+                return;
+              }
+
+              const sampleFnName = tools
+                ?.flatMap((group) => group.functionDeclarations ?? [])
+                .find((decl) => decl.name.endsWith("sample"))?.name;
+              const shouldCallSample =
+                lastEntryText.includes("CALL_SAMPLING") &&
+                !hasFunctionResponse &&
+                sampleFnName !== undefined;
+              const highTokenCalibration = lastEntryText.includes("CALIBRATE_BUDGET");
+              const largeHistory = lastEntryText.includes("LARGE_HISTORY");
+              const replyText = largeHistory
+                ? `large-reply ${"archive-padding-chunk ".repeat(400)}`
+                : highTokenCalibration
+                  ? `calibrated-reply ${"archive-padding ".repeat(80)}`
+                  : `google-reply-${String(googleRequests.length)}`;
+              const payload = {
+                candidates: [
+                  {
+                    content: {
+                      role: "model",
+                      parts: shouldCallSample
+                        ? [{ functionCall: { name: sampleFnName, args: {} } }]
+                        : [{ text: replyText }],
+                    },
+                    finishReason: "STOP",
+                  },
+                ],
+                usageMetadata:
+                  highTokenCalibration || largeHistory
+                    ? {
+                        promptTokenCount: 14_500,
+                        candidatesTokenCount: 200,
+                        totalTokenCount: 14_700,
+                      }
+                    : {
+                        promptTokenCount: 8_000,
+                        candidatesTokenCount: 40,
+                        totalTokenCount: 8_040,
+                      },
+              };
+              res.writeHead(200, { "content-type": "text/event-stream" });
+              res.end(`data: ${JSON.stringify(payload)}\n\n`);
+              return;
+            }
+
+            if (urlPath.startsWith("/deepseek/")) {
+              const { model, thinking } = deepseekBody.parse(rawBody);
+              deepseekThinking.push(thinking);
+              const enabled = thinking.type === "enabled";
+              const baseChunk = {
+                id: "ds-1",
+                object: "chat.completion.chunk",
+                created: 1,
+                model,
+              };
+              const sseFrames = [
+                ...(enabled
+                  ? [
+                      {
+                        ...baseChunk,
+                        choices: [
+                          {
+                            index: 0,
+                            delta: { reasoning_content: "DEEPSEEK_TOGGLE_REASONING" },
+                            finish_reason: null,
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
+                {
+                  ...baseChunk,
+                  choices: [
+                    { index: 0, delta: { content: "deepseek-reply" }, finish_reason: null },
+                  ],
+                },
+                {
+                  ...baseChunk,
+                  choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                },
+              ];
+              res.writeHead(200, { "content-type": "text/event-stream" });
+              res.end(
+                sseFrames.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                  "data: [DONE]\n\n",
+              );
+              return;
+            }
+
+            throw new Error(`Unexpected path: ${urlPath}`);
+          } catch (error) {
+            providerFailures.push(String(error));
+            res.writeHead(500);
+            res.end("multi-provider fixture error");
+          }
+        });
+      });
+      multiProviderServer.listen(0, "127.0.0.1");
+      await once(multiProviderServer, "listening");
+      t.after(() => {
+        multiProviderServer.close();
+      });
+      const srvAddr = multiProviderServer.address();
+      assert.ok(srvAddr && typeof srvAddr !== "string");
+
+      f.installSamplingAgent();
+
+      const makeConfig = (overrides: {
+        readonly thinkingLevel: "medium" | "xhigh";
+        readonly compactionThinkingLevel?: "low" | "medium";
+      }) => ({
+        llm: {
+          defaultProvider: "google",
+          defaultModel: "gemini-4-neon",
+          providers: {
+            google: {
+              apiKey: "fixture-google",
+              baseUrl: `http://127.0.0.1:${String(srvAddr.port)}/google/v1beta`,
+              models: ["gemini-4-neon", "gemini-4-carbon"],
+            },
+            deepseek: {
+              apiKey: "fixture-deepseek",
+              baseUrl: `http://127.0.0.1:${String(srvAddr.port)}/deepseek`,
+              models: ["deepseek-v4-flash"],
+            },
+          },
+        },
+        ask: {},
+        agents: { dataDir: "./agents" },
+        runtime: {
+          threadsDir: "./history",
+          thinkingLevel: overrides.thinkingLevel,
+          contextWindow: 20_000,
+          compaction: {
+            enabled: true,
+            strategy: "summarize",
+            maxOutputTokens: 2_048,
+            threshold: 0.6,
+            keepRecentTurns: 1,
+            keepRecentTokens: 10,
+            ...(overrides.compactionThinkingLevel === undefined
+              ? {}
+              : { thinkingLevel: overrides.compactionThinkingLevel }),
+          },
+          shell: { enabled: false },
+          approval: {
+            default: "auto",
+            overrides: { "sampling-fixture.sample": "confirm" },
+          },
+        },
+        scheduler: { dataDir: "./ledger" },
+        chat: { instructions: "off", screenMode: "inline" },
+      });
+
+      f.save(makeConfig({ thinkingLevel: "medium" }));
+      const initialConfigBytes = readFileSync(f.configPath);
+      let approvalEntered = false;
+      const releaseApproval = Promise.withResolvers<void>();
+      const { child, client } = await f.connectRuntime({
+        "approval.request": async () => {
+          approvalEntered = true;
+          await releaseApproval.promise;
+          return { decision: "approve" };
+        },
+      });
+      const completedTurns = new Set<string>();
+      const reasoningTextDeltas: string[] = [];
+      const offEvents = client.onEvent((event) => {
+        if (event.turnId && event.event.type === "turn.completed") {
+          completedTurns.add(event.turnId);
+        }
+        if (event.event.type === "reasoning.text.delta") {
+          reasoningTextDeltas.push(event.event.delta);
+        }
+      });
+
+      const startTurn = async (cli: RollNodeClient, threadId: string, text: string) => {
+        const turnId = randomUUID();
+        await cli.request("turn.start", {
+          requestId: randomUUID(),
+          threadId,
+          turnId,
+          input: { text },
+        });
+        return turnId;
+      };
+
+      const runTurn = async (
+        proc: SpawnedRollProcess,
+        cli: RollNodeClient,
+        threadId: string,
+        text: string,
+      ) => {
+        const turnId = await startTurn(cli, threadId, text);
+        await f.wait(proc, () => completedTurns.has(turnId), `turn ${text}`);
+      };
+
+      try {
+        assert.equal(client.getInitializationResult().protocolVersion, "1.7");
+        const catalog = await client.listModels();
+        assert.ok("defaultEffort" in catalog);
+        assert.equal(catalog.defaultEffort, "medium");
+
+        const a = (await client.request("thread.create", { requestId: randomUUID(), title: "A" }))
+          .thread.id;
+        const b = (await client.request("thread.create", { requestId: randomUUID(), title: "B" }))
+          .thread.id;
+
+        const db = new DatabaseSync(join(f.history, "threads.db"));
+        const threadModels = db.prepare("SELECT id, model FROM threads ORDER BY id");
+        const beforeRows = threadModels.all();
+
+        // Pause Thread A inside tool approval wait, then switch effort to high.
+        const turn1 = await startTurn(client, a, "CALL_SAMPLING_A_TURN1");
+        await f.wait(
+          child,
+          () => {
+            assert.ok(
+              approvalEntered || !completedTurns.has(turn1),
+              "turn completed before approval",
+            );
+            return approvalEntered;
+          },
+          "approval for the first Sampling turn",
+        );
+        const statusABefore = await client.getThreadModel({ threadId: a });
+        assert.ok("effort" in statusABefore && "target" in statusABefore);
+        const setHighPending = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: a,
+          expectedRevision: statusABefore.revision,
+          configRevision: statusABefore.configRevision,
+          effort: { mode: "explicit", level: "high" },
+        });
+        assert.ok("effort" in setHighPending && "target" in setHighPending);
+        assert.equal(setHighPending.status, "pending");
+        assert.equal(setHighPending.active?.effort, "medium");
+        assert.equal(setHighPending.target.effectiveEffort, "high");
+
+        // Reject incompatible explicit value while keeping the accepted pending state & revision.
+        await assert.rejects(
+          client.setThreadModel({
+            requestId: randomUUID(),
+            threadId: a,
+            expectedRevision: setHighPending.revision,
+            configRevision: setHighPending.configRevision,
+            effort: { mode: "explicit", level: "off" },
+          }),
+        );
+        assert.deepEqual(await client.getThreadModel({ threadId: a }), setHighPending);
+
+        const reqOffsetBeforeResume = googleRequests.length;
+        releaseApproval.resolve();
+        await f.wait(child, () => completedTurns.has(turn1), "first Sampling turn");
+
+        // In-flight MCP Sampling and tool continuation must still use medium!
+        const inFlightTurn1Requests = googleRequests.slice(reqOffsetBeforeResume);
+        assert.equal(inFlightTurn1Requests.length, 2, "expected Sampling + tool continuation");
+        assert.equal(inFlightTurn1Requests[0]?.stream, false);
+        assert.deepEqual(inFlightTurn1Requests[0]?.thinkingConfig, {
+          thinkingLevel: "medium",
+          includeThoughts: true,
+        });
+        assert.equal(inFlightTurn1Requests[1]?.stream, true);
+        assert.equal(inFlightTurn1Requests[1]?.hasFunctionResponse, true);
+        assert.deepEqual(inFlightTurn1Requests[1]?.thinkingConfig, {
+          thinkingLevel: "medium",
+          includeThoughts: true,
+        });
+
+        for (let i = 0; i < 100; i += 1) {
+          const current = await client.getThreadModel({ threadId: a });
+          if (current.status === "applied") break;
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        }
+        const settledHigh = await client.getThreadModel({ threadId: a });
+        assert.ok("target" in settledHigh);
+        assert.equal(settledHigh.status, "applied");
+        assert.equal(settledHigh.active?.effort, "high");
+
+        // The next turn uses high only on A, for chat, Sampling and continuation.
+        for (const [threadId, text, thinkingLevel] of [
+          [a, "CALL_SAMPLING_A_TURN2", "high"],
+          [b, "CALL_SAMPLING_B_TURN1", "medium"],
+        ] as const) {
+          const before = googleRequests.length;
+          await runTurn(child, client, threadId, text);
+          const requests = googleRequests.slice(before);
+          assert.deepEqual(
+            requests.map((r) => r.stream),
+            [true, false, true],
+          );
+          for (const req of requests) {
+            assert.deepEqual(req.thinkingConfig, { thinkingLevel, includeThoughts: true });
+          }
+        }
+
+        // Database and config file have zero preference writes (only message timestamps/counts).
+        assert.deepEqual(readFileSync(f.configPath), initialConfigBytes);
+        assert.deepEqual(threadModels.all(), beforeRows);
+        db.close();
+
+        // Omitted compaction config:
+        // 1) Calibrate token budget on Thread C under medium, switch effort to xhigh (without full model reset),
+        //    switch back to default medium, and prove RequestBudgetTracker calibration survived and triggers compaction!
+        // 2) Switch Thread C to xhigh with large history and prove compaction still uses initialized medium while chat uses xhigh!
+        const c = (await client.request("thread.create", { requestId: randomUUID(), title: "C" }))
+          .thread.id;
+        await runTurn(child, client, c, "CALIBRATE_BUDGET_1");
+        await runTurn(child, client, c, "CALIBRATE_BUDGET_2");
+        const statusC = await client.getThreadModel({ threadId: c });
+        const statusCXhigh = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: c,
+          expectedRevision: statusC.revision,
+          configRevision: statusC.configRevision,
+          effort: { mode: "explicit", level: "xhigh" },
+        });
+        assert.ok("effort" in statusCXhigh);
+        assert.equal(statusCXhigh.active?.effort, "xhigh");
+        const resetDefault = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: c,
+          expectedRevision: statusCXhigh.revision,
+          configRevision: statusCXhigh.configRevision,
+          effort: { mode: "default" },
+        });
+        assert.ok("target" in resetDefault);
+        assert.equal(resetDefault.active?.effort, "medium");
+
+        const beforeCalibratedCompact = googleRequests.length;
+        await runTurn(child, client, c, "TINY_AFTER_CALIBRATION");
+        const calibratedCompactReqs = googleRequests.slice(beforeCalibratedCompact);
+        assert.ok(
+          calibratedCompactReqs.some((r) => !r.stream),
+          "calibrated RequestBudgetTracker measurement must survive effort switches and trigger compaction",
+        );
+
+        const c2 = (await client.request("thread.create", { requestId: randomUUID(), title: "C2" }))
+          .thread.id;
+        const statusC2 = await client.getThreadModel({ threadId: c2 });
+        await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: c2,
+          expectedRevision: statusC2.revision,
+          configRevision: statusC2.configRevision,
+          effort: { mode: "explicit", level: "xhigh" },
+        });
+        const beforeCompactOmitted = googleRequests.length;
+        await runTurn(child, client, c2, "LARGE_HISTORY_1");
+        await runTurn(child, client, c2, "LARGE_HISTORY_2");
+        await runTurn(child, client, c2, "TRIGGER_OMITTED_COMPACT");
+        const omittedCompactReqs = googleRequests.slice(beforeCompactOmitted);
+        const omittedSummaryReq = omittedCompactReqs.find((r) => !r.stream);
+        const omittedChatReq = omittedCompactReqs.filter((r) => r.stream).at(-1);
+        assert.ok(omittedSummaryReq, "expected compaction request on xhigh thread");
+        assert.deepEqual(omittedSummaryReq.thinkingConfig, { thinkingLevel: "medium" });
+        assert.deepEqual(omittedChatReq?.thinkingConfig, {
+          thinkingLevel: "xhigh",
+          includeThoughts: true,
+        });
+
+        // Switch away to Carbon (low) and switch back to startup model Neon with xhigh!
+        const toCarbon = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: a,
+          expectedRevision: (await client.getThreadModel({ threadId: a })).revision,
+          configRevision: catalog.configRevision,
+          selection: { mode: "explicit", provider: "google", model: "gemini-4-carbon" },
+          effort: { mode: "explicit", level: "low" },
+        });
+        assert.ok("effort" in toCarbon);
+        assert.equal(toCarbon.active?.model, "gemini-4-carbon");
+        assert.equal(toCarbon.active?.effort, "low");
+
+        const backToStartupWithXhigh = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: a,
+          expectedRevision: toCarbon.revision,
+          configRevision: catalog.configRevision,
+          selection: { mode: "explicit", provider: "google", model: "gemini-4-neon" },
+          effort: { mode: "explicit", level: "xhigh" },
+        });
+        assert.ok("effort" in backToStartupWithXhigh);
+        assert.equal(backToStartupWithXhigh.active?.model, "gemini-4-neon");
+        assert.equal(backToStartupWithXhigh.active?.effort, "xhigh");
+        const beforeBackTurn = googleRequests.length;
+        await runTurn(child, client, a, "STARTUP_MODEL_XHIGH");
+        assert.deepEqual(googleRequests[beforeBackTurn]?.thinkingConfig, {
+          thinkingLevel: "xhigh",
+          includeThoughts: true,
+        });
+
+        // Toggle model (DeepSeek): off -> reasoning null, then medium -> reasoning "text" + subscribe.
+        const toToggleOff = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: a,
+          expectedRevision: backToStartupWithXhigh.revision,
+          configRevision: catalog.configRevision,
+          selection: { mode: "explicit", provider: "deepseek", model: "deepseek-v4-flash" },
+          effort: { mode: "explicit", level: "off" },
+        });
+        assert.equal(toToggleOff.active?.reasoning, null);
+        await runTurn(child, client, a, "DEEPSEEK_OFF");
+        assert.deepEqual(deepseekThinking.at(-1), { type: "disabled" });
+
+        const toToggleOn = await client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: a,
+          expectedRevision: toToggleOff.revision,
+          configRevision: catalog.configRevision,
+          effort: { mode: "explicit", level: "medium" },
+        });
+        assert.equal(toToggleOn.active?.reasoning, "text");
+        const sub = await client.request("reasoning.text.subscribe", {});
+        assert.equal(sub.subscribed, true);
+        await runTurn(child, client, a, "DEEPSEEK_ON");
+        assert.deepEqual(deepseekThinking.at(-1), { type: "enabled" });
+        assert.ok(reasoningTextDeltas.includes("DEEPSEEK_TOGGLE_REASONING"));
+
+        // Detach discards session effort override; reopen restores default.
+        await client.request("thread.detach", { requestId: randomUUID(), threadId: a });
+        await assert.rejects(
+          client.setThreadModel({
+            requestId: randomUUID(),
+            threadId: a,
+            expectedRevision: toToggleOn.revision,
+            configRevision: catalog.configRevision,
+            effort: { mode: "default" },
+          }),
+          /尚未打开|关闭/u,
+        );
+        await client.request("thread.open", { threadId: a });
+        const reopened = await client.getThreadModel({ threadId: a });
+        assert.ok("effort" in reopened);
+        assert.deepEqual(reopened.selection, { mode: "default" });
+        assert.deepEqual(reopened.effort, { mode: "default" });
+        assert.equal(reopened.active?.model, "gemini-4-neon");
+        assert.equal(reopened.active?.effort, "medium");
+      } finally {
+        releaseApproval.resolve();
+        offEvents();
+        await client.shutdown();
+      }
+
+      // Phase 2: Explicit compaction.thinkingLevel = "low" & global thinkingLevel = "xhigh"
+      f.save(makeConfig({ thinkingLevel: "xhigh", compactionThinkingLevel: "low" }));
+      const phase2 = await f.connectRuntime();
+      const offPhase2 = phase2.client.onEvent((event) => {
+        if (event.turnId && event.event.type === "turn.completed") {
+          completedTurns.add(event.turnId);
+        }
+      });
+      try {
+        const d = (
+          await phase2.client.request("thread.create", { requestId: randomUUID(), title: "D" })
+        ).thread.id;
+
+        const current = await phase2.client.getThreadModel({ threadId: d });
+        await phase2.client.setThreadModel({
+          requestId: randomUUID(),
+          threadId: d,
+          expectedRevision: current.revision,
+          configRevision: current.configRevision,
+          effort: { mode: "explicit", level: "high" },
+        });
+
+        const beforeExplicitCompact = googleRequests.length;
+        await runTurn(phase2.child, phase2.client, d, "LARGE_HISTORY_P2_1");
+        await runTurn(phase2.child, phase2.client, d, "LARGE_HISTORY_P2_2");
+        await runTurn(phase2.child, phase2.client, d, "TINY_EXPLICIT_COMPACT");
+        const explicitReqs = googleRequests.slice(beforeExplicitCompact);
+        const explicitSummaryReq = explicitReqs.find((r) => !r.stream);
+        const explicitChatReq = explicitReqs.filter((r) => r.stream).at(-1);
+        assert.ok(explicitSummaryReq, "expected compaction request with explicit low");
+        assert.deepEqual(explicitSummaryReq.thinkingConfig, { thinkingLevel: "low" });
+        assert.deepEqual(explicitChatReq?.thinkingConfig, {
+          thinkingLevel: "high",
+          includeThoughts: true,
+        });
+      } finally {
+        offPhase2();
+        await phase2.client.shutdown();
+      }
+
+      assert.deepEqual(providerFailures, []);
     },
   );
 });

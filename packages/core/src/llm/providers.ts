@@ -10,6 +10,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { wrapLanguageModel } from "ai";
+import type { ThreadEffortCapability } from "@roll-agent/protocol";
 import { projectAnthropicStrictToolSchema } from "./anthropic-tool-schema.ts";
 import {
   omitForeignEmptyAssistantTextParts,
@@ -17,13 +18,19 @@ import {
 } from "./foreign-empty-text.ts";
 import { applyOpenAiResponsesToolStrictDefaults } from "./openai-tool-strict.ts";
 import {
+  apiThinkingLevels,
   assertXaiChatThinkingSupported,
+  defaultApiThinkingLevel,
+  isValidIsoCalendarDateSuffix,
   normalizeGoogleModelId,
   requireApiThinkingLevel,
   requireGoogleRequiredThinkingLevel,
   requireLegacyThinkingLevel,
+  requireOpenAiProThinkingLevel,
   requiresGoogleThinking,
   requiresXaiChatThinking,
+  resolveOpenAiProThinkingLevels,
+  supportsGoogleXhighThinking,
   UnsupportedThinkingLevelError,
   type ApiThinkingLevel,
   type ThinkingLevel,
@@ -50,8 +57,17 @@ const GEMINI_PRE_3_MODEL_PATTERN = /^gemini-(?:[12](?:[.-]|$)|pro(?:-vision)?$)/
 const GEMINI_FLASH_VERSION_PATTERN = /^gemini-(\d+)\.(\d+)-flash(?:$|-(?!lite(?:-|$)))/;
 
 function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
+  if (resolveOpenAiProThinkingLevels(modelName) !== undefined) {
+    return false;
+  }
   const gpt = GPT_MODEL_ID.exec(modelName);
-  return gpt !== null && (Number(gpt[1]) > 5 || (Number(gpt[1]) === 5 && Number(gpt[2]) >= 1));
+  if (gpt === null) {
+    return false;
+  }
+  if (gpt[3] !== undefined && /(?:^|-)pro(?:-|$)/u.test(gpt[3])) {
+    return false;
+  }
+  return Number(gpt[1]) > 5 || (Number(gpt[1]) === 5 && Number(gpt[2]) >= 1);
 }
 
 export function isOpenAIReasoningModel(modelName: string): boolean {
@@ -146,6 +162,13 @@ export function thinkingProviderOptions(
   if (providerName === "google") {
     return { google: { thinkingConfig: googleThinkingConfig(modelName, requestedLevel) } };
   }
+  if (providerName === "openai") {
+    const proLevels = resolveOpenAiProThinkingLevels(modelName);
+    if (proLevels !== undefined) {
+      const proLevel = requireOpenAiProThinkingLevel(requestedLevel, modelName, proLevels);
+      return { openai: { reasoningEffort: proLevel } };
+    }
+  }
   const level = requireLegacyThinkingLevel(requestedLevel, providerName);
   if (providerName === "openai") {
     if (level === "off") {
@@ -183,6 +206,233 @@ export function thinkingProviderOptions(
     return { deepseek: { thinking: { type: level === "off" ? "disabled" : "enabled" } } };
   }
   return undefined;
+}
+
+const OPENAI_KNOWN_STANDARD_REASONING_PATTERN =
+  /^(?:o(?:1|3|4)(?:-(?:mini|pro|preview))?|gpt-(?:5(?:\.\d+)?|6(?:\.\d+)?)(?:-(?:mini|nano|codex|preview))?)(?:-(\d{4})-(\d{2})-(\d{2}))?$/u;
+const OPENAI_KNOWN_NON_REASONING_PATTERN =
+  /^gpt-(?:3\.5-turbo|4(?:\.\d+|o|-turbo)?|5-chat)(?:-(?:mini|nano|preview|latest))?(?:-(\d{4})-(\d{2})-(\d{2}))?$/u;
+
+function isKnownOpenAiStandardReasoningModel(modelName: string): boolean {
+  const match = OPENAI_KNOWN_STANDARD_REASONING_PATTERN.exec(modelName);
+  return match !== null && isValidIsoCalendarDateSuffix(match[1], match[2], match[3]);
+}
+
+function isKnownOpenAiNonReasoningModel(modelName: string): boolean {
+  const match = OPENAI_KNOWN_NON_REASONING_PATTERN.exec(modelName);
+  return match !== null && isValidIsoCalendarDateSuffix(match[1], match[2], match[3]);
+}
+const ANTHROPIC_THINKING_MODEL_PATTERN =
+  /^claude-(?:3-7-sonnet|(?:sonnet|opus|haiku|fable|mythos)-[4-9](?:-\d+)?)(?:-(?:latest|\d{8}))?$/u;
+const ANTHROPIC_LEGACY_NON_THINKING_PATTERN =
+  /^claude-(?:2(?:\.\d+)?|3-(?:5-)?(?:opus|sonnet|haiku))(?:-(?:latest|\d{8}))?$/u;
+const QWEN_THINKING_MODEL_PATTERN =
+  /^qwen(?:3(?:\.\d+)?-(?:plus|max|turbo|flash|coder(?:-plus|-flash)?|vl-(?:plus|max))|-(?:plus|max|turbo|flash))(?:-(?:latest|\d{4}-\d{2}-\d{2}))?$/iu;
+const DEEPSEEK_TOGGLE_MODEL_PATTERN =
+  /^deepseek-(?:chat|reasoner|flash|r1|v3(?:\.\d+)?|v4(?:\.\d+)?)(?:-(?:flash|lite|chat|reasoner|preview|latest|\d{4,8}))*$/iu;
+const GEMINI_25_PRO_CAPABILITY_PATTERN = /^gemini-2\.5-pro(?:-|$)/u;
+const GEMINI_25_FLASH_CAPABILITY_PATTERN = /^gemini-2\.5-flash(?:-|$)/u;
+const GEMINI_3_KNOWN_CAPABILITY_PATTERN =
+  /^gemini-(?:3(?:\.\d+)?-(?:pro|flash)(?:-|$)|(?:pro|flash)-latest$)/u;
+const GEMINI_FIXED_NON_THINKING_PATTERN =
+  /^gemini-(?:1(?:\.\d+)?|2\.0)-(?:pro|flash|ultra|nano)(?:-|$)/u;
+const XAI_KNOWN_FIXED_NON_REASONING_PATTERN =
+  /^grok-(?:3|4(?:\.\d+)?)-[a-z0-9.-]*non-reasoning(?:-|$)/u;
+const XAI_KNOWN_MULTI_AGENT_PATTERN = /^grok-4(?:\.\d+)?-[a-z0-9.-]*multi-agent(?:-|$)/u;
+const XAI_KNOWN_TOGGLEABLE_REASONING_PATTERN =
+  /^(?:grok-3-mini(?:-(?:fast|beta))?|grok-4(?:\.3|-(?:fast-)?reasoning)?)(?:-\d{4})?$/u;
+
+/**
+ * Resolves the public per-thread effort capability for an API provider/model pair.
+ * Only positively matched model families with verified multi-level or toggle semantics
+ * are advertised; fixed-reasoning models return `fixed` and unrecognized custom IDs return `unknown`.
+ */
+export function resolveThreadEffortCapability(
+  providerName: string,
+  modelName: string,
+): ThreadEffortCapability {
+  const trimmed = modelName.trim();
+  if (trimmed.length === 0) {
+    return { kind: "unknown" };
+  }
+  if (providerName === "google") {
+    const normalized = normalizeGoogleModelId(trimmed);
+    if (supportsGoogleXhighThinking(trimmed)) {
+      return { kind: "levels", levels: ["low", "medium", "high", "xhigh"] };
+    }
+    if (requiresGoogleThinking(trimmed) || GEMINI_25_PRO_CAPABILITY_PATTERN.test(normalized)) {
+      return { kind: "levels", levels: ["low", "medium", "high"] };
+    }
+    if (
+      GEMINI_25_FLASH_CAPABILITY_PATTERN.test(normalized) ||
+      GEMINI_3_KNOWN_CAPABILITY_PATTERN.test(normalized)
+    ) {
+      return { kind: "levels", levels: ["off", "low", "medium", "high"] };
+    }
+    if (GEMINI_FIXED_NON_THINKING_PATTERN.test(normalized)) {
+      return { kind: "fixed" };
+    }
+    return { kind: "unknown" };
+  }
+  if (providerName === "deepseek") {
+    if (DEEPSEEK_TOGGLE_MODEL_PATTERN.test(trimmed)) {
+      return { kind: "toggle", offLevel: "off", onLevel: "medium" };
+    }
+    return { kind: "unknown" };
+  }
+  if (providerName === "xai") {
+    if (
+      trimmed === "grok-3" ||
+      trimmed === "grok-4-1" ||
+      XAI_KNOWN_FIXED_NON_REASONING_PATTERN.test(trimmed) ||
+      (trimmed.startsWith("grok-4.20") &&
+        (trimmed === "grok-4.20" || trimmed.startsWith("grok-4.20-")) &&
+        !XAI_KNOWN_MULTI_AGENT_PATTERN.test(trimmed))
+    ) {
+      return { kind: "fixed" };
+    }
+    if (requiresXaiChatThinking(trimmed) || XAI_KNOWN_MULTI_AGENT_PATTERN.test(trimmed)) {
+      return { kind: "levels", levels: ["low", "medium", "high"] };
+    }
+    if (XAI_KNOWN_TOGGLEABLE_REASONING_PATTERN.test(trimmed)) {
+      return { kind: "levels", levels: ["off", "low", "medium", "high"] };
+    }
+    return { kind: "unknown" };
+  }
+  if (providerName === "openai") {
+    const proLevels = resolveOpenAiProThinkingLevels(trimmed);
+    if (proLevels !== undefined) {
+      return proLevels.length >= 2 ? { kind: "levels", levels: [...proLevels] } : { kind: "fixed" };
+    }
+    if (isKnownOpenAiStandardReasoningModel(trimmed) && isOpenAIReasoningModel(trimmed)) {
+      return supportsOpenAINoneReasoningEffort(trimmed)
+        ? { kind: "levels", levels: ["off", "low", "medium", "high"] }
+        : { kind: "levels", levels: ["low", "medium", "high"] };
+    }
+    if (isKnownOpenAiNonReasoningModel(trimmed)) {
+      return { kind: "fixed" };
+    }
+    return { kind: "unknown" };
+  }
+  if (providerName === "anthropic") {
+    if (ANTHROPIC_THINKING_MODEL_PATTERN.test(trimmed)) {
+      return { kind: "levels", levels: ["off", "low", "medium", "high"] };
+    }
+    if (ANTHROPIC_LEGACY_NON_THINKING_PATTERN.test(trimmed)) {
+      return { kind: "fixed" };
+    }
+    return { kind: "unknown" };
+  }
+  if (providerName === "qwen") {
+    if (QWEN_THINKING_MODEL_PATTERN.test(trimmed)) {
+      return { kind: "levels", levels: ["off", "low", "medium", "high"] };
+    }
+    return { kind: "unknown" };
+  }
+  return { kind: "unknown" };
+}
+
+/** A fixed model may ignore effort entirely or require a single concrete wire value. */
+export function resolveFixedThreadEffort(
+  capability: ThreadEffortCapability,
+  providerName: string,
+  modelName: string,
+): ThinkingLevel | undefined {
+  if (capability.kind !== "fixed") return undefined;
+  const levels = apiThinkingLevels(providerName, modelName);
+  return levels.length === 1 ? levels[0] : undefined;
+}
+
+/**
+ * Resolves the effective effort when a thread selects `{ mode: "default" }`.
+ * Fixed-effort and unknown models cannot accept user-chosen explicit tiers, so an
+ * incompatible global default (such as Gemini 4 `xhigh` or `off` on always-reasoning
+ * `grok-4.20`) falls back to `"medium"` instead of making those models unreachable.
+ */
+export function resolveDefaultThreadEffort(
+  capability: ThreadEffortCapability,
+  providerName: string,
+  modelName: string,
+  configuredDefault: ThinkingLevel,
+  baseURL?: string,
+): ThinkingLevel {
+  if (capability.kind === "fixed") {
+    const single = resolveFixedThreadEffort(capability, providerName, modelName);
+    if (single !== undefined) {
+      return single;
+    }
+    try {
+      resolveChatOrSamplingProviderOptions(providerName, modelName, baseURL, configuredDefault);
+      validateStructuredOutputThinkingLevel(providerName, modelName, configuredDefault);
+      return configuredDefault;
+    } catch {
+      return "medium";
+    }
+  }
+  if (capability.kind === "unknown") {
+    try {
+      resolveChatOrSamplingProviderOptions(providerName, modelName, baseURL, configuredDefault);
+      return configuredDefault;
+    } catch {
+      return "medium";
+    }
+  }
+  return configuredDefault;
+}
+
+export function isExplicitThreadEffortSupported(
+  capability: ThreadEffortCapability,
+  providerName: string,
+  modelName: string,
+  level: ThinkingLevel,
+): boolean {
+  if (capability.kind === "fixed") {
+    return level === resolveFixedThreadEffort(capability, providerName, modelName);
+  }
+  if (capability.kind === "unknown") return false;
+  if (capability.kind === "levels") {
+    return capability.levels.includes(level);
+  }
+  try {
+    thinkingProviderOptions(providerName, modelName, level);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function validateStructuredOutputThinkingLevel(
+  providerName: string,
+  modelName: string,
+  requestedLevel: ThinkingLevel,
+): UnifiedReasoning | undefined {
+  const thinkingLevel = requireApiThinkingLevel(requestedLevel, providerName, modelName);
+  if (providerName === "qwen") {
+    return undefined;
+  }
+  return resolveStructuredOutputReasoning(providerName, modelName, thinkingLevel);
+}
+
+export function resolveChatOrSamplingProviderOptions(
+  providerName: string,
+  modelName: string,
+  baseURL: string | undefined,
+  requestedLevel: ThinkingLevel,
+): SharedV4ProviderOptions | undefined {
+  const thinkingLevel = requireApiThinkingLevel(requestedLevel, providerName, modelName);
+  const providerOptions = thinkingProviderOptions(providerName, modelName, thinkingLevel);
+  if (providerName === "openai" && baseURL) {
+    return {
+      ...(providerOptions ?? {}),
+      openai: {
+        ...(providerOptions?.openai ?? {}),
+        // OpenAI-compatible endpoints do not always persist Responses output items.
+        // Replay full history instead of sending item_reference IDs on later turns.
+        store: false,
+      },
+    };
+  }
+  return providerOptions;
 }
 
 /** Provider 工厂接收的配置 */
@@ -430,9 +680,13 @@ export function resolveLLMCall(
   apiKey: string,
   purpose: LLMCallPurpose,
   baseURL?: string,
-  requestedLevel: ThinkingLevel = "medium",
+  requestedLevel?: ThinkingLevel,
 ): ResolvedLLMCall {
-  const thinkingLevel = requireApiThinkingLevel(requestedLevel, providerName, modelName);
+  const thinkingLevel = requireApiThinkingLevel(
+    requestedLevel ?? defaultApiThinkingLevel(providerName, modelName),
+    providerName,
+    modelName,
+  );
   const model = createProviderModel(providerName, modelName, apiKey, baseURL);
 
   if (purpose === "structured-output") {
@@ -447,21 +701,12 @@ export function resolveLLMCall(
   }
 
   if (purpose === "chat" || purpose === "sampling") {
-    const providerOptions = thinkingProviderOptions(providerName, modelName, thinkingLevel);
-    if (providerName === "openai" && baseURL) {
-      return {
-        model,
-        providerOptions: {
-          ...(providerOptions ?? {}),
-          openai: {
-            ...(providerOptions?.openai ?? {}),
-            // OpenAI-compatible endpoints do not always persist Responses output items.
-            // Replay full history instead of sending item_reference IDs on later turns.
-            store: false,
-          },
-        },
-      };
-    }
+    const providerOptions = resolveChatOrSamplingProviderOptions(
+      providerName,
+      modelName,
+      baseURL,
+      thinkingLevel,
+    );
     return providerOptions ? { model, providerOptions } : { model };
   }
 

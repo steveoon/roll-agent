@@ -8,10 +8,12 @@ import { format } from "prettier";
 import {
   LATEST_RELAY_PROTOCOL_VERSION,
   RELAY_ERROR_RETRYABILITY,
+  RELAY_ERROR_RETRYABILITY_V14,
   RELAY_MESSAGE_TYPE_VALUES,
   RELAY_MESSAGE_TYPE_VALUES_V11,
   RELAY_MUTATION_REQUEST_METHODS,
   RELAY_MUTATION_REQUEST_METHODS_V11,
+  RELAY_MUTATION_REQUEST_METHODS_V14,
   RELAY_PROTOCOL_VERSION,
   RELAY_REQUEST_METHOD_DISPOSITIONS,
   RELAY_REQUEST_METHOD_DISPOSITIONS_V11,
@@ -21,10 +23,14 @@ import {
   relayMessageSchemaV11,
   relayMessageSchemaV12,
   relayMessageSchemaV13,
+  relayMessageSchemaV14,
+  relayRequestMethodSchemasV14,
   relayRequestMethodSchemasV13,
   relayRequestMethodSchemasV12,
   RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
+  RELAY_REQUEST_METHOD_DISPOSITIONS_V14,
   RELAY_REQUEST_METHOD_VALUES_V12,
+  RELAY_REQUEST_METHOD_VALUES_V14,
   relayRequestMethodSchemas,
   relayRequestMethodSchemasV11,
 } from "../dist/index.js";
@@ -51,6 +57,7 @@ import {
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const frozenSchemaHashes = {
+  1.4: "26704cf844e7694cc1a5d71da0099440c91048242ccbdce40c85be878945603f",
   1.3: "2819ab0961b094b72295bd801a3c5fc01d4e68637afbeb2d5d1096aa2e540b6d",
   1.2: "7ddb7bff0066b0bfb87e1f25fcaac26f24a45f926a25c6c98bd5f7b58ff30f33",
   "1.0": "0e393e2278d141e620fbdd69da8ed7b805311ba0cccaaf4ff495175bd2edf2c1",
@@ -195,6 +202,84 @@ protocolConfigs.at(-1).frameCases.push(
   },
 );
 
+protocolConfigs.push({
+  ...protocolConfigs.at(-1),
+  protocolVersion: "1.4",
+  schemaFileName: "roll-relay-protocol-v1.4.schema.json",
+  fixturesVersion: "v1.4",
+  messageSchema: relayMessageSchemaV14,
+  requestMethodSchemas: relayRequestMethodSchemasV14,
+  requestMethodDispositions: RELAY_REQUEST_METHOD_DISPOSITIONS_V14,
+  requestMethods: RELAY_REQUEST_METHOD_VALUES_V14,
+  mutationMethods: RELAY_MUTATION_REQUEST_METHODS_V14,
+  errorRetryability: RELAY_ERROR_RETRYABILITY_V14,
+  frameCases: [
+    ...protocolConfigs
+      .at(-1)
+      .frameCases.map((entry) =>
+        entry.frame.type === "device.connect" && entry.valid
+          ? { ...entry, frame: { ...entry.frame, protocolVersion: "1.4" } }
+          : entry,
+      ),
+    {
+      id: "thread-effort-get",
+      fixtureName: "valid-thread-effort-get.json",
+      valid: true,
+      frame: {
+        type: "runtime.request",
+        requestId: "00000000-0000-4000-8000-000000000521",
+        workspaceId: "00000000-0000-4000-8000-000000000507",
+        method: "thread.effort.get",
+        params: {
+          threadId: "00000000-0000-4000-8000-000000000502",
+        },
+      },
+    },
+    {
+      id: "thread-effort-set",
+      fixtureName: "valid-thread-effort-set.json",
+      valid: true,
+      frame: {
+        type: "runtime.request",
+        requestId: "00000000-0000-4000-8000-000000000522",
+        workspaceId: "00000000-0000-4000-8000-000000000507",
+        method: "thread.effort.set",
+        params: {
+          requestId: "00000000-0000-4000-8000-000000000523",
+          threadId: "00000000-0000-4000-8000-000000000502",
+          expectedRevision: "00000000-0000-4000-8000-000000000526",
+          configRevision: "cfg-rev-1",
+          effort: { mode: "explicit", level: "high" },
+        },
+      },
+    },
+    {
+      id: "models-list-not-exposed",
+      fixtureName: "invalid-models-list-not-exposed.json",
+      valid: false,
+      frame: {
+        type: "runtime.request",
+        requestId: "00000000-0000-4000-8000-000000000524",
+        workspaceId: "00000000-0000-4000-8000-000000000507",
+        method: "runtime.models.list",
+        params: {},
+      },
+    },
+    {
+      id: "thread-model-set-not-exposed",
+      fixtureName: "invalid-thread-model-set-not-exposed.json",
+      valid: false,
+      frame: {
+        type: "runtime.request",
+        requestId: "00000000-0000-4000-8000-000000000525",
+        workspaceId: "00000000-0000-4000-8000-000000000507",
+        method: "thread.model.set",
+        params: {},
+      },
+    },
+  ],
+});
+
 async function formatJson(value) {
   return format(JSON.stringify(value, null, 2), { parser: "json" });
 }
@@ -303,7 +388,7 @@ function generateSchema(config) {
     "x-roll-request-methods": config.requestMethods,
     "x-roll-request-method-dispositions": config.requestMethodDispositions,
     "x-roll-mutation-methods": config.mutationMethods,
-    "x-roll-relay-error-retryability": RELAY_ERROR_RETRYABILITY,
+    "x-roll-relay-error-retryability": config.errorRetryability ?? RELAY_ERROR_RETRYABILITY,
     "x-roll-request-method-schemas": methodSchemas,
   };
 }
@@ -440,7 +525,7 @@ async function writeOrVerifyFixtures(config, validate, ajv) {
   }
 }
 
-if (RELAY_PROTOCOL_VERSION !== "1.0" || LATEST_RELAY_PROTOCOL_VERSION !== "1.3") {
+if (RELAY_PROTOCOL_VERSION !== "1.0" || LATEST_RELAY_PROTOCOL_VERSION !== "1.4") {
   throw new Error(
     "Schema generator version registry must be reviewed for a Relay Wire version change",
   );

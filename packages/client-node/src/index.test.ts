@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
+import initV16 from "@roll-agent/protocol/fixtures/v1.6/valid-initialize-response.json" with { type: "json" };
 import clientNodePackage from "../package.json" with { type: "json" };
 import {
   RUNTIME_EVENT_NOTIFICATION,
@@ -611,7 +612,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(legacyInitialize && "method" in legacyInitialize && "id" in legacyInitialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, legacyInitialize.params).protocolVersions,
-    ["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
+    ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
   );
   assert.equal(legacyClient.getInitializationResult().protocolVersion, "1.0");
 
@@ -645,7 +646,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(v11Initialize && "method" in v11Initialize && "id" in v11Initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, v11Initialize.params).protocolVersions,
-    ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
+    ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(v11Client.getInitializationResult().protocolVersion, "1.1");
   assert.equal(
@@ -702,7 +703,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, fallbackInitialize.params)
       .protocolVersions,
-    ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
+    ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(fallbackClient.getInitializationResult().protocolVersion, "1.0");
   assert.equal(
@@ -759,7 +760,7 @@ test("RollNodeClient waits for an empty Protocol 1.2 capability ACK before conne
   assert.ok(initialize && "method" in initialize && "id" in initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, initialize.params).protocolVersions,
-    ["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
+    ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
   );
   await flushMessages();
   assert.equal(settled, false);
@@ -1958,7 +1959,7 @@ test("RollNodeClient rejects a Runtime-selected protocol version it did not adve
     }
     assert.deepEqual(
       parseRuntimeMethodParams(RUNTIME_METHODS.initialize, request.params).protocolVersions,
-      ["1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
+      ["1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.0"],
     );
     writeJson(transport.stdout, {
       jsonrpc: "2.0",
@@ -2795,4 +2796,63 @@ test("failed process creation preserves ENOENT without starting an initialize re
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("a 1.6 connection rejects effort mutations before writing and still sends model selections", async (t) => {
+  const transport = new ControlledTransport();
+  const status = {
+    threadId: IDS.thread,
+    revision: IDS.request,
+    configRevision: "cfg-1",
+    selection: { mode: "default" },
+    status: "applied",
+    active: { provider: "google", model: "gemini-4-neon", reasoning: "summary" },
+  };
+  transport.stdin.onFrame = (request) => {
+    if (!("id" in request && "method" in request)) return;
+    let result: unknown;
+    switch (request.method) {
+      case "initialize":
+        assert.equal(selectProtocolVersion(request, ["1.6"]), "1.6");
+        result = initV16.result;
+        break;
+      case "client.capabilities.set":
+        result = projectClientCapabilitiesSetResult(request.params);
+        break;
+      case "thread.model.get":
+      case "thread.model.set":
+        result = status;
+        break;
+      default:
+        assert.fail(`Unexpected method ${request.method}`);
+    }
+    queueMicrotask(() => writeJson(transport.stdout, { jsonrpc: "2.0", id: request.id, result }));
+  };
+  const client = await RollNodeClient.connect({ transport });
+  t.after(() => transport.exit(0, null));
+  assert.deepEqual(await client.getThreadModel({ threadId: IDS.thread }), status);
+
+  const base = {
+    requestId: IDS.request,
+    threadId: IDS.thread,
+    expectedRevision: status.revision,
+    configRevision: status.configRevision,
+  };
+  const count = transport.stdin.frames.length;
+  for (const mutation of [
+    { effort: { mode: "explicit", level: "high" } },
+    { selection: { mode: "default" }, effort: { mode: "default" } },
+  ] as const) {
+    await assert.rejects(
+      client.setThreadModel({ ...base, ...mutation }),
+      /Protocol 1\.6 does not support per-thread effort/u,
+    );
+  }
+  assert.equal(transport.stdin.frames.length, count);
+
+  const selection = { ...base, selection: { mode: "default" } as const };
+  assert.deepEqual(await client.setThreadModel(selection), status);
+  const frame = transport.stdin.frames.at(-1);
+  assert.ok(frame && "method" in frame && frame.method === "thread.model.set");
+  assert.deepEqual(frame.params, selection);
 });

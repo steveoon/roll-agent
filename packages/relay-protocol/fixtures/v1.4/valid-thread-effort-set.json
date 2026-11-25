@@ -1,0 +1,16 @@
+{
+  "type": "runtime.request",
+  "requestId": "00000000-0000-4000-8000-000000000522",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "method": "thread.effort.set",
+  "params": {
+    "requestId": "00000000-0000-4000-8000-000000000523",
+    "threadId": "00000000-0000-4000-8000-000000000502",
+    "expectedRevision": "00000000-0000-4000-8000-000000000526",
+    "configRevision": "cfg-rev-1",
+    "effort": {
+      "mode": "explicit",
+      "level": "high"
+    }
+  }
+}

@@ -15,8 +15,21 @@ export type {
 export { buildScheduleToolset, SCHEDULE_CREATE_TOOL_ID } from "./tool-bridge/schedule-tool.ts";
 export { scheduleCreateInputSchema } from "./tool-bridge/schedule-create-input.ts";
 export type { EngineModelSwitch } from "./engine/conversation-engine.ts";
-export { ThreadModelEngine, ThreadModelError } from "./engine/thread-model-engine.ts";
-export type { ThreadModelHost, PreparedThreadModel } from "./engine/thread-model-engine.ts";
+export {
+  ThreadModelEngine,
+  ThreadModelError,
+  isEffortAwareModelCatalog,
+} from "./engine/thread-model-engine.ts";
+export type {
+  ThreadModelHost,
+  ThreadModelHostCatalog,
+  ThreadModelEngineStatus,
+  PreparedThreadModel,
+  PreparedThreadEffort,
+  ThreadModelValidationInput,
+  ValidatedThreadModelTarget,
+  ThreadModelErrorReason,
+} from "./engine/thread-model-engine.ts";
 export type {
   AgentBootstrapIssue,
   ConversationEngineOptions,

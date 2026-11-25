@@ -1,8 +1,8 @@
 # `@roll-agent/client-node`
 
 面向 Node.js、Electron 主进程和本地 Companion 的 Roll Runtime Protocol v1 客户端。
-客户端优先协商 `"1.6"`，并在 `client.capabilities.set` ACK 完成后才结束连接；连接旧版 Runtime 时
-可按服务端支持情况逐级回落至 `"1.5"` / `"1.4"` / `"1.3"` / `"1.2"` / `"1.1"` / `"1.0"`。
+客户端优先协商 `"1.7"`，并在 `client.capabilities.set` ACK 完成后才结束连接；连接旧版 Runtime 时
+可按服务端支持情况逐级回落至 `"1.6"` / `"1.5"` / `"1.4"` / `"1.3"` / `"1.2"` / `"1.1"` / `"1.0"`。
 
 它负责启动或连接 Runtime、初始化协商、JSON-RPC 请求、流式事件、协议校验、未知 Turn
 结果跟踪，以及可等待的有界子进程关闭。Renderer 不应直接持有该客户端或子进程句柄。
@@ -74,7 +74,7 @@ try {
 ## Runtime→Client Request
 
 - `"1.4"` / `"1.3"` / `"1.2"` 没有强制 Handler；使用默认帧预算时，即使没有 Handler 也会广告
-  `["1.6", "1.5", "1.4","1.3","1.2","1.0"]`，并以 revision 1 ACK 空能力集合；只有 `userInput.request` 时
+  `["1.7", "1.6", "1.5", "1.4","1.3","1.2","1.0"]`，并以 revision 1 ACK 空能力集合；只有 `userInput.request` 时
   仍保持该集合，存在 `approval.request` 时才同时广告要求该 Handler 的 1.1；
 - 显式把 `maxFrameBytes` 设为低于 `17 MiB` 时不会广告 `"1.4"` 与 `"1.3"`，因为该预算无法保证接收
   最大 durable event frame；`"1.2"` / `"1.1"` / `"1.0"` 的回落规则保持不变；

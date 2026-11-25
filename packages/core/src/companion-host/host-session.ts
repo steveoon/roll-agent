@@ -25,7 +25,11 @@ import {
 import { RUNTIME_PROTOCOL_VERSION } from "@roll-agent/protocol";
 import type { CompanionConfig } from "./schema.ts";
 import type { BundledRollInvocation } from "./invocation.ts";
-import { resolveRelayEndpoint } from "./constants.ts";
+import {
+  resolveCompanionRelayProtocolVersion,
+  resolveRelayEndpoint,
+  type CompanionRelayProtocolVersion,
+} from "./constants.ts";
 import {
   createOfficialRelayResponderContext,
   createOfficialRelayResponderPolicy,
@@ -59,19 +63,19 @@ export interface CompanionSessionFactory {
 
 export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
   private readonly invocation: BundledRollInvocation;
-  private readonly relayProtocolVersion: "1.2" | "1.3";
+  private readonly relayProtocolVersionOverride: CompanionRelayProtocolVersion | undefined;
   private readonly configStore: FileCompanionConfigStore;
   private readonly createWebSocket: CompanionWebSocketFactory;
 
   constructor(options: {
     readonly invocation: BundledRollInvocation;
-    /** Enable 1.3 only with a matching Relay deployment. Defaults to frozen Wire 1.2. */
-    readonly relayProtocolVersion?: "1.2" | "1.3";
+    /** Enable 1.3 or 1.4 with a matching Relay deployment; otherwise resolves env/config or defaults to Wire 1.2. */
+    readonly relayProtocolVersion?: CompanionRelayProtocolVersion;
     readonly configPath?: string;
     readonly createWebSocket?: CompanionWebSocketFactory;
   }) {
     this.invocation = options.invocation;
-    this.relayProtocolVersion = options.relayProtocolVersion ?? "1.2";
+    this.relayProtocolVersionOverride = options.relayProtocolVersion;
     this.configStore = new FileCompanionConfigStore(
       options.configPath ?? createCompanionPaths().configPath,
     );
@@ -79,6 +83,15 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
   }
 
   async create(config: CompanionConfig, credential: string): Promise<ManagedCompanionSession> {
+    const relayProtocolVersion = resolveCompanionRelayProtocolVersion({
+      ...(this.relayProtocolVersionOverride === undefined
+        ? {}
+        : { explicit: this.relayProtocolVersionOverride }),
+      ...(config.relayProtocolVersion === undefined
+        ? {}
+        : { persisted: config.relayProtocolVersion }),
+      env: process.env,
+    });
     const diagnostics = inspectEnvironmentDiagnostics({
       cwd: config.cwd,
       environment: "service",
@@ -121,7 +134,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       const bridge = new CompanionRelayBridgeV11({
         deviceId: config.deviceId,
         pairingToken: credential,
-        protocolVersion: this.relayProtocolVersion,
+        protocolVersion: relayProtocolVersion,
         workspaces,
       });
       const requestPolicy = createP0RemoteRequestPolicy(config.workspaceId);
