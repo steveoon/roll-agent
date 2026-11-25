@@ -142,6 +142,7 @@ jobs:
     uses: ./.github/workflows/distribution.yml
     permissions:
       contents: read
+      actions: read
     secrets:
       ROLL_DIST_SSH_HOST: ${{ secrets.ROLL_DIST_SSH_HOST }}
       ROLL_DIST_SSH_USER: ${{ secrets.ROLL_DIST_SSH_USER }}

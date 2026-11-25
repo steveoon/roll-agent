@@ -40,7 +40,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read
     outputs:
+      publication_id: ${{ steps.recovery.outputs.publication_id }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.source.outputs.version }}
     steps:
@@ -58,8 +60,30 @@ jobs:
           ROLL_DISTRIBUTION_PUBLISH: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.publish == true) }}
         run: node scripts/distribution/resolve-source.mjs
 
+      - id: recovery
+        name: Find the accepted artifact from the original release
+        if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.publish == true) && steps.source.outputs.source_sha != github.sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          # Only a push on main to the exact Core release commit can supply recovery bytes.
+          run_id=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs" \
+            -f branch=main -f event=push -f head_sha="$SOURCE_SHA" \
+            --jq '.workflow_runs | map(select(.status == "completed" and .head_repository.id == .repository.id)) | first | .id // empty')
+          if [[ -n "$run_id" ]]; then
+            artifact_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=standalone-publication" \
+              --jq '.artifacts | map(select(.name == "standalone-publication" and .expired == false)) | first | .id // empty')
+            if [[ -n "$artifact_id" ]]; then
+              echo "Reusing accepted publication artifact $artifact_id from release run $run_id"
+              echo "publication_id=$artifact_id" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   build:
     needs: resolve_source
+    if: needs.resolve_source.outputs.publication_id == ''
     permissions:
       contents: read
     strategy:
@@ -158,6 +182,8 @@ jobs:
           }
 
   assemble:
+    outputs:
+      publication_id: ${{ steps.publication.outputs.artifact-id }}
     needs: [resolve_source, build]
     runs-on: ubuntu-24.04
     permissions:
@@ -180,7 +206,8 @@ jobs:
         run: |
           version=$(node -p "JSON.parse(require('fs').readFileSync('packages/core/package.json')).version")
           node scripts/distribution/prepare-publication.mjs publication "$version"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - id: publication
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: standalone-publication
           path: publication/*
@@ -190,27 +217,38 @@ jobs:
 
   deploy:
     needs: [resolve_source, assemble]
-    if: github.ref == 'refs/heads/main' && vars.ROLL_DISTRIBUTION_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish == true)
+    if: >-
+      !cancelled() && needs.resolve_source.result == 'success' &&
+      (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.resolve_source.outputs.publication_id != '')) &&
+      github.ref == 'refs/heads/main' && vars.ROLL_DISTRIBUTION_ENABLED == 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish == true)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: ${{ needs.resolve_source.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          sparse-checkout: scripts/distribution
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          name: standalone-publication
-          path: publication
-      - name: Upload verified artifacts and atomically publish stable
+          ref: ${{ needs.resolve_source.outputs.source_sha }}
+          path: release-source
+          persist-credentials: false
+          sparse-checkout: scripts/distribution
+      - name: Pull verified release artifacts and atomically publish stable
         timeout-minutes: 15
         env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.resolve_source.outputs.version }}
+          ARTIFACT_ID: ${{ needs.resolve_source.outputs.publication_id || needs.assemble.outputs.publication_id }}
           ROLL_DIST_SSH_HOST: ${{ secrets.ROLL_DIST_SSH_HOST }}
           ROLL_DIST_SSH_USER: ${{ secrets.ROLL_DIST_SSH_USER }}
           ROLL_DIST_SSH_KEY: ${{ secrets.ROLL_DIST_SSH_KEY }}
           ROLL_DIST_SSH_KNOWN_HOSTS: ${{ secrets.ROLL_DIST_SSH_KNOWN_HOSTS }}
           ROLL_DIST_SSH_PORT: ${{ secrets.ROLL_DIST_SSH_PORT }}
           ROLL_DIST_ROOT: ${{ secrets.ROLL_DIST_ROOT }}
-        run: bash scripts/distribution/upload.sh publication
+        run: bash scripts/distribution/upload.sh "$RELEASE_VERSION" "$ARTIFACT_ID" release-source/scripts/distribution/finalize.sh

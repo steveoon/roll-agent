@@ -25,7 +25,7 @@ node scripts/distribution/build.mjs /tmp/roll-assets
 
 在管理员会话中核对目标 HTTPS server，保留现有网站反向代理、证书和安全响应头。服务器主机名、SSH 别名、端口、用户名、真实目录及备份位置只记录在仓库之外的私有运维记录中，不写入公开文档、测试或 PR 正文。
 
-由管理员选择专用发行根目录，并通过私有配置提供 `ROLL_DIST_ROOT`。它必须是规范的绝对路径，至少包含两级目录，路径组件只能含 ASCII 字母、数字、下划线、连字符和非前导点；不接受空格、相对路径、`.` / `..`、重复斜杠或符号链接路径。根目录内预先创建 `staging` 和 `releases`，并写入内容为 `roll-distribution-v1` 的 `.roll-distribution-root` 标记文件。专用非 root 用户只需该发行区域的写权限，不需要网站配置、证书或 sudo 权限。Nginx 用户需要读取发行文件及遍历目录的权限；staging 不应公开。服务器运行发布脚本只需 SSH/SFTP、POSIX shell 及 GNU coreutils/find/diff/awk。
+由管理员选择专用发行根目录，并通过私有配置提供 `ROLL_DIST_ROOT`。它必须是规范的绝对路径，至少包含两级目录，路径组件只能含 ASCII 字母、数字、下划线、连字符和非前导点；不接受空格、相对路径、`.` / `..`、重复斜杠或符号链接路径。根目录内预先创建 `staging` 和 `releases`，并写入内容为 `roll-distribution-v1` 的 `.roll-distribution-root` 标记文件。专用非 root 用户只需该发行区域的写权限，不需要网站配置、证书或 sudo 权限。Nginx 用户需要读取发行文件及遍历目录的权限；staging 不应公开。服务器运行发布脚本只需 SSH、Python 3.8+ 标准库与 HTTPS 出站访问、POSIX shell 及 GNU coreutils/find/diff/awk。
 
 `scripts/distribution/nginx.conf` 是模板，不能直接 include。先在有 Node 的管理员工作站从私有配置加载 `ROLL_DIST_ROOT`，然后生成仓库之外的配置文件：
 
@@ -54,11 +54,11 @@ node scripts/distribution/render-nginx.mjs /path/outside/checkout/distribution.c
 
 `release.yml` 在 npm OIDC 发布成功后查询当前 Core 版本的六平台 manifest：404 才请求构建，完整有效则跳过。判断不依赖本次提交是否改变版本号，因此 release 首次失败后，后续同版本的测试修复或文档提交也能补齐缺失发行包。已发布版本不会因普通 main 提交或工作流重试而重复构建；非 404 HTTP 错误、超时和不完整 manifest 都使门禁失败，不覆盖未知或损坏的发行状态。
 
-自动分发等待 GitHub Release job 完成，确保 `@roll-agent/core@<version>` 标签已经创建。`distribution.yml` 的 `resolve_source` job 将该标签解析为固定 commit SHA，验证它属于当前 workflow commit 的祖先，且标签内 Core 的包名与版本正确。正式发布的六平台构建、assemble 和 deploy 都检出同一个 SHA，避免将较新 main 上未发布的代码装进旧版本。标签缺失或不匹配时发布失败，不回退到当前 main。普通分支验证和 `publish=false` 的手动运行继续构建 workflow 的 HEAD。
+自动分发等待 GitHub Release job 完成，确保 `@roll-agent/core@<version>` 标签已经创建。`distribution.yml` 的 `resolve_source` job 将该标签解析为固定 commit SHA，验证它属于当前 workflow commit 的祖先，且标签内 Core 的包名与版本正确。正式发布的六平台构建、assemble 和最终激活脚本都使用这个 SHA，避免将较新 main 上未发布的代码装进旧版本。标签缺失或不匹配时发布失败，不回退到当前 main。普通分支验证和 `publish=false` 的手动运行继续构建 workflow 的 HEAD。
 
 同版本补发可在 `main` 上手动运行 `distribution.yml` 并选择 `publish=true`；它同样使用 Core 发布标签的源码，无需再次提升版本或发布 npm。仓库发布开关仍需为 `ROLL_DISTRIBUTION_ENABLED=true`。构建 job 没有 SSH credentials；assemble job 校验六个平台后上传完整 publication artifact；只有最后的 deploy step 读取 SSH secrets，且不安装依赖或执行构建。
 
-CI 上传到唯一 `staging/<run-id>-<attempt>`。`finalize.sh` 在服务器取得互斥目录锁，拒绝链接、未知文件数量和非法路径，核对所有 SHA-256 及平台 TSV，再把完整目录移入 `releases/<version>`。最后原子替换 `releases/stable` 符号链接，脚本、manifest 和平台索引同时切换。过期 CI 运行不能降级 stable。
+发行服务器下载至本次部署专用的 `staging/<run-id>-<attempt>`。`finalize.sh` 在服务器取得互斥目录锁，拒绝链接、未知文件数量和非法路径，核对所有 SHA-256 及平台 TSV，再把完整目录移入 `releases/<version>`。最后原子替换 `releases/stable` 符号链接，脚本、manifest 和平台索引同时切换。过期 CI 运行不能降级 stable。
 
 发布后的路径为：
 
@@ -74,19 +74,13 @@ CI 上传到唯一 `staging/<run-id>-<attempt>`。`finalize.sh` 在服务器取�
 
 六平台构建失败不会移动 stable。相同版本再次上传必须逐文件相同，校验一致后删除本次重复 staging；失败 staging 保留供排查。不同 commit 或工具链产生不同资产应提升 Core 版本。失败 staging 目录保留供排查，不能把不完整 staging 指向 stable。只有确认没有发布进程后，运维才可以移除遗留 `.publish-lock`；CI 不自动打破未知锁，也不清理旧发行版本。
 
-### CI 慢上传与重试
+### CI 下载与发布恢复
 
-`deploy` job 总时限为 20 分钟；其中“上传、远端校验及发布”step 总时限为 15 分钟。SSH/SCP 使用 15 秒建连超时、一次连接尝试，以及 `ServerAliveInterval=15` / `ServerAliveCountMax=3` 的失联检测。存活检测不能识别持续慢传输，后者由 step 总时限兜底；这些限制由 CI 执行，本地直接运行上传脚本不具备 Actions 的总时限。
+六个平台通过原生验收后，assemble 上传 `standalone-publication`，将不可变 artifact ID 交给 deploy。部署工具来自本次 workflow 的固定提交。Runner 通过只读 Actions API 获取该 artifact 的大小、SHA-256 和短期 HTTPS 下载地址，使用已校验主机密钥的 SSH 连接将下载地址通过标准输入交给专用发行用户。GitHub token 只在 runner 上使用。
 
-上传脚本分别记录本地校验、staging 就绪及待传输总字节数、上传结束、远端校验与发布完成。SCP 运行期间每约 30 秒输出已耗时；这只代表本地上传进程仍在运行，不是字节进度、吞吐或远端已接收证明。上传失败不会执行 finalizer；中断时尽力停止受管的本地 SCP 子进程并移除临时密钥，不自动删除远端 staging。
+发行服务器在本次 run/attempt 的 staging 目录直接下载。日志显示已收字节、总量和平均速率。连接中断、30 秒无数据、临时 HTTP 错误或截断会重新申请下载地址，从头重试，最多三次。完整 ZIP 的大小和 SHA-256 校验通过后才解包；最终由 Core 发布标签上的 `finalize.sh` 检查各文件及六个平台索引，再原子切换 stable。摘要错误立即中止。部署 step 限时 15 分钟，job 限时 20 分钟。
 
-遇到异常慢上传或网络超时：
-
-1. 等待旧 job 结束，确认服务器旧 SSH/SFTP 上传进程已经退出；若中断发生在最终发布阶段，先检查版本目录、stable 和锁的实际状态，不能仅凭 CI 失败认定未发布。
-2. 在完整 publication artifact 尚未过期时，仅重跑 `deploy` job，复用已构建产物；不要重跑 npm 发布或整套六平台构建。当前该 artifact 保留 3 天。重跑会使用新 Runner 和新的 attempt staging；没有同一 Runner 内自动循环重试。
-3. 新部署及线上版本验证成功后，确认旧 staging 无进程使用，再定向清理那一次尝试的目录。不要自动清空 staging、旧版本或打破未知 `.publish-lock`。
-
-`upload.sh` 与其他发布脚本一样来自固定 Core 发布标签。脚本优化要等包含该修改的后续 Core 版本发布才生效；直接重跑旧 run 不会自动采用新上传脚本或新版 workflow 的超时设置。
+同一工作流可只重跑失败的 deploy，复用已通过验收的 artifact。在更新部署工具后，使用新 main 上的 `distribution.yml` 并指定 `publish=true`。流程优先复用该 Core 发布提交对应的 main push Release run 中仍有效的 publication artifact；过期或缺失时重新按发布标签构建。保留期为 3 天。发布失败后保留对应 staging 供诊断，仅在确认旧进程退出后定向清理。
 
 ## 用户升级与慢速下载
 
