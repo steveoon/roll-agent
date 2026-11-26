@@ -1,5 +1,13 @@
 # @roll-agent/core
 
+## 2.2.1
+
+### Patch Changes
+
+- [#332](https://github.com/steveoon/roll-agent/pull/332) [`9e887aa`](https://github.com/steveoon/roll-agent/commit/9e887aa621dda6e97ee1862a1ac0320f55e8eaaa) Thanks [@steveoon](https://github.com/steveoon)! - 修复 Windows 上通过 Microsoft Store 安装 PowerShell 7 后，Roll 可能跳过注册 Shell 工具的问题。`roll update` 遇到托管 Agent 占用时会区分服务进程和持有会话的 PID，生命周期锁冲突和停止超时也会显示已知的进程 PID。
+- Updated dependencies [[`9e887aa`](https://github.com/steveoon/roll-agent/commit/9e887aa621dda6e97ee1862a1ac0320f55e8eaaa)]:
+  - @roll-agent/runtime@1.8.1
+
 ## 2.2.0
 
 ### Minor Changes
