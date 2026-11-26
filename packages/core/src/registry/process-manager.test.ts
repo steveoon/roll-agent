@@ -358,7 +358,12 @@ describe("stopAgentGracefully", () => {
     writePid(dataDir, agent.skill.name, 2_147_483_647);
     const lock = acquireAgentLifecycleLock(dataDir, agent.skill.name);
     try {
-      await assert.rejects(stopAgentGracefully(dataDir, agent.skill.name), AgentLifecycleBusyError);
+      await assert.rejects(
+        stopAgentGracefully(dataDir, agent.skill.name),
+        (error: unknown) =>
+          error instanceof AgentLifecycleBusyError &&
+          error.message.includes(`持有进程 PID ${String(process.pid)}）`),
+      );
     } finally {
       lock.release();
       rmSync(dataDir, { recursive: true, force: true });

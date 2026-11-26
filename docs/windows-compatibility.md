@@ -43,8 +43,9 @@ Authenticode 签名的 x64 MSI 是 GA 门槛，当前仓库尚未产出该签名
 - PowerShell 5.1 / cmd 里给 `roll run` 传 JSON 用 `--input-file`，不要用单引号
   `--input-json '{...}'`（cmd 不认单引号、PS 5.1 会剥引号）；PowerShell 7.3+ 单引号可用
 - `roll chat` 内建 shell 工具使用 `runtime.shell` 配置：macOS/Linux 注册 `roll__bash`，
-  Windows 原生只在检测到 PowerShell 7+ (`pwsh`) 时注册 `roll__powershell`；探测会覆盖 PATH 与
-  标准 Program Files 安装路径，未安装时可运行 `winget install Microsoft.PowerShell`。设置
+  Windows 原生只在检测到 PowerShell 7+ (`pwsh`) 时注册 `roll__powershell`。Roll 会依次检查 PATH、
+  标准 Program Files 安装路径和当前用户的 Microsoft Store 启动别名。未安装时可运行
+  `winget install Microsoft.PowerShell`。设置
   `runtime.shell.session.enabled: true` 后，交互 REPL 与 `--server` 长驻模式还会注册
   `roll__exec_command`、`roll__exec_poll`、`roll__exec_list`；后台命令可跨聊天轮次继续运行。
   PowerShell 命令当前全部按 unknown 处理，默认逐条确认；显式

@@ -61,7 +61,8 @@ roll update
 
 执行 `roll update` 时还需注意以下行为边界：
 
-- 对于**正在运行的 `core-managed` HTTP Agent**，`roll update` 会自动停止旧进程、启动新进程并重新探活。
+- 若仍有会话在使用托管 Agent，更新会列出持有会话的 PID；能核验 Agent 服务进程时也会显示其 PID。先退出列出的会话，再重试更新。如果另一个启动或停止操作持有生命周期锁，提示中会显示可读取的锁持有者 PID。
+- 对于空闲且以常驻方式启动的 `core-managed` HTTP Agent，`roll update` 会自动停止旧进程、启动新进程并重新探活。
 - 对于 **`external-managed` HTTP 服务**，`roll update` 只刷新注册表元数据并检查连通性，不会接管或重启外部进程。
 - 若 `roll update` 提示本地 `roll.config.yaml` 需要迁移，请先执行配置迁移再继续验证：
 

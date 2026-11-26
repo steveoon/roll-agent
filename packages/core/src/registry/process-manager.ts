@@ -66,8 +66,9 @@ const agentLifecycleLockStates = new WeakMap<AgentLifecycleLock, AgentLifecycleL
 export class AgentLifecycleBusyError extends Error {
   readonly code = "agent_lifecycle_busy" as const;
 
-  constructor(agentName: string) {
-    super(`Agent "${agentName}" 正在执行另一项生命周期操作，请稍后重试。`);
+  constructor(agentName: string, lockPid?: number) {
+    const owner = lockPid === undefined ? "" : `（锁记录的持有进程 PID ${String(lockPid)}）`;
+    super(`Agent "${agentName}" 正在执行另一项生命周期操作${owner}，请稍后重试。`);
     this.name = "AgentLifecycleBusyError";
   }
 }
@@ -689,7 +690,7 @@ async function stopAgentGracefullyUnlocked(
     await sleep(intervalMs);
   }
 
-  throw new Error(`Agent "${agentName}" did not stop within ${timeoutMs}ms`);
+  throw new Error(`Agent "${agentName}" (PID ${String(pid)}) did not stop within ${timeoutMs}ms`);
 }
 
 export function readVerifiedAgentRuntimeIdentity(
@@ -857,7 +858,7 @@ export function acquireAgentLifecycleLock(dataDir: string, agentName: string): A
     } catch (error) {
       if (!isErrnoCode(error, "EEXIST")) throw error;
       if (attempt === 0 && removeStaleAgentLifecycleLock(lockPath)) continue;
-      throw new AgentLifecycleBusyError(agentName);
+      throw new AgentLifecycleBusyError(agentName, readAgentLifecycleLockFile(lockPath)?.pid);
     }
   }
 
@@ -927,8 +928,11 @@ function removeStaleAgentLifecycleLock(lockPath: string): boolean {
 }
 
 function readAgentLifecycleLockFile(lockPath: string): AgentLifecycleLockFile | undefined {
-  if (!existsSync(lockPath)) return undefined;
-  return parseAgentLifecycleLockFile(readFileSync(lockPath, "utf-8"));
+  try {
+    return parseAgentLifecycleLockFile(readFileSync(lockPath, "utf-8"));
+  } catch {
+    return undefined;
+  }
 }
 
 function parseAgentLifecycleLockFile(raw: string): AgentLifecycleLockFile | undefined {
