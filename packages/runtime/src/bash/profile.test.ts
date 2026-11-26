@@ -234,30 +234,26 @@ test("resolveShellProfile 在 win32 + pwsh 7 返回 PowerShell profile", () => {
   assert.equal(spec.options.detached, false);
 });
 
-test("resolveShellProfile 在 PATH 未命中时尝试 Program Files PowerShell 7", () => {
-  const standardInstall = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
-  const calls: string[] = [];
-  const fakeSpawnSync = ((file: string) => {
-    calls.push(file);
-    if (file === standardInstall) {
-      return spawnSyncResult("7\n");
-    }
-    return spawnSyncResult("", new Error("ENOENT"));
-  }) as typeof import("node:child_process").spawnSync;
-
-  const result = resolveWindowsProfile({
-    env: { ProgramFiles: "C:\\Program Files", SystemRoot: SYSTEM_ROOT },
-    fileExists: (path) => path === standardInstall,
-    spawnSync: fakeSpawnSync,
+for (const [variable, root, suffix] of [
+  ["ProgramFiles", "C:\\Program Files", "PowerShell\\7\\pwsh.exe"],
+  ["LOCALAPPDATA", "C:\\Users\\roll\\AppData\\Local", "Microsoft\\WindowsApps\\pwsh.exe"],
+] as const) {
+  test(`PATH 未命中时从 ${variable} 定位 PowerShell 7`, () => {
+    const executable = `${root}\\${suffix}`;
+    const calls: string[] = [];
+    const result = resolveWindowsProfile({
+      env: { [variable]: root, Path: SYSTEM_ROOT },
+      fileExists: (candidate) => candidate === executable,
+      spawnSync: ((file: string) => {
+        calls.push(file);
+        return spawnSyncResult("7\n");
+      }) as typeof import("node:child_process").spawnSync,
+    });
+    assert.ok(result.supported);
+    assert.deepEqual(calls, [executable]);
+    assert.equal(result.profile.buildSpawn("Get-Location", "C:\\", {}).file, executable);
   });
-
-  assert.equal(result.supported, true);
-  if (!result.supported) {
-    return;
-  }
-  assert.deepEqual(calls, [standardInstall]);
-  assert.equal(result.profile.buildSpawn("Write-Output hi", "C:\\repo", {}).file, standardInstall);
-});
+}
 
 test("PowerShell 解析跳过 cwd/相对 PATH，并按 Windows 语义去重绝对候选", () => {
   const calls: string[] = [];

@@ -147,7 +147,8 @@ Provides a single ping tool for lifecycle smoke tests after update.
         `roll update should fail while a chat lease is active\nstdout:\n${blockedUpdate.stdout}\nstderr:\n${blockedUpdate.stderr}\n${chatDiagnostics()}`,
       );
       assert.match(blockedUpdate.stderr, /尚未修改软件包或注册数据/u);
-      assert.match(blockedUpdate.stderr, /正被其他 Roll 进程使用|chat/u);
+      assert.ok(blockedUpdate.stderr.includes(`Agent 服务进程 PID ${originalPid}\n`));
+      assert.ok(blockedUpdate.stderr.includes(`活动 chat，PID ${String(second.child.pid)}，`));
       assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), originalPid, chatDiagnostics());
 
       const listWhileBlocked = runRoll(["agent", "list", "--json"], workspace, { env: rollEnv });

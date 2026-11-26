@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBashCommand, type RunBashOptions } from "./exec.ts";
@@ -30,6 +31,28 @@ function opts(overrides: Partial<RunBashOptions> & { command: string }): RunBash
 function psQuote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
+
+test("Windows Store 用户启动别名能注册并运行 PowerShell 工具", { skip }, async (t) => {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return t.skip("当前用户未设置 LOCALAPPDATA");
+  const alias = join(localAppData, "Microsoft", "WindowsApps", "pwsh.exe");
+  const version = spawnSync(alias, ["--version"], { encoding: "utf8", timeout: 5000 });
+  if (version.error && "code" in version.error && version.error.code === "ENOENT") {
+    return t.skip("当前用户未安装 Store 启动别名");
+  }
+  assert.equal(version.status, 0, version.error?.message ?? version.stderr);
+  const resolved = resolveShellProfile({ platform: "win32", env: { LOCALAPPDATA: localAppData } });
+  assert.ok(resolved.supported);
+  const result = await runBashCommand({
+    workdir: tmpdir(),
+    timeoutMs: 15_000,
+    maxCaptureBytes: MB,
+    profile: resolved.profile,
+    command: "$PSVersionTable.PSVersion.Major",
+  });
+  assert.equal(result.exitCode, 0);
+  assert.ok(Number(result.stdout.text.trim()) >= 7);
+});
 
 test("PowerShell one-shot: Write-Output 输出 stdout", { skip }, async () => {
   const result = await runBashCommand(opts({ command: "Write-Output 'hello'" }));

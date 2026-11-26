@@ -208,8 +208,8 @@ export class AgentUsageBusyError extends Error {
   readonly agentName: string;
   readonly blockers: readonly AgentUsageBlocker[];
 
-  constructor(agentName: string, blockers: readonly AgentUsageBlocker[]) {
-    super(formatAgentUsageBusyMessage(agentName, blockers));
+  constructor(agentName: string, blockers: readonly AgentUsageBlocker[], runtimePid?: number) {
+    super(formatAgentUsageBusyMessage(agentName, blockers, runtimePid));
     this.name = "AgentUsageBusyError";
     this.agentName = agentName;
     this.blockers = blockers;
@@ -479,7 +479,11 @@ export async function acquireAgentUsageMaintenanceGuard(
   try {
     const inspection = await inspectAgentUsage(agent, dataDir, { lifecycleLock });
     if (inspection.blockers.length > 0) {
-      throw new AgentUsageBusyError(agent.skill.name, inspection.blockers);
+      throw new AgentUsageBusyError(
+        agent.skill.name,
+        inspection.blockers,
+        inspection.runtime?.identity.pid,
+      );
     }
     let released = false;
     return {
@@ -1123,6 +1127,7 @@ function randomRetryDelayMs(): number {
 function formatAgentUsageBusyMessage(
   agentName: string,
   blockers: readonly AgentUsageBlocker[],
+  runtimePid?: number,
 ): string {
   const details = blockers.map((blocker) => {
     if (blocker.kind === "invalid") {
@@ -1139,6 +1144,7 @@ function formatAgentUsageBusyMessage(
     : "请关闭相关 roll chat/命令后重试。";
   return [
     `Agent "${agentName}" 正被其他 Roll 进程使用，已拒绝生命周期操作。`,
+    ...(runtimePid === undefined ? [] : [`  Agent 服务进程 PID ${String(runtimePid)}`]),
     ...details,
     recovery,
   ].join("\n");

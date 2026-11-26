@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { win32 as pathWin32 } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { CommandClassification } from "../types/command-classification.ts";
@@ -373,6 +373,13 @@ function powerShellExecutableCandidates(deps: ShellProfileResolutionDeps): reado
     }
     addCandidate(pathWin32.join(root, ...POWERSHELL_STANDARD_INSTALL_SUBPATH));
   }
+  const localAppData = getWindowsEnvValue(deps.env, "LocalAppData");
+  if (localAppData !== undefined) {
+    const root = unwrapWindowsPathEntry(localAppData);
+    if (isFullyQualifiedWindowsPath(root)) {
+      addCandidate(pathWin32.join(root, "Microsoft", "WindowsApps", "pwsh.exe"));
+    }
+  }
   return candidates;
 }
 
@@ -408,11 +415,21 @@ function detectPowerShellMajorVersion(
   return Number.isFinite(major) ? major : undefined;
 }
 
+function windowsExecutableEntryExists(executable: string): boolean {
+  try {
+    // Store execution aliases are launchable reparse points. Following one with
+    // existsSync/statSync can return EACCES even when CreateProcess succeeds.
+    return lstatSync(executable, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 function resolvePowerShellExecutable(
   deps: ShellProfileResolutionDeps,
   spawnSyncImpl: typeof spawnSync,
 ): PowerShellExecutableResolution {
-  const fileExists = deps.fileExists ?? existsSync;
+  const fileExists = deps.fileExists ?? windowsExecutableEntryExists;
   const now = deps.now ?? (() => performance.now());
   const deadline = now() + POWERSHELL_VERSION_PROBE_TIMEOUT_MS;
   let sawUnsupportedVersion = false;
